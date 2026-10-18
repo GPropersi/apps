@@ -1,0 +1,3 @@
+# Exact `<path> <rule>` pairs the public-hygiene check may ignore. One per line, no wildcards.
+# Every entry needs a reason in the PR that adds it. Rules: github-token github-pat aws-key
+# slack-token private-key tailnet-name ssh-url ipv4 tracked-env tracked-key-file
