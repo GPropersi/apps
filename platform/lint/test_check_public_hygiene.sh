@@ -174,5 +174,5 @@ mkdir -p "$repo/platform/lint"; printf 'a.txt github-token\n' > "$repo/platform/
 git -C "$repo" add platform/lint/hygiene-allow.txt; run_raw --root "$repo"
 expect_rc "default allowlist path is used" 0
 
-echo "hygiene tests:$passed passed, $failed failed"
+echo "hygiene tests: $passed passed, $failed failed"
 [ "$failed" -eq 0 ]
