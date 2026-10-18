@@ -6,7 +6,7 @@ Design and phases live in the stronghold: `~/code/plans/stronghold/open/app-host
 
 ## Public repo rules (read before every commit)
 
-- **Public repo: no secrets, tokens, keys, personal data, IP addresses, tailnet names or `ssh://` URLs, ever.**
+- **Public repo: no secrets, tokens, keys, personal data, IP addresses, tailnet names or ssh-scheme URLs, ever.**
   Credentials live in host-side files and repo secrets. `make lint` enforces this; fix the leak, do not
   allowlist it, unless the value is genuinely public.
 - Workflows never use `pull_request_target`; deploy jobs run only on `push` to `main`

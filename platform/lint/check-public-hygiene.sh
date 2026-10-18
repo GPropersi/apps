@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # check-public-hygiene.sh — fail when a tracked file looks like it leaks a secret or personal data.
 #
-# This repo is PUBLIC: no secrets, tokens, keys, tailnet names, ssh:// URLs or IP addresses, ever.
+# This repo is PUBLIC: no secrets, tokens, keys, tailnet names, ssh-scheme URLs or IP addresses, ever.
 # Scans every tracked text file (git ls-files) and reports `FAIL <file>[:<line>] <rule>`; it never
 # prints the matched text, so a leak is not copied into CI logs. Exit 1 on any finding.
 #

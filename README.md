@@ -19,7 +19,7 @@ This repository is **public**. Treat everything committed here as visible to the
 
 - No secrets, tokens, keys, passwords or personal data, ever. Credentials live in host-side files
   and repo secrets, never in the tree.
-- No IP addresses, tailnet names or `ssh://` URLs. `make lint` fails on them (see
+- No IP addresses, tailnet names or ssh-scheme URLs. `make lint` fails on them (see
   `platform/lint/check-public-hygiene.sh`); an exception needs an exact entry in
   `platform/lint/hygiene-allow.txt` and a reason in the PR.
 - Changes reach `main` only through a reviewed pull request with a green `ci` check.
