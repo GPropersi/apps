@@ -23,10 +23,10 @@ Design and phases live in the stronghold: `~/code/plans/stronghold/open/app-host
 - **Plans store (central):** `~/code/plans/apps/{open,completed,research}/<topic>/`
 - **Plans bucket:** `apps`
 - **Push gate:** (suites a push must pass; first matching row wins per changed path, all matched suites run sequentially; each app adds its own `apps/<name>/**` row above the catch-all when it lands)
-  | Paths (space-separated globs)  | Command                                             |
-  | ------------------------------ | --------------------------------------------------- |
-  | `README.md docs/** .claude/**` | na docs and skill text only, no code or build input |
-  | `**`                           | `make lint && make test`                            |
+  | Paths (space-separated globs)               | Command                                             |
+  | ------------------------------------------- | --------------------------------------------------- |
+  | `README.md **/README.md docs/** .claude/**` | na docs and skill text only, no code or build input |
+  | `**`                                        | `make lint && make test`                            |
 - **Bot identity:** `gpropersi-claude[bot]` `141576524+gpropersi-claude[bot]@users.noreply.github.com`
 - **Bot push script:** `~/code/.claude/scripts/gh-app-push.sh` (central, repo-agnostic; derives the repo from `origin`, pushes as the shared bot)
 - **Token generator:** `~/code/.claude/scripts/generate-gh-token.sh` (tracked in the stronghold; the shared `gpropersi-claude` App, installation resolved from the repo owner)

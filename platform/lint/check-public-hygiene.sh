@@ -15,8 +15,8 @@ root=""
 allow=""
 while [ $# -gt 0 ]; do
   case "$1" in
-    --root) root="${2:?missing value for --root}"; shift 2 ;;
-    --allow) allow="${2:?missing value for --allow}"; shift 2 ;;
+    --root) [ $# -ge 2 ] || { echo "missing value for --root" >&2; exit 2; }; root="$2"; shift 2 ;;
+    --allow) [ $# -ge 2 ] || { echo "missing value for --allow" >&2; exit 2; }; allow="$2"; shift 2 ;;
     -h|--help) sed -n '2,11p' "$0"; exit 0 ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac

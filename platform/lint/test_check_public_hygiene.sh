@@ -32,7 +32,7 @@ run_check() {
 
 expect_fail() {
   # $1 label, $2 rule expected in output, $3 seed that must NOT appear in output
-  if [ "$rc" -eq 1 ] && grep -q "$2" <<<"$out" && ! grep -qF -- "$3" <<<"$out"; then
+  if [ "$rc" -eq 1 ] && grep -qE -- " $2\$" <<<"$out" && ! grep -qF -- "$3" <<<"$out"; then
     passed=$((passed + 1))
   else
     failed=$((failed + 1)); echo "FAIL: $1 (rc=$rc)"; echo "$out"
@@ -87,8 +87,41 @@ expect_fail "tracked .env" tracked-env "X=1"
 new_repo; add_file "$repo" .env.example "X="; run_check
 expect_pass ".env.example passes"
 
-new_repo; add_file "$repo" deploy/id.pem "x"; run_check
-expect_fail "tracked pem" tracked-key-file "zzzz"
+new_repo; seed="pem""body"; add_file "$repo" deploy/id.pem "$seed"; run_check
+expect_fail "tracked pem" tracked-key-file "$seed"
+
+new_repo; seed="key""body"; add_file "$repo" deploy/id.key "$seed"; run_check
+expect_fail "tracked key" tracked-key-file "$seed"
+
+new_repo; add_file "$repo" deploy/.env "X=1"; run_check
+expect_fail "nested .env" tracked-env "X=1"
+
+new_repo; add_file "$repo" deploy/.env.example "X="; add_file "$repo" .env.sample "X="; run_check
+expect_pass "nested .env.example and .env.sample pass"
+
+new_repo; add_file "$repo" .env.local "X=1"; run_check
+expect_fail ".env.local" tracked-env "X=1"
+
+new_repo; seed="8.8.8"".8"; add_file "$repo" a.txt "127.0.0.1 then $seed"; run_check
+expect_fail "loopback mixed with public ip on one line" ipv4 "$seed"
+
+new_repo; seed="gh""p_$pad"; printf '%s\0bin\n' "$seed" > "$repo/bin.dat"; git -C "$repo" add bin.dat; run_check
+expect_pass "binary file is skipped"
+
+new_repo; seed="gh""p_$pad"; add_file "$repo" a.txt $'one\ntwo\n'"$seed"; run_check
+expect_fail "finding reports its line number" github-token "$seed"
+if grep -qxF "FAIL a.txt:3 github-token" <<<"$out"; then
+  passed=$((passed + 1))
+else
+  failed=$((failed + 1)); echo "FAIL: line number 3 not reported"; echo "$out"
+fi
+
+new_repo; seed="gh""p_$pad"; add_file "$repo" a.txt "$seed"; add_file "$repo" b.txt "$seed"; run_check
+if grep -qF "2 finding(s)" <<<"$out"; then
+  passed=$((passed + 1))
+else
+  failed=$((failed + 1)); echo "FAIL: finding count 2 not reported"; echo "$out"
+fi
 
 new_repo; seed="gh""p_$pad"; add_file "$repo" a.txt "$seed"
 printf 'a.txt github-token\n' > "$repo/allow.txt"; run_check
@@ -102,5 +135,44 @@ new_repo; seed="gh""p_$pad"; add_file "$repo" a.txt "$seed"
 printf 'a.txt ssh-url\n* github-token\n' > "$repo/allow.txt"; run_check
 expect_fail "allowlist is not a wildcard and not rule-agnostic" github-token "$seed"
 
-echo "hygiene tests: $passed passed, $failed failed"
+new_repo; seed="gh""p_$pad"; add_file "$repo" a.txt "$seed"
+printf '# a.txt github-token\n\n' > "$repo/allow.txt"; run_check
+expect_fail "allowlist comment and blank lines excuse nothing" github-token "$seed"
+
+new_repo; add_file "$repo" .env "X=1"
+printf '.env tracked-env\n' > "$repo/allow.txt"; run_check
+expect_pass "allowlist excuses tracked-env"
+
+new_repo; seed="8.8.8"".8"; add_file "$repo" a.txt "$seed"
+printf 'a.txt ipv4\n' > "$repo/allow.txt"; run_check
+expect_pass "allowlist excuses ipv4"
+
+# CLI behavior: argument handling and the default allowlist path.
+run_raw() {
+  rc=0
+  out="$("$check" "$@" 2>&1)" || rc=$?
+}
+
+expect_rc() {
+  # $1 label, $2 expected rc
+  if [ "$rc" -eq "$2" ]; then
+    passed=$((passed + 1))
+  else
+    failed=$((failed + 1)); echo "FAIL: $1 (rc=$rc, want $2)"; echo "$out"
+  fi
+}
+
+run_raw --help; expect_rc "--help exits 0" 0
+run_raw --bogus; expect_rc "unknown argument exits 2" 2
+run_raw --root; expect_rc "missing --root value exits nonzero" 2
+
+new_repo; seed="gh""p_$pad"; add_file "$repo" a.txt "$seed"; run_raw --root "$repo"
+expect_fail "no allowlist file: finding still fails" github-token "$seed"
+
+new_repo; seed="gh""p_$pad"; add_file "$repo" a.txt "$seed"
+mkdir -p "$repo/platform/lint"; printf 'a.txt github-token\n' > "$repo/platform/lint/hygiene-allow.txt"
+git -C "$repo" add platform/lint/hygiene-allow.txt; run_raw --root "$repo"
+expect_rc "default allowlist path is used" 0
+
+echo "hygiene tests:$passed passed, $failed failed"
 [ "$failed" -eq 0 ]
