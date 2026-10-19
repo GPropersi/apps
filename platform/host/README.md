@@ -22,7 +22,10 @@ source file, run `make embed`, and `make lint` fails if an embedded copy differs
 - `deploy`: dedicated user in the `docker` group (root-equivalent, accepted), no sudo, locked password. Two
   layers: the forced command in `authorized_keys` (read from the root-owned `/etc/ssh/authorized_keys.d`) and a
   root-owned validating login shell, so it stays safe even if a Tailscale SSH rule later reaches it (Tailscale
-  SSH ignores `authorized_keys` forced commands).
+  SSH ignores `authorized_keys` forced commands). The installer is strict: an existing `deploy` account must
+  have groups exactly `deploy docker` and a nonzero uid, otherwise it refuses. The sshd drop-in pins
+  `PasswordAuthentication no`, `KbdInteractiveAuthentication no`, `AuthenticationMethods publickey` and
+  `AuthorizedKeysCommand none` for the user.
 - `claude`: read-mostly debugging login, **LAN OpenSSH only** with its own key and a forced command. Not in
   `docker` or `sudo`; one sudoers line allows only the root helper. It stays out of every Tailscale `ssh` rule.
 - Containers: app containers carry exactly one label `platform.app=<name>`; infrastructure containers
@@ -105,7 +108,9 @@ file is valid, and the next install drops the port 53 exceptions. Either edit th
 host-base HOST=<alias> ARGS=install` from the stronghold, or restore the pre-egress copy: copy
 `/etc/docker/docker-user.rules.bak` back over `/etc/docker/docker-user.rules`, run `sudo iptables -F DOCKER-USER`
 (a `--noflush` restore does not clear a chain the file declares, so the egress rules would otherwise stay), then load it with `sudo
-iptables-restore --noflush /etc/docker/docker-user.rules` (never restart `docker-user-firewall.service`, docker
+iptables-restore --noflush /etc/docker/docker-user.rules`. Run the flush and the restore back to back (for example
+`sudo iptables -F DOCKER-USER && sudo iptables-restore --noflush /etc/docker/docker-user.rules` on one line): the
+chain is empty between them, so the inbound backstop is briefly absent (never restart `docker-user-firewall.service`, docker
 requires it), and do not re-run `host-base install` afterwards (it would re-render the egress rules). The `.bak` is written only when the rendered rules differ from the live
 file, and an existing `.bak` is never overwritten, so repeated installs keep the first replaced (pre-egress)
 file as the backup.
