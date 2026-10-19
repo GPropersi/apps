@@ -37,13 +37,14 @@ Design and phases live in the stronghold: `~/code/plans/stronghold/open/app-host
   | Purpose | Command |
   |---|---|
   | Help | `make help` |
-  | Lint (public-repo hygiene + shellcheck) | `make lint` |
-  | Tests (hygiene check unit tests) | `make test` |
+  | Lint (public-repo hygiene + embed drift + shellcheck) | `make lint` |
+  | Tests (every `platform/**/test_*.sh`) | `make test` |
+  | Regenerate embedded installer payloads | `make embed` |
 - **GitHub project board:** n/a
 - **Issue labels:** n/a
 - **PR reviewer:** `GPropersi`
 - **Worktree policy:** `build-only`
-- **Worktree allowed targets:** `help, lint, test`
+- **Worktree allowed targets:** `help, lint, test, embed`
 - **Worktree link:** `n/a`
 - **Worktree setup:** `n/a`
 - **Worktree teardown:** `n/a`

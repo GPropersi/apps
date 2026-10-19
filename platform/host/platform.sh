@@ -1,4 +1,4 @@
-#!/usr/bin/env bash
+#!/bin/bash -p
 # platform: the forced-command dispatcher, installed on the app host as /usr/local/bin/platform.
 #
 # The command comes from SSH_ORIGINAL_COMMAND (set by sshd for a forced command), else from "$@".
