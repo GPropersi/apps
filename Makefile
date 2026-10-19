@@ -1,8 +1,13 @@
 .DEFAULT_GOAL := help
-.PHONY: help lint test embed
+.PHONY: help lint test embed host-deploy-user host-claude-access host-verify-egress
+
+# Live-host targets (host-*) stream a script to the app host over SSH. HOST (an ssh alias) is required, with no
+# default alias; ARGS is passed to the script. They are for you to run, never inside a worktree.
+export HOST
+export ARGS
 
 help: ## Show this help
-	@awk 'BEGIN {FS = ":.*## "} /^[a-zA-Z_-]+:.*## / {printf "  %-10s %s\n", $$1, $$2}' $(MAKEFILE_LIST)
+	@awk 'BEGIN {FS = ":.*## "} /^[a-zA-Z_-]+:.*## / {printf "  %-18s %s\n", $$1, $$2}' $(MAKEFILE_LIST)
 
 lint: ## Public-repo hygiene, embedded-payload drift check, shellcheck on tracked *.sh
 	@platform/lint/check-public-hygiene.sh
@@ -16,3 +21,15 @@ test: ## Run every platform/**/test_*.sh (discovered on disk; zero found is an e
 
 embed: ## Regenerate the payloads embedded in platform/host/install-*.sh from their tracked sources
 	@platform/lint/embed-payloads.sh
+
+host-deploy-user: ## LIVE: deploy identity installer (HOST=<alias> ARGS="install --pubkey-file PATH"; default status)
+	@[ -n "$$HOST" ] || { echo 'usage: make host-deploy-user HOST=<ssh-alias> [ARGS="install --pubkey-file PATH | status | verify"]' >&2; exit 2; }
+	@platform/host/install-deploy-user.sh $${ARGS:-status} --host "$$HOST"
+
+host-claude-access: ## LIVE: claude identity installer (HOST=<alias> ARGS="install --pubkey-file PATH"; default status)
+	@[ -n "$$HOST" ] || { echo 'usage: make host-claude-access HOST=<ssh-alias> [ARGS="install --pubkey-file PATH | status | verify"]' >&2; exit 2; }
+	@platform/host/install-claude-access.sh $${ARGS:-status} --host "$$HOST"
+
+host-verify-egress: ## LIVE: read-only egress check (HOST=<alias> [ARGS="--probe"])
+	@[ -n "$$HOST" ] || { echo 'usage: make host-verify-egress HOST=<ssh-alias> [ARGS="--probe | --probe-inbound"]' >&2; exit 2; }
+	@platform/host/verify-egress.sh $$ARGS --host "$$HOST"
