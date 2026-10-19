@@ -4,7 +4,8 @@
 # (labelled app containers, an exited one, several for one app, unlabelled infrastructure) and applies the
 # --filter label=... semantics, so scope and label matching are exercised, not assumed.
 # No address literals: the hygiene check flags them. SC1091: lib.sh is sourced by relative path.
-# shellcheck disable=SC1091,SC2016
+# SC2154: rc and out are set by run_cmd in lib.sh.
+# shellcheck disable=SC1091,SC2016,SC2154
 set -uo pipefail
 
 here="$(cd "$(dirname "$0")" && pwd)"

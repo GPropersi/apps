@@ -3,7 +3,8 @@
 # before any script or ssh runs. ssh is stubbed on PATH and its call log is asserted empty, so nothing touches a host.
 # Targets are discovered from the Makefile, so a new host-* target is covered automatically.
 # SC1091: lib.sh is sourced by relative path. SC2154: rc and out are set by run_cmd from lib.sh.
-# shellcheck disable=SC1091,SC2154
+# SC2016: the make recipe text is matched literally, so it is single-quoted on purpose.
+# shellcheck disable=SC1091,SC2016,SC2154
 set -uo pipefail
 
 here="$(cd "$(dirname "$0")" && pwd)"

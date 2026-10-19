@@ -518,7 +518,7 @@ good_key_case "sk-ssh-ed25519" "sk-ssh-ed25519@openssh.com AAAAGnNrLXNzaC1lZDI1N
 good_key_case "sk-ecdsa" "sk-ecdsa-sha2-nistp256@openssh.com AAAAInNrLWVjZHNhLXNoYTItbmlzdHAyNTZAb3BlbnNzaC5jb20="
 
 # Accepted from= values include the punctuation / ? and :
-for from_ok in '10.0.0.0/8' 'host?.example' 'fe80::1' 'a.example,!b.example'; do
+for from_ok in 'lan.example/24''host?.example' 'fe80::1' 'a.example,!b.example'; do
   fresh
   inst install --pubkey-file "$T_TMP/key.pub" --from "$from_ok"
   expect_rc "accepted from=: $from_ok" 0
