@@ -11,9 +11,11 @@ export ARGS
 help: ## Show this help
 	@awk 'BEGIN {FS = ":.*## "} /^[a-zA-Z_-]+:.*## / {printf "  %-18s %s\n", $$1, $$2}' $(MAKEFILE_LIST)
 
-lint: ## Public-repo hygiene, embedded-payload drift check, shellcheck on tracked *.sh
+lint: ## Public-repo hygiene, embedded-payload drift check, shellcheck (pinned version) on tracked *.sh
 	@platform/lint/check-public-hygiene.sh
 	@platform/lint/embed-payloads.sh --check
+	@want=$$(cat platform/lint/SHELLCHECK_VERSION); have=$$(shellcheck --version 2>/dev/null | sed -n 's/^version: //p'); \
+	[ "$$have" = "$$want" ] || { echo "lint: shellcheck $$want required (platform/lint/SHELLCHECK_VERSION), found $${have:-none}" >&2; exit 1; }
 	@git ls-files -z -- '*.sh' | xargs -0 -r shellcheck
 
 test: ## Run every platform/**/test_*.sh (discovered on disk; zero found is an error)
