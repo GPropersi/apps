@@ -396,6 +396,7 @@ bad_deny "trailing space on a comment" "# note \n$DENY\n" "trailing whitespace"
 bad_deny "duplicate line" "$DENY\n$DENY\n" "duplicate line"
 bad_deny "IPv6" "fe80::/10\n" "not a canonical IPv4 CIDR"
 bad_deny "octet out of range" "$(t_ip4 300 0 0 0)/8\n" "octet out of range"
+bad_deny "octet 256 out of range" "$(t_ip4 10 256 0 0)/16\n" "octet out of range"
 reset; rm -f "$DENY_FILE"; run_v
 expect_rc "deny file missing" 1
 expect_out_has "missing deny file named" "missing"
@@ -430,6 +431,7 @@ good_deny() { # label content cidr-list-for-the-chain [allow-chain-list]
 }
 good_deny "/1 prefix" "$(t_ip4 128 0 0 0)/1\n" "$(t_ip4 128 0 0 0)/1"
 good_deny "/32 prefix" "$(t_ip4 198 51 100 7)/32\n" "$(t_ip4 198 51 100 7)/32"
+good_deny "255 octet boundary" "$(t_ip4 255 255 255 0)/24\n" "$(t_ip4 255 255 255 0)/24"
 good_deny "no trailing newline" "$DENY" "$DENY"
 good_deny "comment lines between ranges" "# a\n$DENY\n\n# b\n" "$DENY"
 reset; printf '# nothing to allow\n\n' > "$ALLOW_FILE"; base_chain "$DENY" ""; write_chain; run_v
