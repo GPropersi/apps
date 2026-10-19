@@ -202,7 +202,7 @@ reset() {
   export VERIFY_EGRESS_IPTABLES="$STUB_BIN/iptables"
   export IPT_RC="" IPT_EMPTY="" IPT_WARN="" IPV6=false IPV6_NET=false LS_RC=0 NETS="aaa bbb"
   export INSPECT_RC=0 NETCREATE_RC=0 RUN_FAIL_NAME="" CONN_A=open SLEEP_SIG=""
-  export REAL_SNIPPET="" ABSENT="" NC_RC=1 NC_ERR="nc: timed out" OTHER_RC=0 OTHER_ERR="" NSLOOKUP_RC=0
+  export REAL_SNIPPET="" ABSENT="" NC_RC=1 NC_ERR="" OTHER_RC=0 OTHER_ERR="" NSLOOKUP_RC=0
   export GW_ENV="$GW" LAN_ENV="$LAN" PORT_OUT="$LAN:49153"
   export PROBE_OUT=$'TOOLS=ok\nLOOKUP=ok\nGATEWAY=blocked\nPUBLIC=open'
 }
@@ -589,6 +589,10 @@ real_case "gateway timeout rc 137" 0 NC_RC=137 NC_ERR=
 expect_out_has "rc 137 classified blocked" "gateway port 443 blocked"
 real_case "gateway timeout rc 143" 0 NC_RC=143 NC_ERR=
 expect_out_has "rc 143 classified blocked" "gateway port 443 blocked"
+real_case "gateway nc timed-out message" 0 NC_RC=1 "NC_ERR=nc: timed out"
+expect_out_has "timed-out message classified blocked" "gateway port 443 blocked"
+real_case "gateway silent rc 2 is a container error" 2 NC_RC=2 NC_ERR=
+expect_out_has "silent rc 2 classified error" "container/network error"
 real_case "gateway other stderr is a container error" 2 NC_RC=1 "NC_ERR=nc: bad address"
 expect_out_has "unknown error classified error" "container/network error"
 real_case "public connect timed out" 1 OTHER_RC=1 "OTHER_ERR=nc: timed out"
