@@ -322,6 +322,11 @@ expect_rc "allow RETURN in the file but missing from the chain" 1
 
 reset; rm -f "$ALLOW_FILE"; run_v
 expect_rc "allow RETURNs in the chain but no allow file" 1
+expect_out_has "an empty wanted set shows no phantom missing entry" "missing: none)"
+
+reset; ch_drop "-d $DENY"; write_chain; run_v
+expect_rc "every drop missing from the chain" 1
+expect_out_has "an empty actual set shows no phantom extra entry" "extra: none missing: -A -i br-+ -d $DENY -j DROP;-A -i docker0 -d $DENY -j DROP;)"
 
 reset; ch_insert_before "-d $DENY -i br-+ -j DROP" "$P -d $ALLOW -i br-+ -p tcp -m tcp --dport 80 -j RETURN"; write_chain; run_v
 expect_rc "allow RETURN on a port other than 53" 1
@@ -373,23 +378,65 @@ expect_out_has "--help prints the usage" "Usage: verify-egress.sh"
 expect_out_lacks "--help stops before the code" "set -euo pipefail"
 
 # deny/allow file validity
-bad_deny() { # label content
+bad_deny() { # label content expected-message-fragment
   reset; printf '%b' "$2" > "$DENY_FILE"; run_v
   expect_rc "deny file $1" 1
+  expect_out_has "deny file $1: the reason is named" "$3"
 }
-bad_deny "empty" ""
-bad_deny "comments only" "# nothing\n\n"
-bad_deny "bare address" "$(t_ip4 198 51 100 0)\n"
-bad_deny "host bits set" "$(t_ip4 198 51 100 1)/24\n"
-bad_deny "/0 prefix" "$(t_ip4 0 0 0 0)/0\n"
-bad_deny "CRLF" "$DENY\r\n"
-bad_deny "trailing space" "$DENY \n"
-bad_deny "duplicate line" "$DENY\n$DENY\n"
-bad_deny "IPv6" "fe80::/10\n"
-bad_deny "octet out of range" "$(t_ip4 300 0 0 0)/8\n"
+bad_deny "empty" "" "no CIDR lines"
+bad_deny "comments only" "# nothing\n\n" "no CIDR lines"
+bad_deny "bare address" "$(t_ip4 198 51 100 0)\n" "not a canonical IPv4 CIDR"
+bad_deny "host bits set" "$(t_ip4 198 51 100 1)/24\n" "host bits set"
+bad_deny "/0 prefix" "$(t_ip4 0 0 0 0)/0\n" "prefix must be 1-32"
+bad_deny "/33 prefix" "$(t_ip4 198 51 100 0)/33\n" "prefix must be 1-32"
+bad_deny "leading-zero prefix /08" "$(t_ip4 10 0 0 0)/08\n" "not a canonical IPv4 CIDR"
+bad_deny "leading-zero octet 010" "010.0.0.0/8\n" "not a canonical IPv4 CIDR"
+bad_deny "leading-zero octet 051" "198.051.100.0/24\n" "not a canonical IPv4 CIDR"
+bad_deny "four-digit octet" "1000.0.0.0/8\n" "not a canonical IPv4 CIDR"
+bad_deny "CRLF" "$DENY\r\n" "CRLF"
+bad_deny "trailing space" "$DENY \n" "trailing whitespace"
+bad_deny "trailing space on a comment" "# note \n$DENY\n" "trailing whitespace"
+bad_deny "duplicate line" "$DENY\n$DENY\n" "duplicate line"
+bad_deny "IPv6" "fe80::/10\n" "not a canonical IPv4 CIDR"
+bad_deny "octet out of range" "$(t_ip4 300 0 0 0)/8\n" "octet out of range"
 reset; rm -f "$DENY_FILE"; run_v
 expect_rc "deny file missing" 1
 expect_out_has "missing deny file named" "missing"
+
+# a dangling symlink is a missing deny file, not an empty one
+reset; rm -f "$DENY_FILE"; ln -s "$T_TMP/no-such-target" "$DENY_FILE"; run_v
+expect_rc "deny file is a dangling symlink" 1
+expect_out_has "dangling deny symlink reads as missing" "is missing"
+rm -f "$DENY_FILE" "$T_TMP/no-such-target"
+
+# an unreadable file is an invalid one (a root caller reads anything, so the case is skipped there)
+if [ "$(/usr/bin/id -u)" -ne 0 ]; then
+  reset; chmod 000 "$DENY_FILE"; run_v
+  expect_rc "deny file unreadable" 1
+  expect_out_has "unreadable deny file named" "not readable"
+  chmod 600 "$DENY_FILE"
+  reset; chmod 000 "$ALLOW_FILE"; run_v
+  expect_rc "allow file unreadable" 1
+  expect_out_has "unreadable allow file named" "not readable"
+  chmod 600 "$ALLOW_FILE"
+fi
+
+reset; rm -f "$ALLOW_FILE"; ln -s "$T_TMP/no-such-target" "$ALLOW_FILE"; run_v
+expect_rc "allow file is a dangling symlink" 1
+expect_out_has "dangling allow symlink is present but invalid" "present but invalid"
+rm -f "$ALLOW_FILE" "$T_TMP/no-such-target"
+
+# accepted boundaries: the chain is built from the same ranges, so only the file grammar is under test
+good_deny() { # label content cidr-list-for-the-chain [allow-chain-list]
+  reset; printf '%b' "$2" > "$DENY_FILE"; base_chain "$3" "$ALLOW"; write_chain; run_v
+  expect_rc "deny file accepted: $1" 0
+}
+good_deny "/1 prefix" "$(t_ip4 128 0 0 0)/1\n" "$(t_ip4 128 0 0 0)/1"
+good_deny "/32 prefix" "$(t_ip4 198 51 100 7)/32\n" "$(t_ip4 198 51 100 7)/32"
+good_deny "no trailing newline" "$DENY" "$DENY"
+good_deny "comment lines between ranges" "# a\n$DENY\n\n# b\n" "$DENY"
+reset; printf '# nothing to allow\n\n' > "$ALLOW_FILE"; base_chain "$DENY" ""; write_chain; run_v
+expect_rc "a comments-only allow file is valid and means no allow RETURNs" 0
 reset; rm -f "$DENY_FILE"; run_v
 expect_calls_lacks "missing deny file: probes never start" "docker run"
 
@@ -410,10 +457,26 @@ expect_calls_has "--host ssh argv forwards the flag" "ssh -o BatchMode=yes -- pi
 expect_eq "--host streams this script" "$(head -n 1 "$T_TMP/ssh.stdin" 2>/dev/null)" "#!/usr/bin/env bash"
 expect_calls_lacks "--host runs nothing locally" "docker"
 
+reset; run_v --host pi --probe --probe-inbound
+expect_rc "--host with both probe flags" 0
+expect_calls_has "--host forwards both flags" "ssh -o BatchMode=yes -- pi bash -s -- --probe --probe-inbound"
+
+reset; run_v --host pi
+expect_rc "--host with no other flags" 0
+expect_eq "--host with no flags forwards none" "$(grep '^ssh ' "$CALL_LOG")" "ssh -o BatchMode=yes -- pi bash -s --"
+
 reset; ch_set_last "$P -j RETURN"; write_chain; run_v --probe
 expect_rc "static failure with --probe" 1
 expect_calls_lacks "static failure skips the probe" "docker run"
 expect_calls_lacks "static failure creates no network" "network create"
+expect_out_has "static failure says the probes were skipped" "probes skipped because the static checks failed"
+
+reset; ch_set_last "$P -j RETURN"; write_chain; run_v --probe-inbound
+expect_rc "static failure with --probe-inbound" 1
+expect_out_has "static failure with --probe-inbound says the probes were skipped" "probes skipped because the static checks failed"
+
+reset; ch_set_last "$P -j RETURN"; write_chain; run_v
+expect_out_lacks "no probe flag: no skipped-probes message" "probes skipped"
 
 # ===================== --probe =====================
 
@@ -457,6 +520,12 @@ expect_rc "probe: gateway not covered by a deny CIDR" 2
 expect_out_has "uncovered gateway message" "not covered"
 expect_calls_lacks "uncovered gateway: nothing started" "docker run"
 expect_calls_lacks "uncovered gateway: no network" "network create"
+
+reset; export VERIFY_EGRESS_PROBE_PORT=53; run_v --probe
+expect_rc "probe: port 53 is refused (a resolver exception would mask the drop)" 2
+expect_out_has "port 53 named" "must not be 53"
+expect_calls_lacks "probe port 53: nothing started" "docker run"
+unset VERIFY_EGRESS_PROBE_PORT
 
 reset; export GW_ENV=""; run_v --probe
 expect_rc "probe: no default route" 2

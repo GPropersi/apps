@@ -166,8 +166,9 @@ compare_sets() {
   if [ "$want" = "$have" ]; then
     pass "$label"
   else
-    extra="$(comm -13 <(printf '%s\n' "$want") <(printf '%s\n' "$have") | tr '\n' ';')"
-    missing="$(comm -23 <(printf '%s\n' "$want") <(printf '%s\n' "$have") | tr '\n' ';')"
+    # sorted strips empty lines, so an empty set contributes no phantom entry to the diagnostic
+    extra="$(comm -13 <(sorted "$want") <(sorted "$have") | tr '\n' ';')"
+    missing="$(comm -23 <(sorted "$want") <(sorted "$have") | tr '\n' ';')"
     fail "$label differ (extra: ${extra:-none} missing: ${missing:-none})"
   fi
 }
