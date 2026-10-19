@@ -58,7 +58,7 @@ make_copy() {
 
 wrapper="$(make_copy wrapper)"
 
-# no_tool_ran: the call log holds nothing but logger lines (no sudo, docker or systemctl).
+# calls_without_logger: stub call log minus logger lines (rejections are logged); must stay empty on every path.
 calls_without_logger() { grep -v '^logger ' "$CALL_LOG" || true; }
 logger_lines() { grep '^logger ' "$CALL_LOG" || true; }
 
@@ -95,6 +95,7 @@ blank_case() {
   t_reset_calls
   run_cmd env "$@" "$wrapper" -c "$wrapper"
   expect_rc "marker blank: $1" 2
+  expect_calls_has "marker blank reason: $1" "logger -t platform-claude rejected reason=blank-command len="
   expect_out_lacks "marker blank no dispatch: $1" "HELPER"
   expect_eq "marker blank empty call log: $1" "$(calls_without_logger)" ""
 }
@@ -106,6 +107,7 @@ blank_case $'SSH_ORIGINAL_COMMAND=\n'
 t_reset_calls
 run_cmd env -u SSH_ORIGINAL_COMMAND "$wrapper" -c "$wrapper"
 expect_rc "marker with SSH_ORIGINAL_COMMAND unset" 2
+expect_calls_has "marker unset reason" "logger -t platform-claude rejected reason=no-original-command len=0"
 expect_out_lacks "marker unset no dispatch" "HELPER"
 expect_eq "marker unset empty call log" "$(calls_without_logger)" ""
 
@@ -113,6 +115,7 @@ expect_eq "marker unset empty call log" "$(calls_without_logger)" ""
 t_reset_calls
 run_cmd env SSH_ORIGINAL_COMMAND="ps" "$wrapper" -c "$wrapper" ps
 expect_rc "marker plus extra argv" 2
+expect_calls_has "marker plus extra argv reason" "logger -t platform-claude rejected reason=bad-arguments len=0"
 expect_eq "marker plus extra argv empty call log" "$(calls_without_logger)" ""
 
 # --- Spoof row: a client command equal to the marker path is the OpenSSH shape; only the validated env dispatches ---
@@ -133,8 +136,11 @@ expect_out_lacks "tailscale shape does not use the pre-set env" "other"
 t_reset_calls
 run_cmd env -u SSH_ORIGINAL_COMMAND "$wrapper" -c ""
 expect_rc "tailscale shape empty command" 2
+expect_calls_has "tailscale empty command reason" "logger -t platform-claude rejected reason=blank-command len=0"
+t_reset_calls
 run_cmd env -u SSH_ORIGINAL_COMMAND "$wrapper" -c "   "
 expect_rc "tailscale shape blank command" 2
+expect_calls_has "tailscale blank command reason" "logger -t platform-claude rejected reason=blank-command len=3"
 expect_eq "tailscale blank empty call log" "$(calls_without_logger)" ""
 
 # --- Argument-shape rejections: no shell, non-zero, empty call log ---
@@ -142,6 +148,7 @@ shape_case() {
   t_reset_calls
   run_cmd env SSH_ORIGINAL_COMMAND="ps" "$wrapper" "$@"
   expect_rc "shape reject: $*" 2
+  expect_calls_has "shape reject reason: $*" "logger -t platform-claude rejected reason=bad-arguments len=0"
   expect_out_lacks "shape reject no dispatch: $*" "HELPER"
   expect_eq "shape reject empty call log: $*" "$(calls_without_logger)" ""
 }
@@ -159,89 +166,93 @@ shape_case -c ps -c ps
 
 # --- Command rejections through the OpenSSH shape: exit 2, the sudo/docker call log is empty ---
 reject_case() {
-  local label="$1" cmd="$2"
+  local label="$1" cmd="$2" reason="$3"
   t_reset_calls
   run_cmd env SSH_ORIGINAL_COMMAND="$cmd" "$wrapper" -c "$wrapper"
   expect_rc "reject: $label" 2
   expect_out_lacks "reject no dispatch: $label" "HELPER"
   expect_out_has "reject prints usage: $label" "usage:"
   expect_eq "reject empty sudo/docker call log: $label" "$(calls_without_logger)" ""
-  expect_calls_has "reject is logged with a reason code: $label" "logger -t platform-claude rejected reason="
+  expect_calls_has "reject is logged with the specific reason $reason: $label" "logger -t platform-claude rejected reason=$reason len="
   # the log line is reason code and length only: nothing of the input can follow len=<n>
   expect_eq "reject logs exactly one reason/len line: $label" "$(logger_lines | grep -cE '^logger -t platform-claude rejected reason=[a-z-]+ len=[0-9]+$')" "1"
   expect_eq "reject log holds no other logger line: $label" "$(logger_lines | wc -l)" "1"
 }
-reject_case "unknown command" "frobnicate"
-reject_case "shell word" "sh"
-reject_case "interactive-looking" "bash -i"
-reject_case "id" "id"
-reject_case "restart with no app" "restart"
-reject_case "restart with two apps" "restart a1 b2"
-reject_case "ps with an argument" "ps myapp"
-reject_case "stats with an argument" "stats x"
-reject_case "status with an argument" "status now"
-reject_case "logs with no app" "logs"
-reject_case "logs with three args" "logs myapp 5 6"
-reject_case "logs lines zero" "logs myapp 0"
-reject_case "logs lines negative" "logs myapp -5"
-reject_case "logs lines non-integer" "logs myapp abc"
-reject_case "logs lines float" "logs myapp 5.5"
-reject_case "logs lines leading zero" "logs myapp 05"
-reject_case "logs lines over maximum" "logs myapp 1001"
-reject_case "logs lines far over maximum" "logs myapp 99999"
-reject_case "logs lines huge" "logs myapp 99999999999999999999"
-reject_case "uppercase app" "restart MyApp"
-reject_case "app starting with a digit" "restart 1app"
-reject_case "app too short" "restart a"
-reject_case "app too long" "restart a$(printf 'b%.0s' $(seq 1 31))"
-reject_case "app with a dot" "restart my.app"
-reject_case "app with a slash" "restart ../etc"
-reject_case "app with an underscore" "restart my_app"
-reject_case "app starting with a dash" "restart --all"
-reject_case "docker flag as app" "logs --since"
-reject_case "leading space" " ps"
-reject_case "trailing space" "ps "
-reject_case "double space" "logs  myapp"
-reject_case "tab separator" $'logs\tmyapp'
-reject_case "newline" $'ps\nid'
-reject_case "carriage return" $'ps\rid'
-reject_case "semicolon" 'ps;id'
-reject_case "semicolon after a word" 'ps ;id'
-reject_case "command substitution" 'restart $(id)'
-reject_case "backticks" 'restart `id`'
-reject_case "pipe" 'ps | id'
-reject_case "and" 'ps && id'
-reject_case "redirect" 'ps > out'
-reject_case "glob" 'restart *'
-reject_case "unicode app" "restart caf$(printf '\303\251')"
-reject_case "over-length" "logs $(printf 'a%.0s' $(seq 1 300))"
-reject_case "case-variant command" "PS"
-reject_case "dotdot" "logs ../x"
-reject_case "the wrapper path itself as the command" "$wrapper"
+reject_case "unknown command" "frobnicate" unknown-command
+reject_case "shell word" "sh" unknown-command
+reject_case "interactive-looking" "bash -i" unknown-command
+reject_case "id" "id" unknown-command
+reject_case "restart with no app" "restart" arg-count
+reject_case "restart with two apps" "restart a1 b2" arg-count
+reject_case "ps with an argument" "ps myapp" arg-count
+reject_case "stats with an argument" "stats x" arg-count
+reject_case "status with an argument" "status now" arg-count
+reject_case "logs with no app" "logs" arg-count
+reject_case "logs with three args" "logs myapp 5 6" arg-count
+reject_case "logs lines zero" "logs myapp 0" bad-lines
+reject_case "logs lines negative" "logs myapp -5" bad-lines
+reject_case "logs lines non-integer" "logs myapp abc" bad-lines
+reject_case "logs lines float" "logs myapp 5.5" bad-lines
+reject_case "logs lines leading zero" "logs myapp 05" bad-lines
+reject_case "logs lines over maximum" "logs myapp 1001" bad-lines
+reject_case "logs lines far over maximum" "logs myapp 99999" bad-lines
+reject_case "logs lines huge" "logs myapp 99999999999999999999" bad-lines
+reject_case "uppercase app" "restart MyApp" bad-app
+reject_case "app starting with a digit" "restart 1app" bad-app
+reject_case "app too short" "restart a" bad-app
+reject_case "app too long" "restart a$(printf 'b%.0s' $(seq 1 31))" bad-app
+reject_case "app with a dot" "restart my.app" bad-app
+reject_case "app with a slash" "restart ../etc" bad-app
+reject_case "app with an underscore" "restart my_app" bad-app
+reject_case "app starting with a dash" "restart --all" bad-app
+reject_case "docker flag as app" "logs --since" bad-app
+reject_case "leading space" " ps" non-canonical
+reject_case "trailing space" "ps " non-canonical
+reject_case "double space" "logs  myapp" non-canonical
+reject_case "tab separator" $'logs\tmyapp' unknown-command
+reject_case "newline" $'ps\nid' newline
+reject_case "carriage return" $'ps\rid' newline
+reject_case "semicolon" 'ps;id' unknown-command
+reject_case "semicolon after a word" 'ps ;id' arg-count
+reject_case "command substitution" 'restart $(id)' bad-app
+reject_case "backticks" 'restart `id`' bad-app
+reject_case "pipe" 'ps | id' arg-count
+reject_case "and" 'ps && id' arg-count
+reject_case "redirect" 'ps > out' arg-count
+reject_case "glob" 'restart *' bad-app
+reject_case "unicode app" "restart caf$(printf '\303\251')" bad-app
+# No valid command can exceed MAX_LEN (the longest is "logs <31 chars> 1000"), so deleting the too-long guard would
+# surface this input under a different reason (bad-app); the specific-reason assertion is what proves the guard exists.
+reject_case "over-length" "logs $(printf 'a%.0s' $(seq 1 300))" too-long
+reject_case "over-length, otherwise a valid word sequence" "ps$(printf ' ps%.0s' $(seq 1 100))" too-long
+reject_case "case-variant command" "PS" unknown-command
+reject_case "dotdot" "logs ../x" bad-app
+reject_case "the wrapper path itself as the command" "$wrapper" unknown-command
 
 # trailing-newline app name: the regex is anchored, so a final newline is not forgiven
-reject_case "app with trailing newline" $'restart myapp\n'
+reject_case "app with trailing newline" $'restart myapp\n' newline
 
 # --- The same metacharacter payloads through the Tailscale shape (-c <command>), even under a UTF-8 caller locale ---
 meta_case() {
   t_reset_calls
   run_cmd env -u SSH_ORIGINAL_COMMAND LC_ALL=en_US.UTF-8 LANG=en_US.UTF-8 "$wrapper" -c "$2"
   expect_rc "tailscale meta reject: $1" 2
+  expect_calls_has "tailscale meta reject reason $3: $1" "logger -t platform-claude rejected reason=$3 len="
   expect_eq "tailscale meta reject empty call log: $1" "$(calls_without_logger)" ""
   expect_out_lacks "tailscale meta reject no echo of payload: $1" "ZQXD"
   expect_calls_lacks "tailscale meta reject: payload marker never reaches the call log: $1" "ZQXD"
   expect_eq "tailscale meta reject logs one reason/len line: $1" "$(logger_lines | grep -cE '^logger -t platform-claude rejected reason=[a-z-]+ len=[0-9]+$')" "1"
 }
-meta_case "semicolon" 'ps;ZQXD1'
-meta_case "command substitution" 'restart myapp $(ZQXD2)'
-meta_case "backticks" 'restart myapp `ZQXD3`'
-meta_case "pipe" 'ps | ZQXD4'
-meta_case "and" 'ps && ZQXD5'
-meta_case "redirect" 'ps > ZQXD6'
-meta_case "newline" $'ps\nZQXD7'
-meta_case "unicode" "restart caf$(printf '\303\251')ZQXD9"
-meta_case "shell word" 'sh'
-meta_case "interactive-looking" 'bash -i'
+meta_case "semicolon" 'ps;ZQXD1' unknown-command
+meta_case "command substitution" 'restart myapp $(ZQXD2)' arg-count
+meta_case "backticks" 'restart myapp `ZQXD3`' arg-count
+meta_case "pipe" 'ps | ZQXD4' arg-count
+meta_case "and" 'ps && ZQXD5' arg-count
+meta_case "redirect" 'ps > ZQXD6' arg-count
+meta_case "newline" $'ps\nZQXD7' newline
+meta_case "unicode" "restart caf$(printf '\303\251')ZQXD9" bad-app
+meta_case "shell word" 'sh' unknown-command
+meta_case "interactive-looking" 'bash -i' unknown-command
 
 # --- Locale and environment ---
 # UTF-8 caller locale: a multibyte app name is still rejected (bytes, not characters)
@@ -253,6 +264,7 @@ expect_eq "UTF-8 caller locale empty call log" "$(calls_without_logger)" ""
 t_reset_calls
 run_cmd env LC_ALL=en_US.UTF-8 LANG=en_US.UTF-8 SSH_ORIGINAL_COMMAND="logs $(printf '\303\251%.0s' $(seq 1 128))" "$wrapper" -c "$wrapper"
 expect_rc "UTF-8 caller locale, over-length in bytes" 2
+expect_calls_has "over-length in bytes is rejected as too-long" "logger -t platform-claude rejected reason=too-long len=261"
 expect_eq "UTF-8 over-length empty call log" "$(calls_without_logger)" ""
 
 run_cmd env SSH_ORIGINAL_COMMAND="restart myapp" IFS="x" "$wrapper" -c "$wrapper"
@@ -307,6 +319,5 @@ if grep -qxF 'export LC_ALL=C' "$source_script"; then _pass; else _fail "claude-
 expect_eq "SELF defined once" "$(grep -c '^readonly SELF=' "$source_script")" "1"
 expect_eq "HELPER defined once" "$(grep -c '^readonly HELPER=' "$source_script")" "1"
 expect_eq "no eval in the wrapper" "$(grep -cE '(^|[^a-z_])eval ' "$source_script")" "0"
-expect_eq "no stub reached overall (reject paths)" "$(grep -c '^docker\|^systemctl' "$CALL_LOG")" "0"
 
 t_finish

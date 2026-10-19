@@ -44,8 +44,7 @@ chmod +x "$echo_dispatcher"
 echo_wrapper="$(make_wrapper wrapper-echo "$echo_dispatcher")"
 real_wrapper="$(make_wrapper wrapper-real "$real_dispatcher")"
 
-# no_shell_started: the call log stays empty (no docker/sudo/systemctl/logger-free tool use beyond logger).
-# logger is allowed (rejections are logged); anything else in the log is a failure.
+# calls_without_logger: stub call log minus logger lines (rejections are logged); must stay empty on every path.
 calls_without_logger() { grep -v '^logger ' "$CALL_LOG" || true; }
 
 # --- OpenSSH shape: -c <forced-command path> with SSH_ORIGINAL_COMMAND ---
@@ -193,6 +192,5 @@ expect_out_has "dispatcher sees LC_ALL=C under a UTF-8 caller" "LC=C"
 # The tracked wrapper exports LC_ALL=C and names the dispatcher exactly once.
 if grep -qxF 'export LC_ALL=C' "$source_wrapper"; then _pass; else _fail "wrapper exports LC_ALL=C"; fi
 expect_eq "DISPATCHER defined once" "$(grep -c '^readonly DISPATCHER=' "$source_wrapper")" "1"
-expect_eq "no stub reached overall" "$(calls_without_logger)" ""
 
 t_finish
