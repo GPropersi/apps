@@ -292,6 +292,10 @@ Match User $DEPLOY_USER
     GatewayPorts no
     PermitUserRC no
     PermitUserEnvironment no
+    PasswordAuthentication no
+    KbdInteractiveAuthentication no
+    AuthenticationMethods publickey
+    AuthorizedKeysCommand none
 EOF
 }
 
@@ -307,7 +311,16 @@ deploy_directives() {
     "permittunnel no" \
     "gatewayports no" \
     "permituserrc no" \
-    "permituserenvironment no"
+    "permituserenvironment no" \
+    "passwordauthentication no" \
+    "kbdinteractiveauthentication no" \
+    "authenticationmethods publickey" \
+    "authorizedkeyscommand none"
+}
+
+# group_set <user>: the user's groups, sorted and space-separated (id -nG order is not stable).
+group_set() {
+  id -nG "$1" | tr ' ' '\n' | sort | tr '\n' ' ' | sed 's/ $//'
 }
 
 # ---- file helpers ----
@@ -359,20 +372,24 @@ ensure_user() {
     info "changed: user $DEPLOY_USER created (locked password, docker group, login shell $WRAPPER_PATH)"
     return 0
   fi
-  local changed=0
+  local changed=0 uid
+  # Fail closed: refuse a uid 0 account and any group beyond its own and docker, before changing anything.
+  uid="$(id -u "$DEPLOY_USER")"
+  { [[ "$uid" =~ ^[0-9]+$ ]] && [ "$uid" -ne 0 ]; } || die "$DEPLOY_USER uid is not a nonzero number ('$uid'); fix the account and re-run"
+  groups=" $(id -nG "$DEPLOY_USER") "
+  case "$groups" in
+    *" sudo "*) die "$DEPLOY_USER is in the sudo group; remove it (gpasswd -d $DEPLOY_USER sudo) and re-run" ;;
+  esac
+  case "$(group_set "$DEPLOY_USER")" in
+    "$DEPLOY_USER docker") ;;
+    "$DEPLOY_USER") priv usermod -aG docker "$DEPLOY_USER"; changed=1 ;;
+    *) die "$DEPLOY_USER is in groups other than its own and docker ($(id -nG "$DEPLOY_USER")); remove the extra groups and re-run" ;;
+  esac
   shell="${entry##*:}"
   if [ "$shell" != "$WRAPPER_PATH" ]; then
     priv usermod --shell "$WRAPPER_PATH" "$DEPLOY_USER"
     changed=1
   fi
-  groups=" $(id -nG "$DEPLOY_USER") "
-  case "$groups" in
-    *" sudo "*) die "$DEPLOY_USER is in the sudo group; remove it (gpasswd -d $DEPLOY_USER sudo) and re-run" ;;
-  esac
-  case "$groups" in
-    *" docker "*) ;;
-    *) priv usermod -aG docker "$DEPLOY_USER"; changed=1 ;;
-  esac
   local status
   status="$(priv passwd -S "$DEPLOY_USER" | awk '{print $2}')"
   case "$status" in
@@ -431,9 +448,7 @@ install_dropin() {
 }
 
 do_install() {
-  [ -n "$KEY" ] || die "install needs --pubkey-file" 2
-  check_key "$KEY"
-  [ -z "$FROM" ] || check_from "$FROM"
+  # KEY and FROM were validated in main before dispatch.
   require_privilege
   TMP="$(mktemp -d)"
 
@@ -469,7 +484,7 @@ check_payload() {
 }
 
 do_checks() {
-  local path entry shell groups status eff
+  local path entry shell groups uid status eff
 
   check_owned "dispatcher" "$ROOT$DISPATCHER_PATH" 755 || true
   check_payload "dispatcher" "$ROOT$DISPATCHER_PATH" payload_platform
@@ -502,6 +517,9 @@ do_checks() {
     groups=" $(id -nG "$DEPLOY_USER") "
     case "$groups" in *" docker "*) pass "$DEPLOY_USER is in the docker group" ;; *) fail "$DEPLOY_USER is not in the docker group" ;; esac
     case "$groups" in *" sudo "*) fail "$DEPLOY_USER is in the sudo group" ;; *) pass "$DEPLOY_USER is not in the sudo group" ;; esac
+    if [ "$(group_set "$DEPLOY_USER")" = "$DEPLOY_USER docker" ]; then pass "$DEPLOY_USER has exactly its own group and docker"; else fail "$DEPLOY_USER is in groups other than its own and docker ($(id -nG "$DEPLOY_USER"))"; fi
+    uid="$(id -u "$DEPLOY_USER" 2>/dev/null || true)"
+    if [[ "$uid" =~ ^[0-9]+$ ]] && [ "$uid" -ne 0 ]; then pass "$DEPLOY_USER uid is nonzero"; else fail "$DEPLOY_USER uid is not a nonzero number ('$uid')"; fi
     status="$(priv passwd -S "$DEPLOY_USER" 2>/dev/null | awk '{print $2}' || true)"
     case "$status" in L | LK) pass "password is locked" ;; *) fail "password is not locked (status '$status')" ;; esac
   fi

@@ -30,7 +30,8 @@
 #             (via `ssh <alias>` and `sudo docker`) creates a disposable pinned busybox container carrying the reserved
 #             label platform.app=platform-livetest and ALWAYS removes it (trap on every path); the `claude` commands run
 #             through `ssh -i <private-key-file> -o IdentitiesOnly=yes`. The private key stays on this client. Run once
-#             by you in Step 8. Env LIVE_TEST_IMAGE overrides the image (default busybox:1.37.0; image-reference
+#             by you after install. Env LIVE_TEST_IMAGE overrides the image (default
+#             docker.io/library/busybox:1.37.0; image-reference
 #             characters only, validated). The container is removed by the id `docker run` printed, only after that id
 #             was captured; an unlabelled container already named platform-livetest stops the run. ssh calls carry
 #             ConnectTimeout/ServerAlive options and INT/TERM/HUP run the removal before exiting.
@@ -309,12 +310,14 @@ case "$sub" in
   stats)
     [ "$#" -eq 0 ] || reject arg-count
     "$LOGGER" -t platform-claude-helper "stats" || true
+    # Capture first so a docker failure aborts under set -e (a process substitution would mask its status).
+    ids="$("$DOCKER" ps -q --filter "label=${LABEL_KEY}")"
     running=()
     while IFS= read -r id; do
       [ -n "$id" ] || continue
       [[ "$id" =~ $ID_RE ]] || { echo "claude-helper: unexpected container id from docker" >&2; exit 1; }
       running+=("$id")
-    done < <("$DOCKER" ps -q --filter "label=${LABEL_KEY}")
+    done <<<"$ids"
     if [ "${#running[@]}" -eq 0 ]; then
       echo "no running app containers"
       exit 0
@@ -591,9 +594,7 @@ print_sudoers_instructions() {
 }
 
 do_install() {
-  [ -n "$KEY" ] || die "install needs --pubkey-file" 2
-  check_key "$KEY"
-  [ -z "$FROM" ] || check_from "$FROM"
+  # KEY and FROM were validated in main before dispatch.
   require_privilege
   TMP="$(mktemp -d)"
 
@@ -759,7 +760,7 @@ live_expect() {
 }
 
 do_live() {
-  local image="${LIVE_TEST_IMAGE:-busybox:1.37.0}" existing cid
+  local image="${LIVE_TEST_IMAGE:-docker.io/library/busybox:1.37.0}" existing cid
   [ -n "$HOST" ] || die "verify --live needs --host" 2
   [ -n "$IDENTITY" ] || die "verify --live needs --identity" 2
   [ -f "$IDENTITY" ] && [ -r "$IDENTITY" ] || die "cannot read identity file: $IDENTITY" 2

@@ -832,7 +832,7 @@ fresh
 live
 expect_rc "live check passes" 0
 expect_out_has "live summary" "all live checks passed"
-expect_calls_has "the test container is created with the reserved label" "docker run -d --name platform-livetest --label platform.app=platform-livetest busybox:1.37.0 sleep 300"
+expect_calls_has "the test container is created with the reserved label" "docker run -d --name platform-livetest --label platform.app=platform-livetest docker.io/library/busybox:1.37.0 sleep 300"
 if [ -e "$STATE/container_exists" ]; then _fail "the test container is removed after a passing run"; else _pass; fi
 expect_calls_has "the container removal ran, by the id docker run printed" "docker rm -f deadbeefcafe"
 expect_calls_lacks "the container is never removed by name" "docker rm -f platform-livetest"

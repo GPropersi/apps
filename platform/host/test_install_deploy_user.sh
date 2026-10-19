@@ -65,6 +65,7 @@ EOF
 
 mkstub id <<'EOF'
 if [ "$1" = "-nG" ] && [ "$2" = "deploy" ]; then cat "$STATE/user_groups"; exit 0; fi
+if [ "$1" = "-u" ] && [ "$2" = "deploy" ]; then cat "$STATE/user_uid" 2>/dev/null || echo 1001; exit 0; fi
 echo "admin"; exit 0
 EOF
 
@@ -118,7 +119,8 @@ user=""
 for a in "$@"; do case "$a" in user=*) user="${a#user=}"; user="${user%%,*}" ;; esac; done
 declare -A cfg=([authorizedkeysfile]=".ssh/authorized_keys" [permittty]=yes [allowtcpforwarding]=yes
   [allowagentforwarding]=yes [x11forwarding]=yes [permittunnel]=no [permituserrc]=yes
-  [allowstreamlocalforwarding]=yes [gatewayports]=yes [permituserenvironment]=yes)
+  [allowstreamlocalforwarding]=yes [gatewayports]=yes [permituserenvironment]=yes
+  [passwordauthentication]=yes [kbdinteractiveauthentication]=yes [authenticationmethods]=any [authorizedkeyscommand]=/bin/keys)
 if [ -f "$dropin" ] && [ "$user" = "deploy" ]; then
   in=0
   while IFS= read -r line; do
@@ -244,6 +246,10 @@ Match User deploy
     GatewayPorts no
     PermitUserRC no
     PermitUserEnvironment no
+    PasswordAuthentication no
+    KbdInteractiveAuthentication no
+    AuthenticationMethods publickey
+    AuthorizedKeysCommand none
 EOF
 if cmp -s "$expected_dropin" "$(root $DROPIN_PATH)"; then _pass; else _fail "drop-in is exactly the intended directive set" "$(diff "$expected_dropin" "$(root $DROPIN_PATH)")"; fi
 expect_eq "exactly one Match line" "$(grep -c '^Match' "$(root $DROPIN_PATH)")" "1"
@@ -274,6 +280,10 @@ fresh
 inst install --pubkey-file "$T_TMP/key.pub" --from "10.*,!bad.example"
 expect_rc "from= accepted" 0
 expect_eq "from= prefix position" "$(cat "$(root $KEYFILE_PATH)")" "from=\"10.*,!bad.example\",restrict,command=\"/usr/local/bin/platform\" $KEY"
+# verify accepts the from="...", form (the optional prefix branch of the key-line check)
+inst verify
+expect_rc "verify passes after a --from install" 0
+expect_out_lacks "verify has no FAIL after a --from install" "FAIL"
 
 # ---- 4. sshd -t failure: restore, no reload, non-zero ----
 fresh
@@ -367,6 +377,38 @@ bad_key_case "not base64" "ssh-ed25519 not*base64 x\n"
 bad_key_case "missing base64" "ssh-ed25519\n"
 bad_key_case "semicolon comment" "$KEY;id\n"
 bad_key_case "private key header" "-----BEGIN OPENSSH PRIV""ATE KEY-----\n"
+bad_key_case "four padding characters" "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGFrZQ==== x\n"
+
+# Accepted key shapes: every supported type, padded and unpadded base64, with and without a comment.
+good_key_case() {
+  local label="$1" value="$2"
+  fresh
+  printf '%s\n' "$value" > "$T_TMP/good.pub"
+  inst install --pubkey-file "$T_TMP/good.pub"
+  expect_rc "accepted key: $label" 0
+  expect_eq "accepted key is written verbatim: $label" "$(cat "$(root $KEYFILE_PATH)")" "restrict,command=\"/usr/local/bin/platform\" $value"
+  fresh
+  inst install --key "$value"
+  expect_rc "accepted key via --key: $label" 0
+  inst verify
+  expect_rc "verify accepts the key line: $label" 0
+}
+good_key_case "ssh-rsa padded with comment" "ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABgQC7 user@host"
+good_key_case "ssh-rsa unpadded no comment" "ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABgQC7"
+good_key_case "ecdsa nistp256" "ecdsa-sha2-nistp256 AAAAE2VjZHNhLXNoYTItbmlzdHAyNTY= c"
+good_key_case "ecdsa nistp384" "ecdsa-sha2-nistp384 AAAAE2VjZHNhLXNoYTItbmlzdHAzODQ="
+good_key_case "ecdsa nistp521" "ecdsa-sha2-nistp521 AAAAE2VjZHNhLXNoYTItbmlzdHA1MjE== c"
+good_key_case "sk-ssh-ed25519" "sk-ssh-ed25519@openssh.com AAAAGnNrLXNzaC1lZDI1NTE5QG9wZW5zc2guY29t c"
+good_key_case "sk-ecdsa" "sk-ecdsa-sha2-nistp256@openssh.com AAAAInNrLWVjZHNhLXNoYTItbmlzdHAyNTZAb3BlbnNzaC5jb20="
+
+# Accepted from= values include the CIDR/IPv6-ish punctuation / ? and :
+for from_ok in '10.0.0.0/8' 'host?.example' 'fe80::1' 'a.example,!b.example'; do
+  fresh
+  inst install --pubkey-file "$T_TMP/key.pub" --from "$from_ok"
+  expect_rc "accepted from=: $from_ok" 0
+  inst verify
+  expect_rc "verify accepts from=: $from_ok" 0
+done
 
 fresh
 inst install --pubkey-file "$T_TMP/does-not-exist.pub"
@@ -498,6 +540,31 @@ inst install --pubkey-file "$T_TMP/key.pub"
 expect_rc "deploy in the sudo group is refused" 1
 expect_out_has "sudo membership named" "sudo group"
 
+# Fail closed on an existing account: uid 0 and any extra group are refused before anything changes.
+fresh
+inst install --pubkey-file "$T_TMP/key.pub" >/dev/null
+echo 0 > "$STATE/user_uid"
+t_reset_calls
+inst install --pubkey-file "$T_TMP/key.pub"
+expect_rc "existing deploy with uid 0 is refused" 1
+expect_out_has "uid 0 named" "uid is not a nonzero number"
+expect_calls_lacks "no usermod for a uid 0 account" "usermod"
+
+fresh
+inst install --pubkey-file "$T_TMP/key.pub" >/dev/null
+echo "deploy docker adm" > "$STATE/user_groups"
+t_reset_calls
+inst install --pubkey-file "$T_TMP/key.pub"
+expect_rc "existing deploy with an extra group is refused" 1
+expect_out_has "extra group named" "groups other than its own and docker"
+expect_calls_lacks "no usermod for an account with an extra group" "usermod"
+
+fresh
+inst install --pubkey-file "$T_TMP/key.pub" >/dev/null
+echo "docker deploy" > "$STATE/user_groups"
+inst install --pubkey-file "$T_TMP/key.pub"
+expect_rc "group order from id -nG does not matter" 0
+
 fresh
 inst install --pubkey-file "$T_TMP/key.pub" >/dev/null
 echo "/bin/bash" > "$STATE/user_shell"
@@ -612,6 +679,21 @@ fresh; inst install --pubkey-file "$T_TMP/key.pub" >/dev/null
 sed -i '/PermitUserEnvironment/d' "$(root $DROPIN_PATH)"
 inst verify
 expect_out_has "effective permituserenvironment is asserted" "effective 'permituserenvironment no'"
+
+for dir_ in PasswordAuthentication KbdInteractiveAuthentication AuthenticationMethods AuthorizedKeysCommand; do
+  fresh; inst install --pubkey-file "$T_TMP/key.pub" >/dev/null
+  sed -i "/$dir_/d" "$(root $DROPIN_PATH)"
+  inst verify
+  expect_out_has "effective $dir_ is asserted" "effective '$(echo "$dir_" | tr A-Z a-z) "
+done
+
+fresh; inst install --pubkey-file "$T_TMP/key.pub" >/dev/null
+echo "deploy docker adm" > "$STATE/user_groups"
+tamper_case "deploy in an extra group" "groups other than its own and docker"
+
+fresh; inst install --pubkey-file "$T_TMP/key.pub" >/dev/null
+echo 0 > "$STATE/user_uid"
+tamper_case "deploy uid 0" "uid is not a nonzero number"
 
 fresh; inst install --pubkey-file "$T_TMP/key.pub" >/dev/null
 echo "deploy" > "$STATE/user_groups"

@@ -78,12 +78,14 @@ case "$sub" in
   stats)
     [ "$#" -eq 0 ] || reject arg-count
     "$LOGGER" -t platform-claude-helper "stats" || true
+    # Capture first so a docker failure aborts under set -e (a process substitution would mask its status).
+    ids="$("$DOCKER" ps -q --filter "label=${LABEL_KEY}")"
     running=()
     while IFS= read -r id; do
       [ -n "$id" ] || continue
       [[ "$id" =~ $ID_RE ]] || { echo "claude-helper: unexpected container id from docker" >&2; exit 1; }
       running+=("$id")
-    done < <("$DOCKER" ps -q --filter "label=${LABEL_KEY}")
+    done <<<"$ids"
     if [ "${#running[@]}" -eq 0 ]; then
       echo "no running app containers"
       exit 0

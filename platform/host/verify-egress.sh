@@ -17,7 +17,7 @@
 #                    blocked on a non-53 port (bounded timeout), a public lookup and connect must work, and two
 #                    containers must reach each other (bridge/bridge, docker0/bridge).
 #   --probe-inbound  publish a disposable container port on the LAN address and watch the final DROP counter while
-#                    a LAN client (another machine) tries to connect; used once in Step 8.
+#                    a LAN client (another machine) tries to connect; run once by you after install.
 #
 # Usage: verify-egress.sh [--host ALIAS] [--probe] [--probe-inbound]
 #   --host   stream this script over one `ssh <alias> bash -s` call (the remote needs bash, sudo -n, iptables, docker);
