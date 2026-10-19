@@ -3,6 +3,8 @@
 
 # Live-host targets (host-*) stream a script to the app host over SSH. HOST (an ssh alias) is required, with no
 # default alias; ARGS is passed to the script. They are for you to run, never inside a worktree.
+# ARGS is expanded unquoted (word-split and globbed), so a --pubkey-file path must not contain spaces or glob
+# characters (* ? [).
 export HOST
 export ARGS
 

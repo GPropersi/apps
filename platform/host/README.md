@@ -59,8 +59,10 @@ thin wrappers around it, for example:
 
 ```
 make host-verify-egress HOST=<alias>
-platform/host/verify-egress.sh --host <alias> --probe
+make host-verify-egress HOST=<alias> ARGS="--probe"
 ```
+
+`ARGS` is expanded unquoted, so a `--pubkey-file` path must not contain spaces or glob characters (`*`, `?`, `[`).
 
 For `--pubkey-file`, the local file is read and validated on the client and its content is forwarded as a quoted
 argument; the host re-validates it before writing. An optional `--from PATTERN` limits the key to matching
