@@ -291,7 +291,6 @@ Match User $DEPLOY_USER
     PermitTunnel no
     GatewayPorts no
     PermitUserRC no
-    PermitUserEnvironment no
     PasswordAuthentication no
     KbdInteractiveAuthentication no
     AuthenticationMethods publickey

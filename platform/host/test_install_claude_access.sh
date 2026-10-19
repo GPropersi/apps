@@ -129,7 +129,7 @@ user=""
 for a in "$@"; do case "$a" in user=*) user="${a#user=}"; user="${user%%,*}" ;; esac; done
 declare -A cfg=([authorizedkeysfile]=".ssh/authorized_keys" [permittty]=yes [allowtcpforwarding]=yes
   [allowagentforwarding]=yes [x11forwarding]=yes [permittunnel]=no [permituserrc]=yes
-  [allowstreamlocalforwarding]=yes [gatewayports]=yes [permituserenvironment]=yes
+  [allowstreamlocalforwarding]=yes [gatewayports]=yes [permituserenvironment]=no
   [passwordauthentication]=yes [kbdinteractiveauthentication]=yes [authenticationmethods]=any [authorizedkeyscommand]=none)
 if [ -f "$dropin" ] && [ "$user" = "claude" ]; then
   in=0
@@ -309,7 +309,6 @@ Match User claude
     PermitTunnel no
     GatewayPorts no
     PermitUserRC no
-    PermitUserEnvironment no
     PasswordAuthentication no
     KbdInteractiveAuthentication no
     AuthenticationMethods publickey
