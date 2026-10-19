@@ -51,11 +51,39 @@ dry_case "claude-access, ARGS unset" host-claude-access install-claude-access.sh
 dry_case "deploy-user with ARGS" host-deploy-user install-deploy-user.sh ARGS='install --pubkey-file k'
 dry_case "claude-access with ARGS" host-claude-access install-claude-access.sh ARGS='install --pubkey-file k'
 dry_case "verify-egress with ARGS" host-verify-egress verify-egress.sh ARGS='--probe'
-t_reset_calls
-run_cmd env -u ARGS make -n -s -C "$root" host-deploy-user HOST=alias
-expect_out_has "ARGS unset: the default mode is status" '${ARGS:-status}'
-run_cmd env ARGS='install --pubkey-file k' make -n -s -C "$root" host-claude-access HOST=alias
-expect_out_has "ARGS set: the recipe expands ARGS from the environment" '${ARGS:-status}'
+# make -n leaves the shell expansion of ARGS unexpanded, so the real recipes run here against stub scripts in a
+# scratch tree that record their argv; nothing reaches ssh or a host.
+stub_tree="$T_TMP/stub-tree"
+rm -rf "$stub_tree"
+mkdir -p "$stub_tree/platform/host"
+cp -- "$root/Makefile" "$stub_tree/Makefile"
+for stub in install-deploy-user.sh install-claude-access.sh verify-egress.sh; do
+  printf '#!/usr/bin/env bash\nprintf "%%s\\n" "$*" > "$STUB_ARGV"\n' > "$stub_tree/platform/host/$stub"
+  chmod +x "$stub_tree/platform/host/$stub"
+done
+stub_argv="$T_TMP/stub-argv.txt"
+stub_run() { # target [ARGS value; omit to leave ARGS unset]
+  rm -f "$stub_argv"
+  if [ "$#" -ge 2 ]; then
+    run_cmd env STUB_ARGV="$stub_argv" ARGS="$2" make -s -C "$stub_tree" "$1" HOST=alias
+  else
+    run_cmd env -u ARGS STUB_ARGV="$stub_argv" make -s -C "$stub_tree" "$1" HOST=alias
+  fi
+}
+stub_run host-deploy-user
+expect_rc "stub run: deploy-user, ARGS unset" 0
+expect_eq "ARGS unset: the default mode is status" "$(cat "$stub_argv")" "status --host alias"
+stub_run host-claude-access
+expect_eq "ARGS unset: claude-access defaults to status" "$(cat "$stub_argv")" "status --host alias"
+stub_run host-deploy-user 'install --pubkey-file k'
+expect_rc "stub run: deploy-user, ARGS set" 0
+expect_eq "ARGS set: deploy-user receives ARGS then --host" "$(cat "$stub_argv")" "install --pubkey-file k --host alias"
+stub_run host-claude-access 'install --pubkey-file k'
+expect_eq "ARGS set: claude-access receives ARGS then --host" "$(cat "$stub_argv")" "install --pubkey-file k --host alias"
+stub_run host-verify-egress '--probe'
+expect_eq "ARGS reaches verify-egress" "$(cat "$stub_argv")" "--probe --host alias"
+stub_run host-verify-egress
+expect_eq "ARGS unset: verify-egress gets only --host" "$(cat "$stub_argv")" "--host alias"
 
 # make test on scratch trees: a failing test fails the run, a passing tree passes, an empty tree is an error.
 scratch_make() {
