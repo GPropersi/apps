@@ -88,7 +88,7 @@ case "$sub" in
     [ "$nargs" -eq 0 ] || reject arg-count "$len"
     ;;
   logs)
-    [ "$nargs" -ge 1 ] && [ "$nargs" -le 2 ] || reject arg-count "$len"
+    { [ "$nargs" -ge 1 ] && [ "$nargs" -le 2 ]; } || reject arg-count "$len"
     valid_app
     if [ "$nargs" -eq 2 ]; then
       [[ "${words[2]}" =~ $LINES_RE ]] || reject bad-lines "$len"

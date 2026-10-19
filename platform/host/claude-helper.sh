@@ -102,7 +102,7 @@ case "$sub" in
     "$FREE" -m
     ;;
   logs)
-    [ "$#" -ge 1 ] && [ "$#" -le 2 ] || reject arg-count
+    { [ "$#" -ge 1 ] && [ "$#" -le 2 ]; } || reject arg-count
     valid_app "$1"
     lines="$DEFAULT_LINES"
     if [ "$#" -eq 2 ]; then

@@ -95,7 +95,7 @@ pass() { printf 'PASS: %s\n' "$1"; }
 fail() { printf 'FAIL: %s\n' "$1"; FAILURES=$((FAILURES + 1)); }
 die() { err "install-claude-access: $1"; exit "${2:-1}"; }
 
-# shellcheck disable=SC2329 # invoked through the EXIT trap
+# shellcheck disable=SC2329,SC2317 # invoked through the EXIT trap
 cleanup() {
   [ -z "$TMP" ] || rm -rf "$TMP"
   return 0
@@ -205,7 +205,7 @@ case "$sub" in
     [ "$nargs" -eq 0 ] || reject arg-count "$len"
     ;;
   logs)
-    [ "$nargs" -ge 1 ] && [ "$nargs" -le 2 ] || reject arg-count "$len"
+    { [ "$nargs" -ge 1 ] && [ "$nargs" -le 2 ]; } || reject arg-count "$len"
     valid_app
     if [ "$nargs" -eq 2 ]; then
       [[ "${words[2]}" =~ $LINES_RE ]] || reject bad-lines "$len"
@@ -334,7 +334,7 @@ case "$sub" in
     "$FREE" -m
     ;;
   logs)
-    [ "$#" -ge 1 ] && [ "$#" -le 2 ] || reject arg-count
+    { [ "$#" -ge 1 ] && [ "$#" -le 2 ]; } || reject arg-count
     valid_app "$1"
     lines="$DEFAULT_LINES"
     if [ "$#" -eq 2 ]; then
@@ -385,7 +385,7 @@ check_from() {
 # read_key_file <path>: prints the validated key line.
 read_key_file() {
   local file="$1" lines=()
-  [ -f "$file" ] && [ -r "$file" ] || die "cannot read public key file: $file" 2
+  { [ -f "$file" ] && [ -r "$file" ]; } || die "cannot read public key file: $file" 2
   mapfile -t lines < "$file"
   [ "${#lines[@]}" -eq 1 ] || die "public key file must hold exactly one line" 2
   check_key "${lines[0]}"
@@ -741,7 +741,7 @@ live_ssh_claude() {
   ssh -i "$IDENTITY" -o IdentitiesOnly=yes -o BatchMode=yes "${LIVE_SSH_OPTS[@]}" -o User="$CLAUDE_USER" -- "$HOST" "$@" </dev/null
 }
 
-# shellcheck disable=SC2329 # invoked through the EXIT trap
+# shellcheck disable=SC2329,SC2317 # invoked through the EXIT trap
 live_cleanup() {
   # Only a container this run created (its id was captured from docker run) is ever removed, and by id.
   if [ "$LIVE_CONTAINER_MADE" -eq 1 ] && [ -n "$LIVE_CID" ]; then
@@ -763,7 +763,7 @@ do_live() {
   local image="${LIVE_TEST_IMAGE:-docker.io/library/busybox:1.37.0}" existing cid
   [ -n "$HOST" ] || die "verify --live needs --host" 2
   [ -n "$IDENTITY" ] || die "verify --live needs --identity" 2
-  [ -f "$IDENTITY" ] && [ -r "$IDENTITY" ] || die "cannot read identity file: $IDENTITY" 2
+  { [ -f "$IDENTITY" ] && [ -r "$IDENTITY" ]; } || die "cannot read identity file: $IDENTITY" 2
   # The image is interpolated into a remote shell command: plain image-reference characters only, no leading dash.
   [[ "$image" =~ $IMAGE_RE ]] || die "LIVE_TEST_IMAGE must match $IMAGE_RE" 2
   TMP="$(mktemp -d)"
@@ -821,12 +821,12 @@ main() {
     case "$1" in
       install | status | verify) cmd="$1"; shift ;;
       --live) live=1; shift ;;
-      --identity) [ "$#" -ge 2 ] && [ -n "$2" ] || die "missing value for --identity" 2; IDENTITY="$2"; shift 2 ;;
-      --host) [ "$#" -ge 2 ] && [ -n "$2" ] || die "missing value for --host" 2; host="$2"; shift 2 ;;
-      --pubkey-file) [ "$#" -ge 2 ] && [ -n "$2" ] || die "missing value for --pubkey-file" 2; keyfile="$2"; shift 2 ;;
+      --identity) { [ "$#" -ge 2 ] && [ -n "$2" ]; } || die "missing value for --identity" 2; IDENTITY="$2"; shift 2 ;;
+      --host) { [ "$#" -ge 2 ] && [ -n "$2" ]; } || die "missing value for --host" 2; host="$2"; shift 2 ;;
+      --pubkey-file) { [ "$#" -ge 2 ] && [ -n "$2" ]; } || die "missing value for --pubkey-file" 2; keyfile="$2"; shift 2 ;;
       --key) [ "$#" -ge 2 ] || die "missing value for --key" 2; KEY="$2"; shift 2 ;;
-      --from) [ "$#" -ge 2 ] && [ -n "$2" ] || die "missing value for --from" 2; FROM="$2"; shift 2 ;;
-      --admin-user) [ "$#" -ge 2 ] && [ -n "$2" ] || die "missing value for --admin-user" 2; ADMIN_ARG="$2"; shift 2 ;;
+      --from) { [ "$#" -ge 2 ] && [ -n "$2" ]; } || die "missing value for --from" 2; FROM="$2"; shift 2 ;;
+      --admin-user) { [ "$#" -ge 2 ] && [ -n "$2" ]; } || die "missing value for --admin-user" 2; ADMIN_ARG="$2"; shift 2 ;;
       -h | --help) awk 'NR == 1 { next } /^#/ { print; next } { exit }' "${BASH_SOURCE[0]}"; exit 0 ;;
       *) die "unknown argument: $1" 2 ;;
     esac

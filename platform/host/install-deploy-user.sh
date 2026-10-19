@@ -68,7 +68,7 @@ pass() { printf 'PASS: %s\n' "$1"; }
 fail() { printf 'FAIL: %s\n' "$1"; FAILURES=$((FAILURES + 1)); }
 die() { err "install-deploy-user: $1"; exit "${2:-1}"; }
 
-# shellcheck disable=SC2329 # invoked through the EXIT trap
+# shellcheck disable=SC2329,SC2317 # invoked through the EXIT trap
 cleanup() {
   [ -z "$TMP" ] || rm -rf "$TMP"
   return 0
@@ -261,7 +261,7 @@ check_from() {
 # read_key_file <path>: prints the validated key line.
 read_key_file() {
   local file="$1" lines=()
-  [ -f "$file" ] && [ -r "$file" ] || die "cannot read public key file: $file" 2
+  { [ -f "$file" ] && [ -r "$file" ]; } || die "cannot read public key file: $file" 2
   mapfile -t lines < "$file"
   [ "${#lines[@]}" -eq 1 ] || die "public key file must hold exactly one line" 2
   check_key "${lines[0]}"
@@ -559,11 +559,11 @@ main() {
   while [ "$#" -gt 0 ]; do
     case "$1" in
       install | status | verify) cmd="$1"; shift ;;
-      --host) [ "$#" -ge 2 ] && [ -n "$2" ] || die "missing value for --host" 2; host="$2"; shift 2 ;;
-      --pubkey-file) [ "$#" -ge 2 ] && [ -n "$2" ] || die "missing value for --pubkey-file" 2; keyfile="$2"; shift 2 ;;
+      --host) { [ "$#" -ge 2 ] && [ -n "$2" ]; } || die "missing value for --host" 2; host="$2"; shift 2 ;;
+      --pubkey-file) { [ "$#" -ge 2 ] && [ -n "$2" ]; } || die "missing value for --pubkey-file" 2; keyfile="$2"; shift 2 ;;
       --key) [ "$#" -ge 2 ] || die "missing value for --key" 2; KEY="$2"; shift 2 ;;
-      --from) [ "$#" -ge 2 ] && [ -n "$2" ] || die "missing value for --from" 2; FROM="$2"; shift 2 ;;
-      --admin-user) [ "$#" -ge 2 ] && [ -n "$2" ] || die "missing value for --admin-user" 2; ADMIN_ARG="$2"; shift 2 ;;
+      --from) { [ "$#" -ge 2 ] && [ -n "$2" ]; } || die "missing value for --from" 2; FROM="$2"; shift 2 ;;
+      --admin-user) { [ "$#" -ge 2 ] && [ -n "$2" ]; } || die "missing value for --admin-user" 2; ADMIN_ARG="$2"; shift 2 ;;
       -h | --help) awk 'NR == 1 { next } /^#/ { print; next } { exit }' "${BASH_SOURCE[0]}"; exit 0 ;;
       *) die "unknown argument: $1" 2 ;;
     esac
