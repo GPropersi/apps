@@ -315,11 +315,11 @@ cidr_has() {
 }
 
 # The snippets below are single-quoted on purpose: they expand inside the container, not here.
-# shellcheck disable=SC2016
 # The in-container connect helper: prints open | blocked (bounded timeout) | refused | error.
 # The outer `timeout` outlasts nc's own -w so a dropped SYN is killed, never left hanging.
 # busybox nc -w exits 1 with NO message when its own connect timeout fires (seen on the Pi), so a silent rc 1 is
 # blocked; a refusal, reset or any other nc message keeps its own meaning above.
+# shellcheck disable=SC2016
 readonly CONN_FN='conn() {
   err=$(timeout 6 nc -w 3 "$1" "$2" </dev/null 2>&1 >/dev/null); rc=$?
   case $rc in

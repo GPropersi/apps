@@ -597,6 +597,8 @@ real_case "gateway other stderr is a container error" 2 NC_RC=1 "NC_ERR=nc: bad 
 expect_out_has "unknown error classified error" "container/network error"
 real_case "public connect timed out" 1 OTHER_RC=1 "OTHER_ERR=nc: timed out"
 expect_out_has "public timed out is not success" "did not succeed"
+real_case "public silent rc 1" 1 OTHER_RC=1 OTHER_ERR=
+expect_out_has "public silent rc 1 is not success" "did not succeed"
 real_case "lookup fails" 1 NSLOOKUP_RC=1
 real_case "container-to-container refused is retried then fails" 1 OTHER_RC=1 "OTHER_ERR=nc: Connection refused"
 real_case "missing nc" 2 ABSENT=nc
@@ -613,6 +615,12 @@ reset; export REAL_SNIPPET=1; run_cmd bash "$T_TMP/mutant.sh" --probe
 expect_rc "an always-blocked classification fails the happy path" 1
 reset; export REAL_SNIPPET=1; run_cmd bash "$script" --probe
 expect_rc "the unmutated script passes the same run" 0
+
+# second mutant: without the empty-stderr arm a silent rc 1 is an error, so the happy path must exit 2
+sed '/^ *"") if \[ "\$rc" -eq 1 \]/d' "$script" > "$T_TMP/mutant2.sh"
+if cmp -s "$script" "$T_TMP/mutant2.sh"; then _fail "second mutation applied" "the sed did not change the script"; else _pass; fi
+reset; export REAL_SNIPPET=1; run_cmd bash "$T_TMP/mutant2.sh" --probe
+expect_rc "dropping the empty-stderr arm fails the happy path" 2
 
 # ===================== --probe-inbound =====================
 
