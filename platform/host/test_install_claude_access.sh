@@ -360,6 +360,11 @@ fresh
 inst install --pubkey-file "$T_TMP/key.pub" --from "10.*,!bad.example"
 expect_rc "from= accepted" 0
 expect_eq "from= prefix position" "$(cat "$(root $KEYFILE_PATH)")" "from=\"10.*,!bad.example\",restrict,command=\"/usr/local/bin/claude-access\" $KEY"
+# verify accepts the from="...", form (the optional prefix branch of the key-line check)
+apply_printed_sudoers
+inst verify
+expect_rc "verify passes after a --from install" 0
+expect_out_lacks "verify has no FAIL after a --from install" "FAIL"
 
 # ---- 4. sshd -t failure and unchanged-config guards: restore, no reload, non-zero ----
 fresh
@@ -487,6 +492,40 @@ bad_key_case "not base64" "ssh-ed25519 not*base64 x\n"
 bad_key_case "missing base64" "ssh-ed25519\n"
 bad_key_case "semicolon comment" "$KEY;id\n"
 bad_key_case "private key header" "-----BEGIN OPENSSH PRIV""ATE KEY-----\n"
+bad_key_case "four padding characters" "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGFrZQ==== x\n"
+
+# Accepted key shapes: every supported type, padded and unpadded base64, with and without a comment.
+good_key_case() {
+  local label="$1" value="$2"
+  fresh
+  printf '%s\n' "$value" > "$T_TMP/good.pub"
+  inst install --pubkey-file "$T_TMP/good.pub"
+  expect_rc "accepted key: $label" 0
+  expect_eq "accepted key is written verbatim: $label" "$(cat "$(root $KEYFILE_PATH)")" "restrict,command=\"/usr/local/bin/claude-access\" $value"
+  fresh
+  inst install --key "$value"
+  expect_rc "accepted key via --key: $label" 0
+  apply_printed_sudoers
+  inst verify
+  expect_rc "verify accepts the key line: $label" 0
+}
+good_key_case "ssh-rsa padded with comment" "ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABgQC7 user@host"
+good_key_case "ssh-rsa unpadded no comment" "ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABgQC7"
+good_key_case "ecdsa nistp256" "ecdsa-sha2-nistp256 AAAAE2VjZHNhLXNoYTItbmlzdHAyNTY= c"
+good_key_case "ecdsa nistp384" "ecdsa-sha2-nistp384 AAAAE2VjZHNhLXNoYTItbmlzdHAzODQ="
+good_key_case "ecdsa nistp521" "ecdsa-sha2-nistp521 AAAAE2VjZHNhLXNoYTItbmlzdHA1MjE== c"
+good_key_case "sk-ssh-ed25519" "sk-ssh-ed25519@openssh.com AAAAGnNrLXNzaC1lZDI1NTE5QG9wZW5zc2guY29t c"
+good_key_case "sk-ecdsa" "sk-ecdsa-sha2-nistp256@openssh.com AAAAInNrLWVjZHNhLXNoYTItbmlzdHAyNTZAb3BlbnNzaC5jb20="
+
+# Accepted from= values include the punctuation / ? and :
+for from_ok in '10.0.0.0/8' 'host?.example' 'fe80::1' 'a.example,!b.example'; do
+  fresh
+  inst install --pubkey-file "$T_TMP/key.pub" --from "$from_ok"
+  expect_rc "accepted from=: $from_ok" 0
+  apply_printed_sudoers
+  inst verify
+  expect_rc "verify accepts from=: $from_ok" 0
+done
 
 fresh
 inst install --pubkey-file "$T_TMP/does-not-exist.pub"
@@ -819,6 +858,26 @@ rm -f "$(root $KEYFILE_PATH)"
 printf '%s\n' "$KEY" > "$T_TMP/elsewhere"
 ln -s "$T_TMP/elsewhere" "$(root $KEYFILE_PATH)"
 tamper_case "key file is a symlink" "key file is a symlink"
+
+installed_fresh
+cp -- "$(root $SUDOERS_PATH)" "$T_TMP/sudoers-elsewhere"
+rm -f "$(root $SUDOERS_PATH)"
+ln -s "$T_TMP/sudoers-elsewhere" "$(root $SUDOERS_PATH)"
+tamper_case "sudoers fragment is a symlink" "sudoers fragment is a symlink"
+
+# Repair: an installed file with the wrong mode is rewritten by a re-run, and verify is then clean.
+installed_fresh
+chmod 666 "$(root $INSTALLED_ACCESS)"
+chmod 600 "$(root $KEYFILE_PATH)"
+inst install --pubkey-file "$T_TMP/key.pub"
+expect_rc "re-install over drifted modes succeeds" 0
+expect_out_has "the drifted wrapper is rewritten" "changed: $(root $INSTALLED_ACCESS)"
+expect_out_has "the drifted key file is rewritten" "changed: $(root $KEYFILE_PATH)"
+expect_eq "wrapper mode is repaired" "$(/usr/bin/stat -c %a "$(root $INSTALLED_ACCESS)")" "755"
+expect_eq "key file mode is repaired" "$(/usr/bin/stat -c %a "$(root $KEYFILE_PATH)")" "644"
+inst verify
+expect_rc "verify is clean after the repair" 0
+expect_out_lacks "no FAIL after the repair" "FAIL"
 
 # ---- 9. verify --live ----
 IDENT="$T_TMP/id_test"
