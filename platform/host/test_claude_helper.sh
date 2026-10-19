@@ -76,7 +76,7 @@ case "$sub" in
       else printf '%s\t%s\t%s\n' "$app" "$name" "$state"; fi
     done < "$STATE/containers"
     ;;
-  logs) echo "log line from $*" ;;
+  logs) [ ! -f "$STATE/logs_fail" ] || exit 1; echo "log line from $*" ;;
   stats) echo "stats for $*" ;;
   restart) [ ! -f "$STATE/restart_fail" ] || exit 1; echo "$*" ;;
   *) exit 7 ;;
@@ -85,6 +85,7 @@ EOF
 
 mkstub systemctl <<'EOF'
 if [ "$1" = "is-active" ]; then
+  if [ -f "$STATE/systemctl_silent" ]; then exit 4; fi
   if [ -f "$STATE/inactive_$2" ]; then echo inactive; exit 3; fi
   echo active; exit 0
 fi
@@ -145,7 +146,20 @@ h stats
 expect_rc "stats with no app containers" 0
 expect_out_has "stats reports none" "no running app containers"
 expect_calls_lacks "no docker stats call without ids" "docker stats"
+
+# ps with only unlabelled containers: the header alone, no infrastructure leaked
+h ps
+expect_rc "ps with only unlabelled containers" 0
+expect_eq "ps prints just the header" "$out" "$(printf 'APP\tNAME\tSTATUS')"
+expect_out_lacks "ps leaks no unlabelled container" "traefik"
 mv "$STATE/containers.full" "$STATE/containers"
+
+# stats fails closed when docker itself fails (no 'no running app containers' masking)
+touch "$STATE/docker_fail"
+h stats
+expect_rc "a docker failure fails stats" 1
+expect_out_lacks "docker failure does not read as an empty fleet" "no running app containers"
+rm -f "$STATE/docker_fail"
 
 # ---- logs ----
 h logs shop
@@ -217,6 +231,12 @@ expect_rc "a docker failure fails the helper" 1
 expect_eq "docker failure: no restart" "$(docker_mutations)" ""
 rm -f "$STATE/docker_fail"
 
+# a failing docker logs propagates as a non-zero exit
+touch "$STATE/logs_fail"
+h logs shop
+if [ "$rc" -ne 0 ]; then _pass; else _fail "a failing docker logs makes the helper exit non-zero" "rc=$rc"; fi
+rm -f "$STATE/logs_fail"
+
 # a failing docker restart propagates as a non-zero exit and no success line is printed
 touch "$STATE/restart_fail"
 h restart shop
@@ -254,6 +274,11 @@ h status
 expect_rc "status reports an inactive unit without failing" 0
 expect_out_has "inactive unit shown" "docker: inactive"
 rm -f "$STATE/inactive_docker"
+touch "$STATE/systemctl_silent"
+h status
+expect_rc "status survives a systemctl that prints nothing" 0
+expect_out_has "a silent systemctl reads as unknown" "docker: unknown"
+rm -f "$STATE/systemctl_silent"
 
 # ---- invalid arguments, invoked directly: exit 2, no docker call ----
 reject_case() {
