@@ -204,7 +204,9 @@ run_cmd "$tool" --check --root "$repo_root"
 expect_rc "the real installers are in sync" 0
 if [[ "$out" =~ ([0-9]+)\ payload\(s\) ]] && [ "${BASH_REMATCH[1]}" -ge 2 ]; then _pass; else _fail "the real run discovers at least the dispatcher and wrapper regions" "$out"; fi
 
-if [ -f "$repo_root/platform/host/install-deploy-user.sh" ]; then
+[ -f "$repo_root/platform/host/install-deploy-user.sh" ] || _fail "the real deploy installer exists" "platform/host/install-deploy-user.sh is missing"
+[ -f "$repo_root/platform/host/install-claude-access.sh" ] || _fail "the real claude installer exists" "platform/host/install-claude-access.sh is missing"
+{
   real="$T_TMP/real"
   rm -rf "$real"
   mkdir -p "$real/platform/host"
@@ -224,6 +226,16 @@ if [ -f "$repo_root/platform/host/install-deploy-user.sh" ]; then
   expect_rc "a drifted wrapper source fails the check" 1
   expect_out_has "drift names the wrapper source" "DRIFT platform/host/install-deploy-user.sh: platform/host/login-shell.sh"
   expect_out_lacks "only the wrapper drifted" "platform/host/platform.sh"
-fi
+
+  # the claude installer's two payloads are checked too
+  for src in claude-access.sh claude-helper.sh; do
+    run_cmd "$tool" --root "$real"
+    expect_rc "regenerating before the $src drift" 0
+    echo '# drift' >> "$real/platform/host/$src"
+    run_cmd "$tool" --check --root "$real"
+    expect_rc "a drifted $src source fails the check" 1
+    expect_out_has "drift names the claude installer and $src" "DRIFT platform/host/install-claude-access.sh: platform/host/$src"
+  done
+}
 
 t_finish

@@ -51,6 +51,9 @@ is unset. For the two installers, `status` (the default) reports every check wit
 exits 1 on any failure; the egress check has no mode and always exits 1 on a failure. `--probe` needs the LAN
 default gateway to fall inside a deny range (otherwise it exits 2 rather than pass vacuously).
 
+`install-deploy-user.sh` and `install-claude-access.sh` intentionally duplicate shared scaffolding, because each is
+streamed standalone over `ssh bash -s` and cannot source a common file. A fix to one must be mirrored in the other.
+
 ## Streaming invocation
 
 `--host ALIAS` streams the script over one `ssh ALIAS bash -s` call (BatchMode, no tty), except
@@ -100,7 +103,8 @@ output-interface exemption (it would reopen the inbound backstop).
 Emptying or removing the deny file never removes rules (the run is refused). Emptying or removing the allow
 file is valid, and the next install drops the port 53 exceptions. Either edit the files and re-run `make
 host-base HOST=<alias> ARGS=install` from the stronghold, or restore the pre-egress copy: copy
-`/etc/docker/docker-user.rules.bak` back over `/etc/docker/docker-user.rules`, then load it with `sudo
+`/etc/docker/docker-user.rules.bak` back over `/etc/docker/docker-user.rules`, run `sudo iptables -F DOCKER-USER`
+(a `--noflush` restore does not clear a chain the file declares, so the egress rules would otherwise stay), then load it with `sudo
 iptables-restore --noflush /etc/docker/docker-user.rules` (never restart `docker-user-firewall.service`, docker
 requires it), and do not re-run `host-base install` afterwards (it would re-render the egress rules). The `.bak` is written only when the rendered rules differ from the live
 file, and an existing `.bak` is never overwritten, so repeated installs keep the first replaced (pre-egress)

@@ -15,7 +15,8 @@
 # Opt-in probes (start containers; nothing starts without a flag; every resource is removed on every path):
 #   --probe          a pinned tiny image on a throwaway bridge: the LAN default gateway (found on the host) must be
 #                    blocked on a non-53 port (bounded timeout), a public lookup and connect must work, and two
-#                    containers must reach each other (bridge/bridge, docker0/bridge).
+#                    containers on the same bridge must reach each other (the docker0 pair RETURNs are checked
+#                    statically only: default isolation separates docker0 from user bridges, so there is no probe).
 #   --probe-inbound  publish a disposable container port on the LAN address and watch the final DROP counter while
 #                    a LAN client (another machine) tries to connect; run once by you after install.
 #
@@ -51,7 +52,6 @@ readonly NET="platform-verify-egress-net"
 readonly C_PROBE="platform-verify-egress-probe"
 readonly C_SERVER="platform-verify-egress-b"
 readonly C_BRIDGE="platform-verify-egress-a"
-readonly C_DOCKER0="platform-verify-egress-d0"
 readonly C_INBOUND="platform-verify-egress-inbound"
 readonly SERVER_PORT=8080
 
@@ -288,7 +288,7 @@ check_ipv6() {
 
 remove_probe_resources() {
   local n
-  for n in "$C_PROBE" "$C_SERVER" "$C_BRIDGE" "$C_DOCKER0" "$C_INBOUND"; do
+  for n in "$C_PROBE" "$C_SERVER" "$C_BRIDGE" "$C_INBOUND"; do
     "${DOCKER[@]}" rm -f "$n" >/dev/null 2>&1 || true
   done
   "${DOCKER[@]}" network rm "$NET" >/dev/null 2>&1 || true
@@ -412,7 +412,7 @@ run_probe() {
 }
 
 probe_container_to_container() {
-  local res server_ip=""
+  local res
   docker_run -d --name "$C_SERVER" --network "$NET" "$IMAGE" sh -c "exec httpd -f -p $SERVER_PORT -h /tmp" >/dev/null \
     || die2 "cannot start the container-to-container server container"
   res=refused
@@ -425,16 +425,6 @@ probe_container_to_container() {
     open) pass "bridge/bridge: a container reaches another on the same bridge" ;;
     error) die2 "bridge/bridge connect failed with a container/network error" ;;
     *) fail "bridge/bridge: container-to-container connect did not succeed ($res)" ;;
-  esac
-
-  server_ip="$("${DOCKER[@]}" inspect -f "{{(index .NetworkSettings.Networks \"$NET\").IPAddress}}" "$C_SERVER")" \
-    || die2 "cannot read the server container address"
-  [ -n "$server_ip" ] || die2 "the server container has no address on $NET"
-  res="$(connect_from "$C_DOCKER0" -- "$server_ip" "$SERVER_PORT")" || exit $?
-  case "$res" in
-    open) pass "docker0/bridge: a docker0 container reaches a bridge container" ;;
-    error) die2 "docker0/bridge connect failed with a container/network error" ;;
-    *) fail "docker0/bridge: container-to-container connect did not succeed ($res)" ;;
   esac
 }
 

@@ -20,7 +20,6 @@ OTHER="$(t_ip4 10 77 0 0)/16"
 GW="$(t_ip4 198 51 100 1)"
 GW_OUTSIDE="$(t_ip4 192 0 2 1)"
 LAN="$(t_ip4 192 0 2 50)"
-SERVER_IP_V="$(t_ip4 172 30 0 2)"
 DENY_FILE="$T_TMP/deny"
 ALLOW_FILE="$T_TMP/allow"
 CHAIN_FILE="$T_TMP/chain.txt"
@@ -66,7 +65,6 @@ case "$1" in
       *) exit 0 ;;
     esac ;;
   rm) exit 0 ;;
-  inspect) echo "${SERVER_IP:-}"; exit 0 ;;
   port) echo "${PORT_OUT:-}"; exit 0 ;;
   run)
     name=""; prev=""
@@ -79,7 +77,7 @@ case "$1" in
     # nc/timeout/nslookup on PATH (ABSENT lists tools to leave out), so the in-container classification is tested.
     real=0
     if [ "${REAL_SNIPPET:-}" = 1 ]; then
-      case "$name" in platform-verify-egress-probe | platform-verify-egress-a | platform-verify-egress-d0) real=1 ;; esac
+      case "$name" in platform-verify-egress-probe | platform-verify-egress-a) real=1 ;; esac
     fi
     if [ "$real" = 1 ]; then
       args=("$@"); n=${#args[@]}; i=0
@@ -97,7 +95,6 @@ case "$1" in
     case "$name" in
       platform-verify-egress-probe) printf '%s\n' "${PROBE_OUT:-}" ;;
       platform-verify-egress-a) echo "RESULT=${CONN_A:-open}" ;;
-      platform-verify-egress-d0) echo "RESULT=${CONN_D0:-open}" ;;
     esac
     exit 0 ;;
 esac
@@ -204,9 +201,9 @@ reset() {
   export VERIFY_EGRESS_INBOUND_WAIT=5
   export VERIFY_EGRESS_IPTABLES="$STUB_BIN/iptables"
   export IPT_RC="" IPT_EMPTY="" IPT_WARN="" IPV6=false IPV6_NET=false LS_RC=0 NETS="aaa bbb"
-  export INSPECT_RC=0 NETCREATE_RC=0 RUN_FAIL_NAME="" CONN_A=open CONN_D0=open SLEEP_SIG=""
+  export INSPECT_RC=0 NETCREATE_RC=0 RUN_FAIL_NAME="" CONN_A=open SLEEP_SIG=""
   export REAL_SNIPPET="" ABSENT="" NC_RC=1 NC_ERR="nc: timed out" OTHER_RC=0 OTHER_ERR="" NSLOOKUP_RC=0
-  export GW_ENV="$GW" LAN_ENV="$LAN" SERVER_IP="$SERVER_IP_V" PORT_OUT="$LAN:49153"
+  export GW_ENV="$GW" LAN_ENV="$LAN" PORT_OUT="$LAN:49153"
   export PROBE_OUT=$'TOOLS=ok\nLOOKUP=ok\nGATEWAY=blocked\nPUBLIC=open'
 }
 
@@ -217,7 +214,7 @@ count_calls() { grep -cF -- "$1" "$CALL_LOG" || true; }
 expect_clean() {
   expect_eq "$1: network removed last" "$(tail -n 1 "$CALL_LOG")" "docker network rm platform-verify-egress-net"
   local n
-  for n in probe b a d0 inbound; do
+  for n in probe b a inbound; do
     expect_eq "$1: $n removed at start and end" "$(count_calls "docker rm -f platform-verify-egress-$n")" "2"
   done
 }
@@ -487,7 +484,7 @@ expect_calls_has "probe creates the throwaway network" "docker network create pl
 expect_calls_has "probe targets the discovered gateway on a non-53 port" "probe $GW 443 example.com"
 expect_calls_lacks "probe never uses port 53 for the gateway" "probe $GW 53"
 expect_calls_has "probe runs the bridge/bridge check" "--name platform-verify-egress-a --network platform-verify-egress-net"
-expect_calls_has "probe runs the docker0/bridge check at the server address" "connect $SERVER_IP_V 8080"
+expect_calls_lacks "probe has no docker0 container" "platform-verify-egress-d0"
 expect_clean "probe pass"
 
 probe_case() { # label want_rc probe_out
@@ -553,13 +550,8 @@ c2c_case "bridge/bridge blocked" 1 CONN_A=blocked
 c2c_case "bridge/bridge refused" 1 CONN_A=refused
 expect_eq "c2c: refused is retried then fails (5 attempts)" "$(count_calls '--name platform-verify-egress-a')" "5"
 c2c_case "bridge/bridge container error" 2 CONN_A=error
-c2c_case "docker0/bridge blocked" 1 CONN_D0=blocked
-c2c_case "docker0/bridge refused" 1 CONN_D0=refused
-c2c_case "docker0/bridge container error" 2 CONN_D0=error
 c2c_case "server container fails to start" 2 RUN_FAIL_NAME=platform-verify-egress-b
 c2c_case "bridge client container fails to start" 2 RUN_FAIL_NAME=platform-verify-egress-a
-c2c_case "docker0 client container fails to start" 2 RUN_FAIL_NAME=platform-verify-egress-d0
-c2c_case "server address unreadable" 2 SERVER_IP=
 
 # a wrong-rules finding already recorded is never masked by a later container error (exit 1, not 2)
 reset; export PROBE_OUT=$'TOOLS=ok\nLOOKUP=ok\nGATEWAY=open\nPUBLIC=open' CONN_A=error; run_v --probe
