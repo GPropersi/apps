@@ -256,6 +256,8 @@ if cmp -s "$expected_dropin" "$(root $DROPIN_PATH)"; then _pass; else _fail "dro
 expect_eq "exactly one Match line" "$(grep -c '^Match' "$(root $DROPIN_PATH)")" "1"
 expect_eq "nothing after the Match block but indented directives" "$(sed -n '/^Match/,$p' "$(root $DROPIN_PATH)" | tail -n +2 | grep -vc '^    ')" "0"
 expect_eq "no global directive follows Match" "$(sed -n '/^Match/,$p' "$(root $DROPIN_PATH)" | grep -c '^[A-Za-z]')" "1"
+# global-only directives are invalid inside Match (sshd -t rejects them): none may appear in the drop-in (Step 8 bug).
+expect_eq "drop-in holds no global-only directive" "$(grep -ciE '^[[:space:]]*(PermitUserEnvironment|UsePAM|Port|ListenAddress|HostKey)([[:space:]]|$)' "$(root $DROPIN_PATH)")" "0"
 
 # sshd -t runs before the reload.
 t_lines="$(grep -n -E '^(fakesudo )?sshd -t|^sshd -t' "$CALL_LOG" | head -n1 | cut -d: -f1)"

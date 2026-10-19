@@ -141,6 +141,8 @@ if [ -f "$dropin" ] && [ "$user" = "claude" ]; then
   done < "$dropin"
   if [ -f "$STATE/global_override" ]; then cfg[allowtcpforwarding]=yes; fi
   if [ -f "$STATE/global_akc" ]; then cfg[authorizedkeyscommand]=/opt/global-akc; fi
+  # PermitUserEnvironment is global-only (not allowed in a Match block): "env_yes" simulates a global yes.
+  if [ -f "$STATE/env_yes" ]; then cfg[permituserenvironment]=yes; fi
 fi
 if [ -f "$dropin" ] && [ "$user" = "admin" ] && [ -f "$STATE/leak_admin" ]; then cfg[permittty]=no; fi
 if [ -f "$dropin" ] && [ "$user" = "deploy" ] && [ -f "$STATE/leak_deploy" ]; then cfg[permittty]=no; fi
@@ -321,6 +323,8 @@ for d in "PasswordAuthentication no" "KbdInteractiveAuthentication no" "Authenti
 done
 expect_eq "nothing after the Match block but indented directives" "$(sed -n '/^Match/,$p' "$(root $DROPIN_PATH)" | tail -n +2 | grep -vc '^    ')" "0"
 expect_eq "no global directive follows Match" "$(sed -n '/^Match/,$p' "$(root $DROPIN_PATH)" | grep -c '^[A-Za-z]')" "1"
+# global-only directives are invalid inside Match (sshd -t rejects them): none may appear in the drop-in (Step 8 bug).
+expect_eq "drop-in holds no global-only directive" "$(grep -ciE '^[[:space:]]*(PermitUserEnvironment|UsePAM|Port|ListenAddress|HostKey)([[:space:]]|$)' "$(root $DROPIN_PATH)")" "0"
 
 t_lines="$(grep -n -E '^(fakesudo )?sshd -t|^sshd -t' "$CALL_LOG" | head -n1 | cut -d: -f1)"
 r_lines="$(grep -n -E 'systemctl reload' "$CALL_LOG" | head -n1 | cut -d: -f1)"
@@ -826,6 +830,11 @@ installed_fresh
 sed -i '/AuthenticationMethods/d' "$(root $DROPIN_PATH)"
 inst verify
 expect_out_has "effective authenticationmethods is asserted" "effective 'authenticationmethods publickey'"
+
+installed_fresh
+touch "$STATE/env_yes"
+inst verify
+expect_out_has "effective permituserenvironment is asserted" "effective 'permituserenvironment no'"
 
 installed_fresh
 touch "$STATE/global_akc"
