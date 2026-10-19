@@ -119,7 +119,7 @@ user=""
 for a in "$@"; do case "$a" in user=*) user="${a#user=}"; user="${user%%,*}" ;; esac; done
 declare -A cfg=([authorizedkeysfile]=".ssh/authorized_keys" [permittty]=yes [allowtcpforwarding]=yes
   [allowagentforwarding]=yes [x11forwarding]=yes [permittunnel]=no [permituserrc]=yes
-  [allowstreamlocalforwarding]=yes [gatewayports]=yes [permituserenvironment]=yes
+  [allowstreamlocalforwarding]=yes [gatewayports]=yes [permituserenvironment]=no
   [passwordauthentication]=yes [kbdinteractiveauthentication]=yes [authenticationmethods]=any [authorizedkeyscommand]=/bin/keys)
 if [ -f "$dropin" ] && [ "$user" = "deploy" ]; then
   in=0
@@ -131,6 +131,8 @@ if [ -f "$dropin" ] && [ "$user" = "deploy" ]; then
   done < "$dropin"
   # "global_override": an earlier global setting wins over the Match block (sshd is first-value-wins).
   if [ -f "$STATE/global_override" ]; then cfg[allowtcpforwarding]=yes; fi
+  # PermitUserEnvironment is global-only (not allowed in a Match block): "env_yes" simulates a global yes.
+  if [ -f "$STATE/env_yes" ]; then cfg[permituserenvironment]=yes; fi
 fi
 if [ -f "$dropin" ] && [ "$user" != "deploy" ] && [ -f "$STATE/leak" ]; then cfg[permittty]=no; fi
 if [ -f "$STATE/leak_key" ] && [ "$user" != "deploy" ] && [ -f "$dropin" ]; then cfg[authorizedkeysfile]="/etc/ssh/authorized_keys.d/deploy"; fi
@@ -245,7 +247,6 @@ Match User deploy
     PermitTunnel no
     GatewayPorts no
     PermitUserRC no
-    PermitUserEnvironment no
     PasswordAuthentication no
     KbdInteractiveAuthentication no
     AuthenticationMethods publickey
@@ -255,6 +256,8 @@ if cmp -s "$expected_dropin" "$(root $DROPIN_PATH)"; then _pass; else _fail "dro
 expect_eq "exactly one Match line" "$(grep -c '^Match' "$(root $DROPIN_PATH)")" "1"
 expect_eq "nothing after the Match block but indented directives" "$(sed -n '/^Match/,$p' "$(root $DROPIN_PATH)" | tail -n +2 | grep -vc '^    ')" "0"
 expect_eq "no global directive follows Match" "$(sed -n '/^Match/,$p' "$(root $DROPIN_PATH)" | grep -c '^[A-Za-z]')" "1"
+# global-only directives are invalid inside Match (sshd -t rejects them): none may appear in the drop-in (Step 8 bug).
+expect_eq "drop-in holds no global-only directive" "$(grep -ciE '^[[:space:]]*(PermitUserEnvironment|UsePAM|Port|ListenAddress|HostKey)([[:space:]]|$)' "$(root $DROPIN_PATH)")" "0"
 
 # sshd -t runs before the reload.
 t_lines="$(grep -n -E '^(fakesudo )?sshd -t|^sshd -t' "$CALL_LOG" | head -n1 | cut -d: -f1)"
@@ -676,7 +679,7 @@ inst verify
 expect_out_has "effective gatewayports is asserted" "effective 'gatewayports no'"
 
 fresh; inst install --pubkey-file "$T_TMP/key.pub" >/dev/null
-sed -i '/PermitUserEnvironment/d' "$(root $DROPIN_PATH)"
+touch "$STATE/env_yes"
 inst verify
 expect_out_has "effective permituserenvironment is asserted" "effective 'permituserenvironment no'"
 
