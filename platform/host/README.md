@@ -1,0 +1,123 @@
+# platform/host/
+
+Scripts for the app host (a Debian Raspberry Pi running Docker). Everything here is **run by you**, with sudo on
+the host; Claude never runs the live-host targets (they are denied in a worktree, and they change the host).
+
+## What is here
+
+| File | Role |
+|---|---|
+| `platform.sh` | The `platform` dispatcher: the only command the `deploy` identity can run. Validates one unsplit string against an allowlist. `deploy`, `rollback`, `new-db` and `ls` are placeholders that exit 3 (not implemented) until later steps. |
+| `login-shell.sh` | Root-owned validating login shell of `deploy` (`platform-login`). Never starts a shell; hands one `-c` command to the dispatcher. |
+| `install-deploy-user.sh` | Creates the `deploy` user, its forced-command key and the `Match User deploy` sshd drop-in. |
+| `claude-access.sh`, `claude-helper.sh` | Validating wrapper (also the login shell) and root helper for the `claude` debugging identity: `ps`, `stats`, `status`, `logs <app> [lines]`, `restart <app>`. |
+| `install-claude-access.sh` | Creates the `claude` user, its key and the `Match User claude` sshd drop-in; prints one sudoers line for you to install. |
+| `verify-egress.sh` | Read-only check that the host firewall closes container-to-LAN egress. |
+
+The installers embed their payloads (dispatcher, wrapper, helper) because the host has no checkout: edit the
+source file, run `make embed`, and `make lint` fails if an embedded copy differs from its source.
+
+## Identities
+
+- `deploy`: dedicated user in the `docker` group (root-equivalent, accepted), no sudo, locked password. Two
+  layers: the forced command in `authorized_keys` (read from the root-owned `/etc/ssh/authorized_keys.d`) and a
+  root-owned validating login shell, so it stays safe even if a Tailscale SSH rule later reaches it (Tailscale
+  SSH ignores `authorized_keys` forced commands). The installer is strict: an existing `deploy` account must
+  have groups exactly `deploy docker` and a nonzero uid, otherwise it refuses. The sshd drop-in pins
+  `PasswordAuthentication no`, `KbdInteractiveAuthentication no`, `AuthenticationMethods publickey` and
+  `AuthorizedKeysCommand none` for the user.
+- `claude`: read-mostly debugging login, **LAN OpenSSH only** with its own key and a forced command. Not in
+  `docker` or `sudo`; one sudoers line allows only the root helper. It stays out of every Tailscale `ssh` rule.
+- Containers: app containers carry exactly one label `platform.app=<name>`; infrastructure containers
+  (Traefik, cloudflared, Postgres, Redis) are never labelled. `claude` logs and restarts match only that label.
+
+## User-run checklist
+
+Keep a second SSH session open while installing (an `sshd -t` failure restores the previous drop-in and exits 1
+without reloading). Over `--host` the SSH account needs passwordless sudo; otherwise copy the script to the host
+and run it there directly.
+
+1. Create the egress files (below), then from the stronghold run `make host-base HOST=<alias> ARGS=install` so
+   the host base renders the firewall rules from them.
+2. Create a key pair for each identity on your client. The private keys never leave it; only the public key file
+   is passed to the installer.
+3. `make host-deploy-user HOST=<alias> ARGS="install --pubkey-file <path-to-deploy-pub>"`
+4. `make host-claude-access HOST=<alias> ARGS="install --pubkey-file <path-to-claude-pub>"`, then install the
+   sudoers line it prints (validated with `visudo -cf` when visudo exists; a SKIP line says otherwise; you copy it into place yourself).
+5. `make host-deploy-user HOST=<alias> ARGS=verify`, `make host-claude-access HOST=<alias> ARGS=verify` and
+   `make host-verify-egress HOST=<alias>` must all exit 0. Optional: `ARGS="--probe"` on the egress check starts
+   a throwaway container, and `ARGS="verify --live --identity <private-key-file>"` on `host-claude-access` runs an
+   end-to-end check with a disposable labelled container (both clean up after themselves).
+
+`HOST` is required for every `host-*` target, with no default alias; each exits 2 with a usage message when it
+is unset. For the two installers, `status` (the default) reports every check without failing and `verify`
+exits 1 on any failure; the egress check has no mode and always exits 1 on a failure. `--probe` needs the LAN
+default gateway to fall inside a deny range (otherwise it exits 2 rather than pass vacuously).
+
+`install-deploy-user.sh` and `install-claude-access.sh` intentionally duplicate shared scaffolding, because each is
+streamed standalone over `ssh bash -s` and cannot source a common file. A fix to one must be mirrored in the other.
+
+## Streaming invocation
+
+`--host ALIAS` streams the script over one `ssh ALIAS bash -s` call (BatchMode, no tty), except
+`install-claude-access.sh verify --live`, which makes several ssh calls from the client. The make targets are
+thin wrappers around it, for example:
+
+```
+make host-verify-egress HOST=<alias>
+make host-verify-egress HOST=<alias> ARGS="--probe"
+```
+
+`ARGS` is expanded unquoted, so a `--pubkey-file` path must not contain spaces or glob characters (`*`, `?`, `[`).
+
+For `--pubkey-file`, the local file is read and validated on the client and its content is forwarded as a quoted
+argument; the host re-validates it before writing. An optional `--from PATTERN` limits the key to matching
+source addresses.
+
+## Egress rules
+
+The container egress rules are generated by `.claude/scripts/server-host-base.sh` in the stronghold (into the
+DOCKER-USER chain rules file); this repo only verifies them. Two host-side files, both created and owned by you
+(root, mode 0644; they hold ranges, not secrets):
+
+- `/etc/platform/egress-deny.cidrs`: **required**, the ranges containers must not reach.
+- `/etc/platform/egress-allow.cidrs`: **optional**, a resolver exception only. Each range gets RETURN rules for
+  udp and tcp port 53 and nothing else (this lets Docker's embedded resolver reach a LAN DNS server).
+
+Grammar, shared by both files:
+
+- One IPv4 CIDR per line with an explicit prefix of 1 to 32 and zero host bits (canonical form; `/0`, a bare
+  address, IPv6 and a non-canonical range such as a host address with a `/24` prefix are invalid).
+- `#` comments and blank lines are ignored, but CRLF and trailing whitespace are rejected on every line,
+  comments included. Anything else is invalid: CRLF line endings, trailing whitespace, a
+  duplicate line.
+- Overlapping distinct ranges are allowed.
+
+A missing, empty or invalid deny file is an error: host-base leaves the existing rules and chain untouched and
+exits non-zero with instructions. On a fresh host (no rules file yet) it installs the inbound-only backstop,
+warns loudly that egress is not applied, and exits non-zero. An absent allow file is fine; a present but invalid
+one is an error. No address appears in any tracked file: the ranges come from these files at run time.
+
+Container-to-container traffic is exempted with four interface-pair rules ahead of the drops; there is no bare
+output-interface exemption (it would reopen the inbound backstop).
+
+### Rollback (manual only)
+
+Emptying or removing the deny file never removes rules (the run is refused). Emptying or removing the allow
+file is valid, and the next install drops the port 53 exceptions. Either edit the files and re-run `make
+host-base HOST=<alias> ARGS=install` from the stronghold, or restore the pre-egress copy: copy
+`/etc/docker/docker-user.rules.bak` back over `/etc/docker/docker-user.rules`, run `sudo iptables -F DOCKER-USER`
+(a `--noflush` restore does not clear a chain the file declares, so the egress rules would otherwise stay), then load it with `sudo
+iptables-restore --noflush /etc/docker/docker-user.rules`. Run the flush and the restore back to back (for example
+`sudo iptables -F DOCKER-USER && sudo iptables-restore --noflush /etc/docker/docker-user.rules` on one line): the
+chain is empty between them, so the inbound backstop is briefly absent (never restart `docker-user-firewall.service`, docker
+requires it), and do not re-run `host-base install` afterwards (it would re-render the egress rules). The `.bak` is written only when the rendered rules differ from the live
+file, and an existing `.bak` is never overwritten, so repeated installs keep the first replaced (pre-egress)
+file as the backup.
+
+### Guarantee scope
+
+The egress guarantee covers **forwarded traffic** (container to LAN or other hosts) only. Container-to-host
+traffic (the host's own LAN address, the bridge gateway, sshd) is INPUT, not DOCKER-USER: it is out of scope and
+accepted. IPv6 is out of scope: `verify-egress.sh` asserts the Docker daemon has IPv6 disabled so the
+iptables-only rules cannot be bypassed.
