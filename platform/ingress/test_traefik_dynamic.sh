@@ -36,8 +36,8 @@ set -uo pipefail
 here="$(cd "$(dirname "$0")" && pwd)"
 # shellcheck source=../test/lib.sh
 . "$here/../test/lib.sh"
-# shellcheck source=yaml-subset.sh
-. "$here/yaml-subset.sh"
+# shellcheck source=../lib/yaml-subset.sh
+. "$here/../lib/yaml-subset.sh"
 
 record=0
 case "${1:-}" in

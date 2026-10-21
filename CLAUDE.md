@@ -37,7 +37,7 @@ Design and phases live in the stronghold: `~/code/plans/stronghold/open/app-host
   | Purpose | Command |
   |---|---|
   | Help | `make help` |
-  | Lint (public-repo hygiene + embed drift + shellcheck) | `make lint` |
+  | Lint (public-repo hygiene + embed drift + app.yaml registry validation + shellcheck) | `make lint` |
   | Tests (every `platform/**/test_*.sh`) | `make test` |
   | Regenerate embedded installer payloads | `make embed` |
   | Live host: deploy identity installer (you run it; `HOST` required) | `make host-deploy-user HOST=<alias> ARGS="install --pubkey-file PATH"` |

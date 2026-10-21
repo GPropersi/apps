@@ -1,0 +1,16 @@
+schema_version: 1
+name: chores
+owner: family
+purpose: Shared chore tracker
+template: go-react
+memory_cap: 64m
+port: 8080
+health_path: /healthz
+access: family
+jobs:
+  - name: daily-digest
+    schedule: "0 7 * * *"
+    timeout: 2m
+    catch_up: true
+  - name: send-reminder
+    timeout: 30s
