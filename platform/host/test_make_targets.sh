@@ -18,7 +18,7 @@ t_stub sudo 0
 
 targets=$(grep -oE '^host-[A-Za-z0-9_-]+:' "$root/Makefile" | tr -d ':')
 n=$(printf '%s\n' "$targets" | grep -c .)
-expect_eq "at least the three known live-host targets exist" "$([ "$n" -ge 3 ] && echo yes || echo no)" "yes"
+expect_eq "at least the four known live-host targets exist" "$([ "$n" -ge 4 ] && echo yes || echo no)" "yes"
 
 for tgt in $targets; do
   t_reset_calls
@@ -51,13 +51,15 @@ dry_case "claude-access, ARGS unset" host-claude-access install-claude-access.sh
 dry_case "deploy-user with ARGS" host-deploy-user install-deploy-user.sh ARGS='install --pubkey-file k'
 dry_case "claude-access with ARGS" host-claude-access install-claude-access.sh ARGS='install --pubkey-file k'
 dry_case "verify-egress with ARGS" host-verify-egress verify-egress.sh ARGS='--probe'
+dry_case "ingress, ARGS unset" host-ingress install-ingress.sh
+dry_case "ingress with ARGS" host-ingress install-ingress.sh ARGS='verify --live --hold'
 # make -n leaves the shell expansion of ARGS unexpanded, so the real recipes run here against stub scripts in a
 # scratch tree that record their argv; nothing reaches ssh or a host.
 stub_tree="$T_TMP/stub-tree"
 rm -rf "$stub_tree"
 mkdir -p "$stub_tree/platform/host"
 cp -- "$root/Makefile" "$stub_tree/Makefile"
-for stub in install-deploy-user.sh install-claude-access.sh verify-egress.sh; do
+for stub in install-deploy-user.sh install-claude-access.sh install-ingress.sh verify-egress.sh; do
   printf '#!/usr/bin/env bash\nprintf "%%s\\n" "$*" > "$STUB_ARGV"\n' > "$stub_tree/platform/host/$stub"
   chmod +x "$stub_tree/platform/host/$stub"
 done
@@ -80,6 +82,11 @@ expect_rc "stub run: deploy-user, ARGS set" 0
 expect_eq "ARGS set: deploy-user receives ARGS then --host" "$(cat "$stub_argv")" "install --pubkey-file k --host alias"
 stub_run host-claude-access 'install --pubkey-file k'
 expect_eq "ARGS set: claude-access receives ARGS then --host" "$(cat "$stub_argv")" "install --pubkey-file k --host alias"
+stub_run host-ingress
+expect_rc "stub run: ingress, ARGS unset" 0
+expect_eq "ARGS unset: ingress defaults to status" "$(cat "$stub_argv")" "status --host alias"
+stub_run host-ingress 'verify --live --hold'
+expect_eq "ARGS set: ingress receives ARGS then --host" "$(cat "$stub_argv")" "verify --live --hold --host alias"
 stub_run host-verify-egress '--probe'
 expect_eq "ARGS reaches verify-egress" "$(cat "$stub_argv")" "--probe --host alias"
 stub_run host-verify-egress

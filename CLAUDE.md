@@ -42,6 +42,7 @@ Design and phases live in the stronghold: `~/code/plans/stronghold/open/app-host
   | Regenerate embedded installer payloads | `make embed` |
   | Live host: deploy identity installer (you run it; `HOST` required) | `make host-deploy-user HOST=<alias> ARGS="install --pubkey-file PATH"` |
   | Live host: claude identity installer (you run it; `HOST` required) | `make host-claude-access HOST=<alias> ARGS="install --pubkey-file PATH"` |
+  | Live host: ingress stack installer (you run it; `HOST` required) | `make host-ingress HOST=<alias> ARGS="install"` |
   | Live host: read-only egress check (`HOST` required) | `make host-verify-egress HOST=<alias> ARGS="--probe"` |
 - **GitHub project board:** n/a
 - **Issue labels:** n/a

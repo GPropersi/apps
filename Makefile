@@ -1,5 +1,5 @@
 .DEFAULT_GOAL := help
-.PHONY: help lint test embed host-deploy-user host-claude-access host-verify-egress
+.PHONY: help lint test embed host-deploy-user host-claude-access host-verify-egress host-ingress
 
 # Live-host targets (host-*) stream a script to the app host over SSH. HOST (an ssh alias) is required, with no
 # default alias; ARGS is passed to the script. They are for you to run, never inside a worktree.
@@ -33,6 +33,10 @@ host-deploy-user: ## LIVE: deploy identity installer (HOST=<alias> ARGS="install
 host-claude-access: ## LIVE: claude identity installer (HOST=<alias> ARGS="install --pubkey-file PATH"; default status)
 	@[ -n "$$HOST" ] || { echo 'usage: make host-claude-access HOST=<ssh-alias> [ARGS="install --pubkey-file PATH | status | verify"]' >&2; exit 2; }
 	@platform/host/install-claude-access.sh $${ARGS:-status} --host "$$HOST"
+
+host-ingress: ## LIVE: ingress stack installer (HOST=<alias> ARGS="install | verify | verify --live [--hold]"; default status)
+	@[ -n "$$HOST" ] || { echo 'usage: make host-ingress HOST=<ssh-alias> [ARGS="install | status | verify | verify --live [--hold]"]' >&2; exit 2; }
+	@platform/host/install-ingress.sh $${ARGS:-status} --host "$$HOST"
 
 host-verify-egress: ## LIVE: read-only egress check (HOST=<alias> [ARGS="--probe"])
 	@[ -n "$$HOST" ] || { echo 'usage: make host-verify-egress HOST=<ssh-alias> [ARGS="--probe | --probe-inbound"]' >&2; exit 2; }
