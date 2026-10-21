@@ -18,7 +18,7 @@ t_stub sudo 0
 
 targets=$(grep -oE '^host-[A-Za-z0-9_-]+:' "$root/Makefile" | tr -d ':')
 n=$(printf '%s\n' "$targets" | grep -c .)
-expect_eq "at least the three known live-host targets exist" "$([ "$n" -ge 3 ] && echo yes || echo no)" "yes"
+expect_eq "at least the five known live-host targets exist" "$([ "$n" -ge 5 ] && echo yes || echo no)" "yes"
 
 for tgt in $targets; do
   t_reset_calls
@@ -51,13 +51,16 @@ dry_case "claude-access, ARGS unset" host-claude-access install-claude-access.sh
 dry_case "deploy-user with ARGS" host-deploy-user install-deploy-user.sh ARGS='install --pubkey-file k'
 dry_case "claude-access with ARGS" host-claude-access install-claude-access.sh ARGS='install --pubkey-file k'
 dry_case "verify-egress with ARGS" host-verify-egress verify-egress.sh ARGS='--probe'
+dry_case "verify-ingress with ARGS" host-verify-ingress verify-ingress.sh ARGS='--domain example.test'
+dry_case "ingress, ARGS unset" host-ingress install-ingress.sh
+dry_case "ingress with ARGS" host-ingress install-ingress.sh ARGS='verify --live --hold'
 # make -n leaves the shell expansion of ARGS unexpanded, so the real recipes run here against stub scripts in a
 # scratch tree that record their argv; nothing reaches ssh or a host.
 stub_tree="$T_TMP/stub-tree"
 rm -rf "$stub_tree"
 mkdir -p "$stub_tree/platform/host"
 cp -- "$root/Makefile" "$stub_tree/Makefile"
-for stub in install-deploy-user.sh install-claude-access.sh verify-egress.sh; do
+for stub in install-deploy-user.sh install-claude-access.sh install-ingress.sh verify-egress.sh verify-ingress.sh; do
   printf '#!/usr/bin/env bash\nprintf "%%s\\n" "$*" > "$STUB_ARGV"\n' > "$stub_tree/platform/host/$stub"
   chmod +x "$stub_tree/platform/host/$stub"
 done
@@ -80,10 +83,19 @@ expect_rc "stub run: deploy-user, ARGS set" 0
 expect_eq "ARGS set: deploy-user receives ARGS then --host" "$(cat "$stub_argv")" "install --pubkey-file k --host alias"
 stub_run host-claude-access 'install --pubkey-file k'
 expect_eq "ARGS set: claude-access receives ARGS then --host" "$(cat "$stub_argv")" "install --pubkey-file k --host alias"
+stub_run host-ingress
+expect_rc "stub run: ingress, ARGS unset" 0
+expect_eq "ARGS unset: ingress defaults to status" "$(cat "$stub_argv")" "status --host alias"
+stub_run host-ingress 'verify --live --hold'
+expect_eq "ARGS set: ingress receives ARGS then --host" "$(cat "$stub_argv")" "verify --live --hold --host alias"
 stub_run host-verify-egress '--probe'
 expect_eq "ARGS reaches verify-egress" "$(cat "$stub_argv")" "--probe --host alias"
 stub_run host-verify-egress
 expect_eq "ARGS unset: verify-egress gets only --host" "$(cat "$stub_argv")" "--host alias"
+stub_run host-verify-ingress '--domain example.test'
+expect_eq "ARGS set: verify-ingress receives ARGS then --host" "$(cat "$stub_argv")" "--domain example.test --host alias"
+stub_run host-verify-ingress
+expect_eq "ARGS unset: verify-ingress gets only --host (no domain default)" "$(cat "$stub_argv")" "--host alias"
 
 # make test on scratch trees: a failing test fails the run, a passing tree passes, an empty tree is an error.
 scratch_make() {
@@ -128,5 +140,31 @@ for tgt in $targets; do
     *) _pass ;;
   esac
 done
+
+# Every host-* target must be documented in a Commands-table row of CLAUDE.md (a table row line containing
+# `make <target>`, not merely a longer target name that starts with it).
+missing_rows() { # claude-md-file: prints each discovered target that has no row
+  local file="$1" t
+  for t in $targets; do
+    grep -qE "^[[:space:]]*\|.*make ${t}([^A-Za-z0-9_-]|\$)" "$file" || printf '%s\n' "$t"
+  done
+}
+expect_eq "every host-* target has a Commands row in CLAUDE.md" "$(missing_rows "$root/CLAUDE.md")" ""
+# Mutation: a copy of CLAUDE.md without the host-verify-ingress row must be caught, and only that target.
+mutant="$T_TMP/CLAUDE.mutant.md"
+grep -v 'make host-verify-ingress' "$root/CLAUDE.md" > "$mutant" || true
+expect_eq "a target missing its Commands row is reported" "$(missing_rows "$mutant")" "host-verify-ingress"
+# A row for a longer target name must not satisfy its prefix.
+printf '| x | `make host-ingress-x` |\n' > "$mutant"
+case "$(missing_rows "$mutant")" in
+  *host-ingress*) _pass ;;
+  *) _fail "a longer target name does not satisfy a shorter one" "host-ingress was accepted" ;;
+esac
+# A non-table mention is not a row.
+printf 'Run make host-ingress sometimes.\n' > "$mutant"
+case "$(missing_rows "$mutant")" in
+  *host-ingress*) _pass ;;
+  *) _fail "a prose mention does not count as a Commands row" "host-ingress was accepted" ;;
+esac
 
 t_finish

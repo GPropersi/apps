@@ -1,0 +1,12 @@
+# Request paths and whether the /_jobs deny rule in dynamic.yml must match each. One row per line:
+#   <match|nomatch> <path>
+# Read by test_ingress_stack.sh (offline regex check) and test_traefik_dynamic.sh (real Traefik run), so both
+# prove the same table.
+match /_jobs
+match /_jobs/x
+match /_JOBS/x
+match /_Jobs
+match /_jobs/;x
+nomatch /_jobs-anything
+nomatch /_jobsx
+nomatch /x/_jobs

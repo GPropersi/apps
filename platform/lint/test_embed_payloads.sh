@@ -211,6 +211,9 @@ if [[ "$out" =~ ([0-9]+)\ payload\(s\) ]] && [ "${BASH_REMATCH[1]}" -ge 2 ]; the
   rm -rf "$real"
   mkdir -p "$real/platform/host"
   cp "$repo_root"/platform/host/*.sh "$real/platform/host/"
+  mkdir -p "$real/platform/ingress/down-page"
+  cp "$repo_root/platform/ingress/compose.yaml" "$repo_root/platform/ingress/dynamic.yml" "$real/platform/ingress/"
+  cp "$repo_root/platform/ingress/down-page/index.html" "$real/platform/ingress/down-page/"
   echo '# drift' >> "$real/platform/host/platform.sh"
   run_cmd "$tool" --check --root "$real"
   expect_rc "a drifted dispatcher source fails the check" 1
@@ -236,6 +239,24 @@ if [[ "$out" =~ ([0-9]+)\ payload\(s\) ]] && [ "${BASH_REMATCH[1]}" -ge 2 ]; the
     expect_rc "a drifted $src source fails the check" 1
     expect_out_has "drift names the claude installer and $src" "DRIFT platform/host/install-claude-access.sh: platform/host/$src"
   done
+
+  # the ingress installer's three payloads are checked too (one mutation per payload)
+  for src in compose.yaml dynamic.yml down-page/index.html; do
+    run_cmd "$tool" --root "$real"
+    expect_rc "regenerating before the ingress $src drift" 0
+    echo '# drift' >> "$real/platform/ingress/$src"
+    run_cmd "$tool" --check --root "$real"
+    expect_rc "a drifted ingress $src source fails the check" 1
+    expect_out_has "drift names the ingress installer and $src" "DRIFT platform/host/install-ingress.sh: platform/ingress/$src"
+  done
+  run_cmd "$tool" --root "$real"
+  expect_rc "regenerating after the ingress drifts" 0
+
+  # an edited embedded ingress copy is drift too
+  sed -i 's/^name: platform-ingress$/name: platform-ingress-x/' "$real/platform/host/install-ingress.sh"
+  run_cmd "$tool" --check --root "$real"
+  expect_rc "an altered embedded compose copy fails the check" 1
+  expect_out_has "the altered embedded compose copy is named" "DRIFT platform/host/install-ingress.sh: platform/ingress/compose.yaml"
 }
 
 t_finish

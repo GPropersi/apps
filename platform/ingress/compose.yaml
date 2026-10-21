@@ -1,0 +1,188 @@
+# Ingress stack: the single front door of the app host (no published ports; traffic arrives over the tunnel).
+#
+#   cloudflared  -> traefik -> app containers on the `platform` network
+#   traefik      -> socket-proxy (read-only, allowlisted Docker API) on the internal `ingress-proxy` network
+#   down-page    -> supplies the friendly "app is down" body that the errors middleware shows
+#
+# Host-side inputs (never written here): PLATFORM_DOMAIN (the env file), DOCKER_GID (derived by the installer
+# from the Docker socket's group), the tunnel token file mounted into cloudflared.
+#
+# Rules this file keeps (platform/ingress/test_ingress_stack.sh enforces them):
+# - It stays inside a small YAML subset (block style only) so the tests can read it without a YAML library.
+# - Traefik is configured ONLY through TRAEFIK_* environment variables, and has no `command:`. Traefik ignores
+#   its environment as soon as any command-line flag is present, and `traefik healthcheck` (no --ping flag) reads
+#   the same environment, so the server and its healthcheck cannot drift apart.
+# - Apps carry the single label platform.app=<name> and no traefik.* labels. No service in this file has it.
+# - Every service drops all capabilities, cannot gain privileges, has a memory limit and restarts unless stopped.
+name: platform-ingress
+
+services:
+  cloudflared:
+    image: docker.io/cloudflare/cloudflared:2026.10.1@sha256:a15a3b50b8dabd57ac2090e9484c0247dba9dfa1f0df4d298d4317f9d69eb2d5
+    command:
+      - tunnel
+      - --no-autoupdate
+      - run
+    environment:
+      TUNNEL_TOKEN_FILE: /run/cloudflared/token
+      TUNNEL_METRICS: 127.0.0.1:20241
+    volumes:
+      - /etc/platform/cloudflared.token:/run/cloudflared/token:ro
+    user: "65532:65532"
+    # The dedicated token group (no members; the installer creates it with this fixed gid, token file is
+    # root:<gid> mode 0640).
+    group_add:
+      - "64321"
+    networks:
+      - platform
+    restart: unless-stopped
+    mem_limit: 128m
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    read_only: true
+    healthcheck:
+      test:
+        - CMD
+        - cloudflared
+        - tunnel
+        - ready
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
+  traefik:
+    image: docker.io/library/traefik:v3.7.15@sha256:0f6150202bc1fed72a7bd2107460eaa510e5b8a905f3fdb5b84f2c8619c33368
+    environment:
+      TRAEFIK_GLOBAL_CHECKNEWVERSION: "false"
+      TRAEFIK_GLOBAL_SENDANONYMOUSUSAGE: "false"
+      TRAEFIK_LOG_FORMAT: json
+      TRAEFIK_LOG_LEVEL: INFO
+      # The one routed entrypoint (plain HTTP inside the container; TLS ends at Cloudflare).
+      TRAEFIK_ENTRYPOINTS_WEB_ADDRESS: ":80"
+      TRAEFIK_ENTRYPOINTS_WEB_ASDEFAULT: "true"
+      TRAEFIK_ENTRYPOINTS_WEB_HTTP_MIDDLEWARES: errors@file
+      TRAEFIK_ENTRYPOINTS_WEB_HTTP_ALIASHEADERSSTRATEGY: delete
+      TRAEFIK_ENTRYPOINTS_WEB_HTTP_ENCODEDCHARACTERS_ALLOWENCODEDSLASH: "false"
+      TRAEFIK_ENTRYPOINTS_WEB_HTTP_ENCODEDCHARACTERS_ALLOWENCODEDBACKSLASH: "false"
+      TRAEFIK_ENTRYPOINTS_WEB_HTTP_ENCODEDCHARACTERS_ALLOWENCODEDNULLCHARACTER: "false"
+      TRAEFIK_ENTRYPOINTS_WEB_HTTP_ENCODEDCHARACTERS_ALLOWENCODEDSEMICOLON: "false"
+      TRAEFIK_ENTRYPOINTS_WEB_HTTP_ENCODEDCHARACTERS_ALLOWENCODEDPERCENT: "false"
+      TRAEFIK_ENTRYPOINTS_WEB_HTTP_ENCODEDCHARACTERS_ALLOWENCODEDQUESTIONMARK: "false"
+      TRAEFIK_ENTRYPOINTS_WEB_HTTP_ENCODEDCHARACTERS_ALLOWENCODEDHASH: "false"
+      # Health ping: its own entrypoint, loopback only inside the container, never published, never routed.
+      TRAEFIK_PING: "true"
+      TRAEFIK_PING_ENTRYPOINT: ping
+      TRAEFIK_ENTRYPOINTS_PING_ADDRESS: 127.0.0.1:8082
+      # Routing comes from the single platform.app label: only labelled containers become routers.
+      TRAEFIK_PROVIDERS_DOCKER_ENDPOINT: tcp://socket-proxy:2375
+      TRAEFIK_PROVIDERS_DOCKER_NETWORK: platform
+      TRAEFIK_PROVIDERS_DOCKER_EXPOSEDBYDEFAULT: "true"
+      TRAEFIK_PROVIDERS_DOCKER_CONSTRAINTS: LabelRegex(`platform.app`, `.+`)
+      TRAEFIK_PROVIDERS_DOCKER_DEFAULTRULE: Host(`{{ index .Labels "platform.app" }}.${PLATFORM_DOMAIN}`)
+      TRAEFIK_PROVIDERS_FILE_DIRECTORY: /etc/traefik/dynamic
+      TRAEFIK_PROVIDERS_FILE_WATCH: "true"
+      # Access log: JSON on stdout, no query strings, no headers except the client address Cloudflare sets.
+      TRAEFIK_ACCESSLOG: "true"
+      TRAEFIK_ACCESSLOG_FORMAT: json
+      TRAEFIK_ACCESSLOG_FIELDS_HEADERS_DEFAULTMODE: drop
+      TRAEFIK_ACCESSLOG_FIELDS_HEADERS_NAMES_Cf-Connecting-Ip: keep
+      TRAEFIK_ACCESSLOG_FIELDS_QUERYPARAMETERS_DEFAULTMODE: drop
+    volumes:
+      - ./dynamic:/etc/traefik/dynamic:ro
+    user: "65532:65532"
+    networks:
+      - platform
+      - ingress-proxy
+    restart: unless-stopped
+    mem_limit: 256m
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    read_only: true
+    healthcheck:
+      test:
+        - CMD
+        - traefik
+        - healthcheck
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+  socket-proxy:
+    image: docker.io/wollomatic/socket-proxy:1.13.1@sha256:3935b709275e4ec35d6ed5a5c4a1f0d01ed31eec5e7234efc3357ecd47689002
+    # GET on /version, /containers/json, /containers/<id>/json and /events, HEAD on /_ping, each with an
+    # optional API version prefix (v and a number pair); every other method and path is denied. $$ is a literal $
+    # for Compose.
+    command:
+      - -listenip=0.0.0.0
+      - -allowfrom=traefik
+      - -allowGET=^(/v[0-9]+\.[0-9]+)?/(version|containers/json|containers/[a-zA-Z0-9]+/json|events)$$
+      - -allowHEAD=^(/v[0-9]+\.[0-9]+)?/_ping$$
+      - -allowhealthcheck
+      - -watchdoginterval=10
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    user: "65534:65534"
+    group_add:
+      - "${DOCKER_GID}"
+    networks:
+      - ingress-proxy
+    restart: unless-stopped
+    mem_limit: 64m
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    read_only: true
+    healthcheck:
+      test:
+        - CMD
+        - /healthcheck
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+
+  down-page:
+    image: docker.io/library/busybox:1.37.0@sha256:bdf57e528e45e4433820e045b29b4597825a1c9e38353532d90a01445013f82e
+    command:
+      - httpd
+      - -f
+      - -p
+      - "8080"
+      - -h
+      - /www
+    volumes:
+      - ./down-page:/www:ro
+    user: "65534:65534"
+    networks:
+      - platform
+    restart: unless-stopped
+    mem_limit: 32m
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    read_only: true
+    healthcheck:
+      test:
+        - CMD
+        - nc
+        - -z
+        - 127.0.0.1
+        - "8080"
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+
+networks:
+  platform:
+    external: true
+  ingress-proxy:
+    internal: true

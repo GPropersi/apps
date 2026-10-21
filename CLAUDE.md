@@ -30,7 +30,7 @@ Design and phases live in the stronghold: `~/code/plans/stronghold/open/app-host
 - **Bot identity:** `gpropersi-claude[bot]` `141576524+gpropersi-claude[bot]@users.noreply.github.com`
 - **Bot push script:** `~/code/.claude/scripts/gh-app-push.sh` (central, repo-agnostic; derives the repo from `origin`, pushes as the shared bot)
 - **Token generator:** `~/code/.claude/scripts/generate-gh-token.sh` (tracked in the stronghold; the shared `gpropersi-claude` App, installation resolved from the repo owner)
-- **Container runtime:** n/a
+- **Container runtime:** docker
 - **App URL (Playwright MCP):** n/a
 - **Test login:** n/a
 - **Commands:**
@@ -42,6 +42,8 @@ Design and phases live in the stronghold: `~/code/plans/stronghold/open/app-host
   | Regenerate embedded installer payloads | `make embed` |
   | Live host: deploy identity installer (you run it; `HOST` required) | `make host-deploy-user HOST=<alias> ARGS="install --pubkey-file PATH"` |
   | Live host: claude identity installer (you run it; `HOST` required) | `make host-claude-access HOST=<alias> ARGS="install --pubkey-file PATH"` |
+  | Live host: ingress stack installer (you run it; `HOST` required) | `make host-ingress HOST=<alias> ARGS="install"` |
+  | Live host: public Access-gate check, run from here (`HOST` required; domain via `PLATFORM_DOMAIN` or `--domain`) | `make host-verify-ingress HOST=<alias> ARGS="--domain D"` |
   | Live host: read-only egress check (`HOST` required) | `make host-verify-egress HOST=<alias> ARGS="--probe"` |
 - **GitHub project board:** n/a
 - **Issue labels:** n/a
