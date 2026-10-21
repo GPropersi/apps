@@ -1,0 +1,64 @@
+# Traefik file-provider configuration (installed in the dynamic/ directory next to compose.yaml).
+#
+# One chain, one mechanism for "not served":
+#   - the /_jobs deny router and the lowest-priority catch-all both send to the `empty` service (no servers),
+#     which Traefik answers with 503, so the request never reaches an app;
+#   - the `errors` middleware, attached to the web entrypoint in compose.yaml (errors@file), replaces the body of
+#     any 502 to 504 (status preserved) with the page fetched from the down-page service;
+#   - the down-page service serves that page with 200 and no router targets it.
+#
+# Primitives: PathRegexp with an inline (?i) flag for the deny rule (a regex, not PathPrefix, because it must be
+# case-insensitive and treat a ";" suffix as under the prefix); maximum explicit priority so the deny outranks
+# any app router whatever the length of its auto-generated rule; priority 1 for the catch-all.
+#
+# Per-variant outcome of a request that looks like /_jobs (recorded by test_traefik_dynamic.sh --record, checked
+# by the same test and by `verify --live`). Normalised forms answer 503 with the friendly body; variants with an
+# encoded reserved character are rejected before routing (400) or denied (503); none reaches an app. The deny
+# and the catch-all both get the friendly page as the body: the property is that nothing reaches an app.
+# variants-begin
+# variant | code
+# exact | 503
+# sub | 503
+# enc-underscore | 503
+# double-slash | 503
+# dot-segments | 503
+# semicolon | 503
+# upper | 503
+# mixed-case | 503
+# enc-slash | 400
+# enc-backslash | 400
+# enc-semicolon | 400
+# enc-percent | 400
+# enc-question | 400
+# enc-hash | 400
+# enc-null | 400
+# variants-end
+http:
+  routers:
+    jobs-deny:
+      entryPoints:
+        - web
+      rule: PathRegexp(`(?i)^/_jobs([/;]|$)`)
+      priority: 2147483646
+      service: empty
+    catch-all:
+      entryPoints:
+        - web
+      rule: PathPrefix(`/`)
+      priority: 1
+      service: empty
+  middlewares:
+    errors:
+      errors:
+        status:
+          - "502-504"
+        service: down-page
+        query: /index.html
+  services:
+    empty:
+      loadBalancer:
+        passHostHeader: true
+    down-page:
+      loadBalancer:
+        servers:
+          - url: http://down-page:8080
