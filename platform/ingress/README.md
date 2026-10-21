@@ -15,6 +15,11 @@ here is **run by you**; Claude never touches the live host or the Cloudflare acc
 | `env.example` | Placeholder for the host-side `/etc/platform/ingress.env`. |
 | `test_*.sh`, `yaml-subset.sh` | Offline tests of the files above (`make test`). |
 
+`test_traefik_dynamic.sh` runs the pinned Traefik for real and needs docker, so it skips (exit 0, loud notice) on a
+host without it, as in CI. For the pre-merge run on a docker host use `REQUIRE_DOCKER=1 platform/ingress/test_traefik_dynamic.sh`:
+a missing docker, daemon or socket then fails instead of skipping. It routes Traefik through a socket-proxy built from
+the production image and allowlist, so the host Docker socket is never mounted into Traefik.
+
 The installer `platform/host/install-ingress.sh` embeds the three payload files; edit the source file and run
 `make embed` (`make lint` fails on drift).
 

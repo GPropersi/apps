@@ -206,6 +206,7 @@ run_checks() {
   ys_list "$cf" services/socket-proxy/group_add | grep -qxF '${DOCKER_GID}' || r "socket-proxy group_add must be the installer-derived DOCKER_GID"
   ys_list "$cf" services/socket-proxy/command > "$T_TMP/sp-args"
   grep -qxF -- '-allowfrom=traefik' "$T_TMP/sp-args" || r "socket-proxy allowfrom must be the traefik service only"
+  grep -qxF -- '-allowhealthcheck' "$T_TMP/sp-args" || r "socket-proxy must run with -allowhealthcheck (its /healthcheck probe needs it)"
   grep -qxF -- "-allowGET=${re_get//\$/\$\$}" "$T_TMP/sp-args" || r "socket-proxy GET allowlist is not the exact expected regex"
   grep -qxF -- "-allowHEAD=${re_head//\$/\$\$}" "$T_TMP/sp-args" || r "socket-proxy HEAD allowlist is not the exact expected regex"
   grep -iE '^-allow(CONNECT|DELETE|OPTIONS|PATCH|POST|PUT|TRACE)' "$T_TMP/sp-args" | grep -q . && r "socket-proxy allows a method other than GET and HEAD"
@@ -320,7 +321,7 @@ run_checks() {
     [ "$matched" = "$kind" ] || r "deny rule fails the offline regex table: $path should be $kind, is $matched"
   done < <(grep -vE '^[[:space:]]*(#|$)' "$dir/jobs-paths.table")
   for i in "match /_jobs" "match /_jobs/x" "match /_JOBS/x" "match /_Jobs" "match /_jobs/;x" "nomatch /_jobs-anything" "nomatch /_jobsx" "nomatch /x/_jobs"; do
-    [[ "$have_rows" == *"|$i"* ]] || r "jobs-paths.table lacks the required row: $i"
+    [[ "$have_rows|" == *"|$i|"* ]] || r "jobs-paths.table lacks the required row: $i"
   done
 
   # -- recorded per-variant outcomes in the dynamic.yml header
@@ -496,6 +497,35 @@ for svc in cloudflared down-page socket-proxy traefik; do
   mutate "$svc without restart policy" "$svc: restart must be unless-stopped" compose "$svc" 2 delete '^    restart:'
   mutate "$svc without no-new-privileges" "$svc: security_opt must contain no-new-privileges:true" compose "$svc" 2 dropkey '^    security_opt:'
   mutate "$svc without healthcheck" "$svc: a healthcheck is required" compose "$svc" 2 dropkey '^    healthcheck:'
+done
+
+# ---- mutation cases: the remaining static checks ----
+
+mutate "cloudflared healthcheck not the ready check" "healthcheck must be the ready check" compose cloudflared 2 replace '^        - ready' '        - version'
+mutate "root traefik" "traefik must run as a fixed non-root user" compose traefik 2 replace '^    user:' '    user: "0:0"'
+mutate "root socket-proxy" "socket-proxy must run as a fixed non-root user" compose socket-proxy 2 replace '^    user:' '    user: "0:0"'
+mutate "root down-page" "down-page must run as a fixed non-root user" compose down-page 2 replace '^    user:' '    user: "0:0"'
+mutate "ipam on the platform network" "ipam is not allowed" compose platform 2 after '^  platform:' '    ipam: x'
+mutate "ipv6 on the platform network" "enable_ipv6 is not allowed" compose platform 2 after '^  platform:' '    enable_ipv6: true'
+mutate "driver_opts on the platform network" "driver_opts is not allowed" compose platform 2 after '^  platform:' '    driver_opts: x'
+mutate "ipam on the ingress-proxy network" "ipam is not allowed" compose ingress-proxy 2 after '^  ingress-proxy:' '    ipam: x'
+mutate "ipv6 on the ingress-proxy network" "enable_ipv6 is not allowed" compose ingress-proxy 2 after '^  ingress-proxy:' '    enable_ipv6: true'
+mutate "driver_opts on the ingress-proxy network" "driver_opts is not allowed" compose ingress-proxy 2 after '^  ingress-proxy:' '    driver_opts: x'
+mutate "docker socket on down-page" "mounted on a service other than socket-proxy" compose down-page 2 after '^    volumes:' '      - /var/run/docker.sock:/var/run/docker.sock:ro'
+mutate "docker socket on cloudflared" "mounted on a service other than socket-proxy" compose cloudflared 2 after '^    volumes:' '      - /var/run/docker.sock:/var/run/docker.sock:ro'
+mutate "non-TRAEFIK_ variable on traefik" "unexpected environment variable EXTRA_VAR" compose traefik 2 after '^    environment:' '      EXTRA_VAR: x'
+mutate "unexpected socket-proxy argument" "socket-proxy: unexpected argument" compose socket-proxy 2 after '^      - -allowfrom' '      - -logjson'
+mutate "socket-proxy without -allowhealthcheck" "-allowhealthcheck" compose socket-proxy 2 delete '^      - -allowhealthcheck'
+mutate "socket-proxy HEAD allowlist widened" "HEAD allowlist" compose socket-proxy 2 replace '^      - -allowHEAD' '      - -allowHEAD=.*'
+mutate "catch-all priority raised" "priority 1 (lowest)" dynamic catch-all 4 replace '^      priority:' '      priority: 100'
+mutate "empty service removed" "lacks the shared empty service" dynamic - - dropkey '^    empty:'
+mutate "down-page service URL changed" "lacks the down-page service" dynamic - - replace '^          - url:' '          - url: http://other:8080'
+mutate "errors middleware uses another service" "errors middleware must use the down-page service" dynamic - - replace '^        service: down-page' '        service: empty'
+mutate "errors middleware query path changed" "query path must be the static page" dynamic - - replace '^        query:' '        query: /other.html'
+mutate "env.example without PLATFORM_DOMAIN" "PLATFORM_DOMAIN placeholder" env - - delete '^PLATFORM_DOMAIN='
+mutate "down-page page emptied" "index.html is missing" page - - delete '.'
+for row in '^match /_jobs$' '^match /_jobs/x$' '^match /_JOBS/x$' '^match /_Jobs$' '^match /_jobs/;x$' '^nomatch /_jobs-anything$' '^nomatch /x/_jobs$'; do
+  mutate "table lacks row $row" "lacks the required row" table - - delete "$row"
 done
 
 # ---- mutation cases: dynamic.yml, table, page ----

@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
 # Pre-merge run of the pinned Traefik against dynamic.yml and the Traefik settings in compose.yaml.
 #
-# Needs docker; on a host without a usable docker daemon (CI has none) it skips with a loud notice. Run it once
-# un-skipped on a docker host before merge.
+# Needs docker; on a host without a usable docker daemon (CI has none) it skips with a loud notice and exits 0. Run it
+# once un-skipped on a docker host before merge, with REQUIRE_DOCKER=1 so a missing docker, daemon, curl or Docker
+# socket is a failure instead of a skip (a skip is otherwise indistinguishable from a pass):
+#   REQUIRE_DOCKER=1 platform/ingress/test_traefik_dynamic.sh
 #
 # What it proves (the live host reconfirms it):
 #   - the /_jobs deny never lets a request reach an app (shared table + variant list), with a positive control in
@@ -11,11 +13,14 @@
 #   - the ping entrypoint is loopback-only (a sibling container is refused) and Traefik's own healthcheck works;
 #   - the access log has no cookie value and no query string, and keeps Cf-Connecting-Ip.
 #
-# Traefik's settings come from compose.yaml (never retyped here). Only three entries are replaced for the run: the
-# Docker provider network (a throwaway network, never `platform`), its endpoint (the test-owned Docker socket
-# path, INGRESS_TEST_DOCKER_SOCK, default /var/run/docker.sock) and the domain value (a fake domain).
-# Everything else is used verbatim and asserted unchanged. No host port is published; requests go straight to the
-# container address on the throwaway network. All containers and the network are removed on every exit path.
+# Traefik's settings come from compose.yaml (never retyped here). Only two entries differ for the run: the Docker
+# provider network (a throwaway network, never `platform`) and the domain value (a fake domain). Everything else,
+# including the provider endpoint, is used verbatim and asserted unchanged. Like production, Traefik never sees the
+# host Docker socket: a socket-proxy container, built from the pinned image and the exact command in compose.yaml
+# (the production allowlist), joins the throwaway network and is the only container that mounts the socket
+# (read-only; the test-owned path INGRESS_TEST_DOCKER_SOCK, default /var/run/docker.sock). Traefik carries the
+# network alias `traefik` so the proxy's -allowfrom=traefik resolves. No host port is published; requests go straight
+# to the container address on the throwaway network. All containers and the network are removed on every exit path.
 #
 # Usage: test_traefik_dynamic.sh [--record]
 #   --record  rewrite the "variant | code" block in dynamic.yml with the observed codes instead of checking it.
@@ -42,9 +47,13 @@ case "${1:-}" in
 esac
 
 skip() {
+  if [ "${REQUIRE_DOCKER:-0}" = 1 ]; then
+    echo "FAIL: $(basename "$0"): $1 (REQUIRE_DOCKER=1 turns a skip into a failure)"
+    exit 1
+  fi
   echo "################################################################"
   echo "## $(basename "$0") SKIPPED: $1"
-  echo "## The pre-merge Traefik check did NOT run. Run it on a docker host before merge."
+  echo "## The pre-merge Traefik check did NOT run. Run it on a docker host before merge (REQUIRE_DOCKER=1)."
   echo "################################################################"
   exit 0
 }
@@ -64,6 +73,7 @@ net="$rid-net"
 fake_domain="example.test"
 friendly="This app is down or does not exist"
 tname="$rid-traefik"
+sname="$rid-proxy"
 aname="$rid-app"
 fname="$rid-fail503"
 gname="$rid-gone"
@@ -94,6 +104,11 @@ fi
 
 timage="$(ys_get "$flat" services/traefik/image)"
 pimage="$(ys_get "$flat" services/down-page/image)"
+simage="$(ys_get "$flat" services/socket-proxy/image)"
+suser="$(ys_get "$flat" services/socket-proxy/user)"
+mapfile -t sp_cmd < <(ys_list "$flat" services/socket-proxy/command)
+# Compose writes a literal dollar as two; the container must get one.
+sp_cmd=("${sp_cmd[@]//\$\$/\$}")
 tuser="$(ys_get "$flat" services/traefik/user)"
 tvol="$(ys_list "$flat" services/traefik/volumes | head -n 1)"
 tvol_target="${tvol#*:}"
@@ -120,15 +135,15 @@ hc_cmd="${hc[*]:1}"
 
 # The three entries this run replaces (everything else is verbatim).
 envv[TRAEFIK_PROVIDERS_DOCKER_NETWORK]="$net"
-envv[TRAEFIK_PROVIDERS_DOCKER_ENDPOINT]="unix:///var/run/docker.sock"
 changed=""
 for k in "${env_keys[@]}"; do
   [ "${envv[$k]}" = "${orig[$k]}" ] || changed="$changed $k"
 done
-# The domain substitution is part of `orig` already; the replaced pair is network + endpoint.
+# The domain substitution is part of `orig` already; the endpoint stays the production socket-proxy address.
 # shellcheck disable=SC2086
-expect_eq "only the Docker network and endpoint are replaced" "$(printf '%s\n' $changed | sort | tr '\n' ' ')" \
-  "TRAEFIK_PROVIDERS_DOCKER_ENDPOINT TRAEFIK_PROVIDERS_DOCKER_NETWORK "
+expect_eq "only the Docker network is replaced (the endpoint stays the socket-proxy)" "$(printf '%s\n' $changed | sort | tr '\n' ' ')" \
+  "TRAEFIK_PROVIDERS_DOCKER_NETWORK "
+expect_eq "the provider endpoint is the production socket-proxy address" "${envv[TRAEFIK_PROVIDERS_DOCKER_ENDPOINT]}" "tcp://socket-proxy:2375"
 
 # ---- helpers ----
 
@@ -155,10 +170,10 @@ start_traefik() {
   docker rm -f "$tname" >/dev/null 2>&1
   local flags=()
   for k in "${env_keys[@]}"; do flags+=(-e "$k=${envv[$k]}"); done
-  docker run -d --name "$tname" --label "ingress-test=$rid" --network "$net" \
-    --user "$tuser" --group-add "$sockgid" --cap-drop ALL --security-opt no-new-privileges:true --read-only \
+  docker run -d --name "$tname" --label "ingress-test=$rid" --network "$net" --network-alias traefik \
+    --user "$tuser" --cap-drop ALL --security-opt no-new-privileges:true --read-only \
     --health-cmd "$hc_cmd" --health-interval 2s --health-start-period 2s --health-retries 3 \
-    -v "$sock:/var/run/docker.sock" -v "$dyn:$tvol_target" "${flags[@]}" "$timage" >"$T_TMP/traefik-id" 2>"$T_TMP/traefik-err" \
+    -v "$dyn:$tvol_target" "${flags[@]}" "$timage" >"$T_TMP/traefik-id" 2>"$T_TMP/traefik-err" \
     || { cat "$T_TMP/traefik-err"; return 1; }
   tip="$(ip_of "$tname")"
   for _ in $(seq 1 60); do
@@ -180,6 +195,8 @@ mutated_dyn() {
     no-deny) awk '/^    jobs-deny:/ { skip = 1; next } /^    catch-all:/ { skip = 0 } !skip' "$here/dynamic.yml" > "$dir/dynamic.yml" ;;
     case-sensitive) sed 's/(?i)//' "$here/dynamic.yml" > "$dir/dynamic.yml" ;;
     low-priority) sed 's/priority: 2147483646/priority: 5/' "$here/dynamic.yml" > "$dir/dynamic.yml" ;;
+    errors-narrow) sed 's/"502-504"/"599"/' "$here/dynamic.yml" > "$dir/dynamic.yml" ;;
+    errors-wide) sed 's/"502-504"/"400-599"/' "$here/dynamic.yml" > "$dir/dynamic.yml" ;;
   esac
   if [ "$name" != plain ] && cmp -s "$here/dynamic.yml" "$dir/dynamic.yml"; then
     echo "mutation $name did not change dynamic.yml" >&2
@@ -252,6 +269,25 @@ variant_check() {
   done
 }
 
+# errors_middleware_check: it must replace exactly the 502 to 504 bodies (an unmatched host answers 503 with the
+# friendly page) and must not touch an app's own 404 body.
+errors_middleware_check() {
+  req "nosuch.$fake_domain" /
+  [[ "$req_code" = 503 && "$req_body" == *"$friendly"* ]] || note "errors middleware: an unmatched host did not get the friendly 503 page (status $req_code)"
+  req "$apphost" /no-such-file
+  if [ "$req_code" != 404 ]; then
+    note "errors middleware: the app's missing file answered $req_code, want its own 404"
+  elif [[ "$req_body" == *"$friendly"* ]]; then
+    note "errors middleware: replaced an app's own 404 body (the status range is too wide)"
+  fi
+}
+
+# encoded_slash_check: an encoded slash outside /_jobs is rejected at the entrypoint before routing.
+encoded_slash_check() {
+  req "$apphost" /a%2Fb
+  [ "$req_code" = 400 ] || note "encoded slash was not rejected (status $req_code, want 400)"
+}
+
 ping_isolation_check() {
   local out
   out="$(docker run --rm --label "ingress-test=$rid" --network "$net" "$pimage" wget -T 3 -q -O- "http://$tip:8082/ping" 2>&1)" && rc_ok=1 || rc_ok=0
@@ -271,7 +307,7 @@ expect_mutation_fails() {
 
 # ---- images and throwaway network ----
 
-for img in "$timage" "$pimage"; do
+for img in "$timage" "$pimage" "$simage"; do
   if ! docker image inspect "$img" >/dev/null 2>&1; then
     docker pull -q "$img" >/dev/null 2>"$T_TMP/pull-err" || { echo "FAIL: pull $img"; cat "$T_TMP/pull-err"; exit 1; }
   fi
@@ -300,6 +336,12 @@ docker run -d --name "$gname" --label "ingress-test=$rid" --label "platform.app=
   --user 65534:65534 -v "$app_dir:/www:ro" "$pimage" sh -c 'httpd -f -p 8080 -h /www & while :; do sleep 1; done' >/dev/null \
   || { echo "FAIL: start stopped-listener app"; exit 1; }
 
+# The only container that mounts the Docker socket (read-only), with the production allowlist and hardening. Traefik
+# reaches it by the alias socket-proxy, exactly as in production.
+docker run -d --name "$sname" --label "ingress-test=$rid" --network "$net" --network-alias socket-proxy \
+  --user "$suser" --group-add "$sockgid" --cap-drop ALL --security-opt no-new-privileges:true --read-only \
+  -v "$sock:/var/run/docker.sock:ro" "$simage" "${sp_cmd[@]}" >/dev/null || { echo "FAIL: start socket-proxy"; exit 1; }
+
 # ---- main run: unmutated config ----
 
 dyn_plain="$(mutated_dyn plain)"
@@ -314,6 +356,16 @@ deny_table_check
 variant_check
 expect_eq "deny table and variants: nothing reaches the backend, outcomes as defined" "${reasons[*]:-}" ""
 [ "${#reasons[@]}" -eq 0 ] || printf '  reason: %s\n' "${reasons[@]}"
+
+reasons=()
+errors_middleware_check
+encoded_slash_check
+expect_eq "errors middleware range and encoded-slash rejection hold" "${reasons[*]:-}" ""
+[ "${#reasons[@]}" -eq 0 ] || printf '  reason: %s\n' "${reasons[@]}"
+
+# Traefik reaches Docker only through the socket-proxy: no Docker socket mount on the Traefik container.
+tmounts="$(docker inspect -f '{{range .Mounts}}{{.Source}} {{end}}' "$tname")"
+[[ "$tmounts" != *docker.sock* ]] && _pass || _fail "the Docker socket is mounted into the Traefik container (mounts: $tmounts)"
 
 # Recorded per-variant codes in the dynamic.yml header.
 block_file="$T_TMP/observed-block"
@@ -405,6 +457,24 @@ for m in no-deny case-sensitive low-priority; do
   deny_table_check
   expect_mutation_fails "$m" "a /_jobs variant reached the backend"
 done
+
+for m in errors-narrow errors-wide; do
+  dyn="$(mutated_dyn "$m")" || { _fail "mutation $m could not be built"; continue; }
+  if ! start_traefik "$dyn"; then _fail "mutation $m: Traefik did not start"; continue; fi
+  reasons=()
+  errors_middleware_check
+  expect_mutation_fails "$m" "errors middleware"
+done
+
+envv[TRAEFIK_ENTRYPOINTS_WEB_HTTP_ENCODEDCHARACTERS_ALLOWENCODEDSLASH]="true"
+if start_traefik "$dyn_plain"; then
+  reasons=()
+  encoded_slash_check
+  expect_mutation_fails "ALLOWENCODEDSLASH=true" "encoded slash was not rejected"
+else
+  _fail "mutation allow-encoded-slash: Traefik did not start"
+fi
+envv[TRAEFIK_ENTRYPOINTS_WEB_HTTP_ENCODEDCHARACTERS_ALLOWENCODEDSLASH]="${orig[TRAEFIK_ENTRYPOINTS_WEB_HTTP_ENCODEDCHARACTERS_ALLOWENCODEDSLASH]}"
 
 envv[TRAEFIK_ENTRYPOINTS_PING_ADDRESS]="0.0.0.0:8082"
 if start_traefik "$dyn_plain"; then

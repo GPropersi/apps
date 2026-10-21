@@ -159,6 +159,44 @@ set_fixture default open
 run_v "$mutant" --domain "$DOMAIN"
 expect_rc "mutation: open flipped to gated makes an open host pass, so the open-fixture assertion would fail" 0
 
+# ---- Access-gate classification fixtures: lookalike and unrelated redirect targets are never a pass ----
+printf 'HTTP/2 302 \r\nlocation: https://evilcloudflareaccess.com/cdn-cgi/access/login/x\r\ncontent-length: 0\r\n\r\n' > "$FIX/default"
+run_v "$script" --domain "$DOMAIN"
+expect_rc "a lookalike host (evilcloudflareaccess.com) redirect fails" 1
+expect_out_has "the lookalike redirect is unconfirmed" "could not confirm Cloudflare Access"
+
+printf 'HTTP/2 302 \r\nlocation: https://cloudflareaccess.com.evil.test/login\r\ncontent-length: 0\r\n\r\n' > "$FIX/default"
+run_v "$script" --domain "$DOMAIN"
+expect_rc "a suffix lookalike (cloudflareaccess.com.evil.test) redirect fails" 1
+expect_out_has "the suffix lookalike is unconfirmed" "could not confirm Cloudflare Access"
+
+printf 'HTTP/2 302 \r\nlocation: https://www.unrelated.test/somewhere\r\ncontent-length: 0\r\n\r\n' > "$FIX/default"
+run_v "$script" --domain "$DOMAIN"
+expect_rc "a 302 to an unrelated host fails" 1
+expect_out_has "the unrelated 302 is unconfirmed" "could not confirm Cloudflare Access"
+expect_out_has "the unrelated 302 names its status" "HTTP 302"
+
+printf 'HTTP/2 403 \r\ncf-access-domain: team.cloudflareaccess.com\r\ncontent-length: 0\r\n\r\n' > "$FIX/default"
+run_v "$script" --domain "$DOMAIN"
+expect_rc "a cf-access response header fixture passes" 0
+expect_out_has "the cf-access header fixture prints PASS" "PASS:"
+
+# ---- more usage cases ----
+run_v "$script" --domain "$DOMAIN" --expect-open 'Bad Host'
+expect_rc "an invalid --expect-open value exits 2" 2
+expect_calls_lacks "an invalid --expect-open value made no request" "curl"
+run_v "$script" --domain "$DOMAIN" --probe-jobs 'Bad Host'
+expect_rc "an invalid --probe-jobs value exits 2" 2
+expect_calls_lacks "an invalid --probe-jobs value made no request" "curl"
+run_v "$script" --domain "$DOMAIN" --expect-open
+expect_rc "a missing --expect-open value exits 2" 2
+run_v "$script" --domain "$DOMAIN" --probe-jobs
+expect_rc "a missing --probe-jobs value exits 2" 2
+run_v "$script" --help
+expect_rc "--help exits 0" 0
+expect_out_has "--help prints the usage" "Usage: verify-ingress.sh"
+expect_calls_lacks "--help made no request" "curl"
+
 # ---- structural marker assertions: always run, with or without the stronghold checkout ----
 begin_n="$(grep -c '^# >>> access-gate (canonical: .claude/scripts/lib/access-gate.sh) >>>$' "$script" || true)"
 end_n="$(grep -c '^# <<< access-gate <<<$' "$script" || true)"
@@ -167,6 +205,13 @@ expect_eq "the end marker exists exactly once" "$end_n" "1"
 block="$(sed -n '/^# >>> access-gate/,/^# <<< access-gate/p' "$script")"
 if grep -q '^access_gate_check() {$' <<<"$block"; then _pass; else _fail "access_gate_check is defined inside the marked block"; fi
 if grep -q 'cloudflareaccess.com' <<<"$block"; then _pass; else _fail "the marked block still carries the Access host check"; fi
+
+# ---- pinned checksum of the vendored block: drift fails here even without the stronghold checkout ----
+# On an intentional change, update the canonical block in the stronghold, re-vendor it, and replace this checksum with
+# the output of: sed -n '/^# >>> access-gate/,/^# <<< access-gate/p' verify-ingress.sh | sha256sum
+PINNED_SUM="e75c60d15e42db69b40e55f09d3e14c580da38d4926186f10b1870368fb48425"
+got_sum="$(printf '%s\n' "$block" | sha256sum | cut -d' ' -f1)"
+expect_eq "the vendored access-gate block matches its pinned checksum" "$got_sum" "$PINNED_SUM"
 
 # ---- byte-identity with the canonical block, when the stronghold checkout is present ----
 canon="${STRONGHOLD_DIR:-$HOME/code}/.claude/scripts/lib/access-gate.sh"
