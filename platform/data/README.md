@@ -11,7 +11,8 @@ Compose service names `postgres` and `redis`.
 | `compose.yaml` | The two services, hardened like the ingress stack (pinned image and digest, `cap_drop: ALL`, `no-new-privileges`, read-only root, memory limit, no published ports). Fixed container names `platform-data-postgres` and `platform-data-redis` (one data stack per host, by design). |
 | `pg_hba.conf` | Mounted read-only. One `local all postgres peer` line (used by `docker exec` as the postgres uid, so `new-db` and `verify` need no password) and `scram-sha-256` `host` lines on `samenet`. No `trust`. |
 | `redis-entrypoint.sh` | Mounted read-only as the Redis entrypoint. Builds `users.acl` from the admin secret file at first start (atomic write), then execs `redis-server`. |
-| `test_data_stack.sh`, `test_redis_entrypoint.sh` | Offline tests (`make test`). |
+| `new-db.sh` | The `platform new-db <app>` helper, installed to `/opt/platform/data/new-db.sh` (`root:root 0755`) and run by the dispatcher as `deploy`. Gives one app its own Postgres role and database and its own Redis user, writing the credentials to the secret files below. See "Provisioning an app". |
+| `test_data_stack.sh`, `test_redis_entrypoint.sh`, `test_new_db.sh` | Offline tests (`make test`). |
 
 Data lives in the named volumes `platform-data-postgres` (mounted at `/var/lib/postgresql`, the data path of the
 pinned major 18; majors up to 17 use `/var/lib/postgresql/data`) and `platform-data-redis` (`/data`), so later backup
@@ -52,6 +53,25 @@ prints the instruction; this stack never sets it.
 Each app gets a Redis user limited to its own keys (`~<app>:*`) with dangerous commands removed. `SCAN`,
 `RANDOMKEY` and `DBSIZE` are denied to app users so the key names of other apps cannot be enumerated. An app whose
 client library scans its own keyspace needs a per-app exception, added later.
+
+## Provisioning an app
+
+`platform new-db <app>` (over the `deploy` identity) is idempotent, never rotates a password and prints only the
+secret file paths. The Postgres role and database are the app name with `-` replaced by `_` (connection limit 3,
+`CONNECT` revoked from `PUBLIC` on the database, `PUBLIC` also revoked on `postgres` and `template1`, `public`
+schema revoked from `PUBLIC`); the Redis user is the app name with the key prefix `<app>:`. Per app it writes
+`/var/lib/platform/secrets/<app>/db-password` and `redis-password` (40 characters `[A-Za-z0-9]`, `0440`, in a `2750`
+directory; the group comes from the setgid secrets root, so no `chgrp` runs).
+
+- A per-app `flock` serializes concurrent calls. Both containers must be healthy before anything is written.
+- A read-only preflight classifies both stores against both secret files. An object that exists while its secret
+  file is missing exits 1 before any write (nothing is modified in either store): restore the file from a backup, or
+  drop the role and database (or `ACL DELUSER` the Redis user) by hand if the app holds no data.
+- A secret file whose object is missing is used as is: the object is created with that password.
+- Every idempotent statement is re-applied on each run, so a drifted connection limit or Redis rule is repaired.
+- Names are checked before any docker call: the app-name pattern, the installed `reserved-names.txt` (a missing list
+  fails closed), and the Postgres identifier rule (no `pg_` prefix; not `postgres`, `template0`, `template1`, `public`).
+- Each phase logs its start, end, rc and duration to stderr and to `logger -t platform`; error text is masked.
 
 ## Connection contract
 

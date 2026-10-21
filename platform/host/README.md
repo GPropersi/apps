@@ -7,7 +7,7 @@ the host; Claude never runs the live-host targets (they are denied in a worktree
 
 | File | Role |
 |---|---|
-| `platform.sh` | The `platform` dispatcher: the only command the `deploy` identity can run. Validates one unsplit string against an allowlist. `deploy`, `rollback`, `new-db` and `ls` are placeholders that exit 3 (not implemented) until later steps. |
+| `platform.sh` | The `platform` dispatcher: the only command the `deploy` identity can run. Validates one unsplit string against an allowlist. `new-db <app>` hands over to `/opt/platform/data/new-db.sh` (exit 1 with "run `make host-data ... install`" when it is not installed). `deploy`, `rollback` and `ls` are placeholders that exit 3 (not implemented) until later steps. |
 | `login-shell.sh` | Root-owned validating login shell of `deploy` (`platform-login`). Never starts a shell; hands one `-c` command to the dispatcher. |
 | `install-deploy-user.sh` | Creates the `deploy` user, its forced-command key and the `Match User deploy` sshd drop-in. |
 | `claude-access.sh`, `claude-helper.sh` | Validating wrapper (also the login shell) and root helper for the `claude` debugging identity: `ps`, `stats`, `status`, `logs <app> [lines]`, `restart <app>`. |
@@ -19,7 +19,7 @@ the host; Claude never runs the live-host targets (they are denied in a worktree
 
 The installers embed their payloads (dispatcher, wrapper, helper, for the ingress installer compose.yaml,
 dynamic.yml and the down page's index page, and for the data installer compose.yaml, pg_hba.conf,
-redis-entrypoint.sh and reserved-names.txt) because the host has no checkout: edit the
+redis-entrypoint.sh, reserved-names.txt and new-db.sh) because the host has no checkout: edit the
 source file, run `make embed`, and `make lint` fails if an embedded copy differs from its source.
 
 ## Identities
@@ -74,6 +74,8 @@ and run it there directly.
    in a sysctl drop-in file): the installer never sets it, so expect that WARN on the first verify.
 8. After this merges and before you use `platform new-db` or `platform ls`, roll out the updated dispatcher:
    `make host-deploy-user HOST=<alias> ARGS="install --pubkey-file <path-to-deploy-pub>"`, then `ARGS=verify`.
+   `platform new-db` also needs the helper from step 7: re-run `make host-data HOST=<alias> ARGS="install"` once so
+   `/opt/platform/data/new-db.sh` is installed (`verify` checks its owner, mode and bytes).
 
 `HOST` is required for every `host-*` target, with no default alias; each exits 2 with a usage message when it
 is unset. For the four installers, `status` (the default) reports every check without failing and `verify`

@@ -53,7 +53,6 @@ accept_case() {
 accept_case "deploy" "deploy myapp v1.2.3" deploy
 accept_case "deploy sha tag" "deploy my-app abc123_DEF.4-5" deploy
 accept_case "rollback" "rollback myapp" rollback
-accept_case "new-db" "new-db myapp" new-db
 accept_case "ls" "ls" ls
 accept_case "app min length 2" "rollback ab" rollback
 accept_case "tag max length 128" "deploy myapp $(printf 'a%.0s' $(seq 1 128))" deploy
@@ -124,6 +123,41 @@ if grep -qF -- 'reason=too-long len=273' "$LOGGER_LOG"; then _pass; else _fail "
 # A usage printer that fails must still reject with exit 2.
 run_cmd env SSH_ORIGINAL_COMMAND="bad" bash -c 'exec 2>&-; exec bash "$0"' "$script"
 expect_rc "reject exits 2 even if stderr is closed" 2
+
+# new-db hands over to the installed helper. The dispatcher's helper path is a readonly constant (no override), so the
+# test runs a copy whose path points at a stub helper in the scratch tree.
+HELPER="$T_TMP/new-db-helper.sh"
+HELPER_ARGS="$T_TMP/new-db-helper.args"
+copy="$T_TMP/platform-under-test.sh"
+sed "s#^readonly NEW_DB_HELPER=.*#readonly NEW_DB_HELPER='$HELPER'#" "$script" > "$copy"
+if grep -qF "readonly NEW_DB_HELPER='$HELPER'" "$copy"; then _pass; else _fail "the helper path in the test copy was rewritten"; fi
+run_copy() { run_cmd env LC_ALL=en_US.UTF-8 SSH_ORIGINAL_COMMAND="$1" bash "$copy"; }
+if grep -qF "readonly NEW_DB_HELPER='/opt/platform/data/new-db.sh'" "$script"; then _pass; else _fail "the real helper path is /opt/platform/data/new-db.sh"; fi
+
+rm -f "$HELPER" "$HELPER_ARGS"
+t_reset_calls
+run_copy "new-db myapp"
+expect_rc "new-db with the helper absent exits 1" 1
+expect_out_has "new-db with the helper absent says how to install it" "make host-data"
+expect_eq "new-db with the helper absent makes no stub call" "$(t_calls)" ""
+
+printf '#!/usr/bin/env bash\nprintf "%%s\\n" "$#:$1:${NEW_DB_SECRETS_ROOT-unset}" > "%s"\necho "helper ran"\nexit 7\n' "$HELPER_ARGS" > "$HELPER"
+chmod 644 "$HELPER"
+run_copy "new-db myapp"
+expect_rc "new-db with a non-executable helper exits 1" 1
+chmod 755 "$HELPER"
+NEW_DB_SECRETS_ROOT=/caller/chosen run_copy "new-db my-app"
+expect_rc "new-db returns the helper's exit code" 7
+expect_out_has "new-db runs the helper" "helper ran"
+expect_eq "new-db passes exactly the app name and scrubs the caller's NEW_DB_* environment" "$(cat "$HELPER_ARGS")" "1:my-app:unset"
+expect_eq "new-db makes no docker, sudo or systemctl call itself" "$(t_calls)" ""
+rm -f "$HELPER_ARGS"
+run_copy "new-db My_App"
+expect_rc "new-db with an invalid app is rejected before the helper" 2
+if [ -e "$HELPER_ARGS" ]; then _fail "an invalid app never reaches the helper"; else _pass; fi
+run_copy "new-db myapp extra"
+expect_rc "new-db with an extra argument is rejected before the helper" 2
+if [ -e "$HELPER_ARGS" ]; then _fail "an extra argument never reaches the helper"; else _pass; fi
 
 # The unset-variable and argv paths.
 t_reset_calls

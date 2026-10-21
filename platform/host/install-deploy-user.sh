@@ -96,7 +96,8 @@ payload_platform() {
 # a case allowlist. This script is the only guard for the deploy identity, so it fails closed:
 # anything not explicitly accepted is rejected.
 #
-# Exit codes: 0 accepted and done, 2 rejected, 3 accepted but the subcommand is not implemented yet.
+# Exit codes: 0 accepted and done, 1 accepted but the helper is not installed (new-db), 2 rejected, 3 accepted but the
+# subcommand is not implemented yet. new-db hands over to its helper, whose exit code is the result.
 set -euo pipefail
 
 # ASCII-only ranges and a byte-counted length limit, whatever locale the caller has.
@@ -105,6 +106,8 @@ export LC_ALL=C
 readonly MAX_LEN=256
 readonly APP_RE='^[a-z][a-z0-9-]{1,30}$'
 readonly TAG_RE='^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$'
+# Installed by install-data.sh (a fixed path: the dispatcher takes no override, it is the deploy identity's only guard).
+readonly NEW_DB_HELPER='/opt/platform/data/new-db.sh'
 
 usage() {
   cat >&2 <<'EOF'
@@ -172,7 +175,13 @@ case "$sub" in
   new-db)
     need_args 1
     valid_app
-    not_implemented new-db
+    if [ ! -f "$NEW_DB_HELPER" ] || [ ! -x "$NEW_DB_HELPER" ]; then
+      logger -t platform "new-db helper missing: $NEW_DB_HELPER" || true
+      echo "platform: new-db is not installed on this host: run \`make host-data HOST=<alias> ARGS=install\`" >&2
+      exit 1
+    fi
+    # Scrubbed environment: the helper honours NEW_DB_* test overrides, which a caller must never be able to set.
+    exec env -i "PATH=$PATH" "HOME=${HOME:-/}" LC_ALL=C "$NEW_DB_HELPER" "${words[1]}"
     ;;
   ls)
     need_args 0
