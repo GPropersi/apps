@@ -27,15 +27,17 @@
 #   status    report every check (PASS/FAIL), exit 0
 #   verify    the same checks, exit 1 on any FAIL
 #   verify --live   client-driven end-to-end probe set; nothing is created without this flag. Over ssh (sudo docker)
-#             it starts three disposable containers (a labelled test app, an unlabelled sibling, a curl client), sends
-#             every probe straight to traefik:80 from the curl client and ALWAYS removes the containers (EXIT plus
-#             INT/TERM/HUP traps). It refuses to run when a container named ingress-livetest* or labelled
+#             it starts four disposable, hardened containers (a labelled test app, an unlabelled sibling, a curl client,
+#             and a hostile app whose own traefik.* labels compete with the /_jobs deny, which must still answer 503),
+#             sends every probe straight to traefik:80 from the curl client and ALWAYS removes the containers (EXIT
+#             plus INT/TERM/HUP traps). It refuses to run when a container named ingress-livetest* or labelled
 #             platform.app=ingress-livetest already exists. The per-variant /_jobs codes are read from the
 #             variants block in the embedded dynamic.yml, never retyped here.
 #   --hold    with --live: after the automated probes the test app stays up, the script prints its public hostname and
 #             waits for Enter (or a bounded timeout) while you complete the browser login through the real tunnel,
-#             then reads Traefik's access log from the hold on and reports PASS or FAIL for (a) a request that carries
-#             Cf-Connecting-Ip (only the real tunnel adds it) and (b) its Host equal to the public test hostname.
+#             then reads Traefik's access log (stdout, docker logs --since the hold start) and reports PASS or FAIL for
+#             (a) a request that carries Cf-Connecting-Ip (only the real tunnel adds it) and (b) its Host equal to the
+#             public test hostname. Only entries for the test host or its page are judged; other apps' traffic is ignored.
 #   --host    stream this script over one `ssh <alias> bash -s` call (BatchMode, no tty; passwordless sudo needed).
 #             With --live it is the ssh alias used for every docker call.
 #
@@ -528,6 +530,8 @@ place_dir() {
     info "already: $dir/"
     return 0
   fi
+  # A symlink in place of the directory is removed (the link only, never its target) and replaced by a real directory.
+  if [ -L "$dir" ]; then priv rm -f -- "$dir"; fi
   priv mkdir -p -- "$dir"
   priv chown root:root "$dir"
   priv chmod "$mode" "$dir"
@@ -778,6 +782,15 @@ do_report() {
 readonly LIVE_APP="ingress-livetest"
 readonly LIVE_SIBLING="ingress-livetest-sibling"
 readonly LIVE_CURL="ingress-livetest-curl"
+readonly LIVE_HOSTILE="ingress-livetest-hostile"
+readonly LIVE_NAMES="$LIVE_APP $LIVE_SIBLING $LIVE_CURL $LIVE_HOSTILE"
+# Every fixture runs as hardened as the stack itself: no capabilities, no new privileges, small limits, non-root, and a
+# tmpfs /tmp (the busybox listener writes its page and pid there).
+readonly LIVE_HARDEN=(--cap-drop ALL --security-opt no-new-privileges:true --memory 32m --pids-limit 64 --user 65534:65534 --tmpfs /tmp)
+# The hostile fixture carries a competing, high-priority traefik.* router for its own host. The deny router outranks
+# it, so /_jobs on that host must still answer 503. (2147483647, one above the deny, WOULD win: that is why the deploy
+# path must reject every traefik.* label; this probe pins the documented guarantee for a high but lower priority.)
+readonly HOSTILE_PRIORITY=2147483645
 # Pinned by exact tag and digest (same rule as compose.yaml). The test app image is the one compose.yaml already pins.
 readonly LIVE_IMAGE="docker.io/library/busybox:1.37.0@sha256:bdf57e528e45e4433820e045b29b4597825a1c9e38353532d90a01445013f82e"
 readonly CURL_IMAGE="docker.io/curlimages/curl:8.23.0@sha256:11e64e28c5f58c8d93ee95fcf22ac055f48b0bc440e0ce7d8013bbb5ad6aa8ac"
@@ -833,7 +846,7 @@ live_cleanup() {
     if ldk rm -f "${LIVE_IDS[@]}" >/dev/null 2>&1; then
       LIVE_IDS=()
     else
-      err "install-ingress: could not remove the test containers; remove them by hand: ssh <alias> sudo docker rm -f $LIVE_APP $LIVE_SIBLING $LIVE_CURL"
+      err "install-ingress: could not remove the test containers; remove them by hand: ssh <alias> sudo docker rm -f $LIVE_NAMES"
     fi
   fi
   cleanup
@@ -896,10 +909,13 @@ app_log_has() {
   grep -qiE -- "$2" <<<"$log"
 }
 
+# start_fixture <fixed container name> <docker run command...>: the id is tracked for the cleanup trap. A failed run (or
+# an unusable id) may still have left a container behind, so the fixed name is force-removed before giving up.
 start_fixture() {
-  local cid
-  cid="$("$@")" || die "could not create a test container ($*)"
-  [[ "$cid" =~ $CID_RE ]] || die "docker run returned an unexpected container id; remove by hand: ssh <alias> sudo docker rm -f $LIVE_APP $LIVE_SIBLING $LIVE_CURL"
+  local name="$1" cid
+  shift
+  cid="$("$@")" || { ldk rm -f "$name" >/dev/null 2>&1 || true; die "could not create a test container ($*)"; }
+  [[ "$cid" =~ $CID_RE ]] || { ldk rm -f "$name" >/dev/null 2>&1 || true; die "docker run returned an unexpected container id; remove by hand: ssh <alias> sudo docker rm -f $LIVE_NAMES"; }
   LIVE_IDS+=("$cid")
 }
 
@@ -910,7 +926,7 @@ listener_cmd() {
 }
 
 do_live() {
-  local domain existing app_host sibling_host nohost spec name path want port
+  local domain existing app_host sibling_host nohost hostile_host spec name path want port
   { [ -n "$HOST" ] || [ -n "${INSTALL_INGRESS_LIVE_LOCAL:-}" ]; } || die "verify --live needs --host" 2
   TMP="$(mktemp -d)"
   trap live_cleanup EXIT
@@ -931,14 +947,19 @@ do_live() {
   nohost="ingress-livetest-nohost.$domain"
 
   existing="$(ldk ps -a -q --filter "label=platform.app=$LIVE_APP")" || die "cannot list containers over ssh as the administrator"
-  [ -z "$existing" ] || die "a container labelled platform.app=$LIVE_APP already exists (a leftover is publicly routable behind Access); remove it first: ssh <alias> sudo docker rm -f $LIVE_APP $LIVE_SIBLING $LIVE_CURL"
+  [ -z "$existing" ] || die "a container labelled platform.app=$LIVE_APP already exists (a leftover is publicly routable behind Access); remove it first: ssh <alias> sudo docker rm -f $LIVE_NAMES"
   existing="$(ldk ps -a -q --filter "name=$LIVE_APP")" || die "cannot list containers over ssh as the administrator"
-  [ -z "$existing" ] || die "a container named $LIVE_APP* already exists; remove it first: ssh <alias> sudo docker rm -f $LIVE_APP $LIVE_SIBLING $LIVE_CURL"
+  [ -z "$existing" ] || die "a container named $LIVE_APP* already exists; remove it first: ssh <alias> sudo docker rm -f $LIVE_NAMES"
 
-  # (1) labelled app with a real listener and exactly one exposed port, (2) unlabelled sibling, (3) curl client.
-  start_fixture ldk run -d --name "$LIVE_APP" --network "$NETWORK" --label "platform.app=$LIVE_APP" --expose 8080 "$LIVE_IMAGE" sh -c "$(listener_cmd)"
-  start_fixture ldk run -d --name "$LIVE_SIBLING" --network "$NETWORK" --expose 8080 "$LIVE_IMAGE" sh -c "$(listener_cmd)"
-  start_fixture ldk run -d --name "$LIVE_CURL" --network "$NETWORK" --entrypoint sleep "$CURL_IMAGE" 3600
+  # (1) labelled app with a real listener and exactly one exposed port, (2) unlabelled sibling, (3) curl client,
+  # (4) hostile app: platform.app plus a competing high-priority traefik.* router for its own host.
+  hostile_host="$LIVE_HOSTILE.$domain"
+  start_fixture "$LIVE_APP" ldk run -d --name "$LIVE_APP" --network "$NETWORK" "${LIVE_HARDEN[@]}" --label "platform.app=$LIVE_APP" --expose 8080 "$LIVE_IMAGE" sh -c "$(listener_cmd)"
+  start_fixture "$LIVE_SIBLING" ldk run -d --name "$LIVE_SIBLING" --network "$NETWORK" "${LIVE_HARDEN[@]}" --expose 8080 "$LIVE_IMAGE" sh -c "$(listener_cmd)"
+  start_fixture "$LIVE_CURL" ldk run -d --name "$LIVE_CURL" --network "$NETWORK" "${LIVE_HARDEN[@]}" --entrypoint sleep "$CURL_IMAGE" 3600
+  start_fixture "$LIVE_HOSTILE" ldk run -d --name "$LIVE_HOSTILE" --network "$NETWORK" "${LIVE_HARDEN[@]}" --label "platform.app=$LIVE_HOSTILE" \
+    --label "traefik.http.routers.$LIVE_HOSTILE.rule=Host(\`$hostile_host\`)" --label "traefik.http.routers.$LIVE_HOSTILE.priority=$HOSTILE_PRIORITY" \
+    --expose 8080 "$LIVE_IMAGE" sh -c "$(listener_cmd)"
 
   # Positive control: an unreachable Traefik must not pass. Polls while the provider picks the container up.
   if expect_probe "positive control: a normal path reaches the labelled app (200)" "$app_host" "/index.html" 200 no 20; then
@@ -965,6 +986,16 @@ do_live() {
     fi
     if app_log_has "$LIVE_APP" 'jobs'; then fail "/_jobs variant $name reached the app (its log mentions the path)"; else pass "/_jobs variant $name is absent from the app's log"; fi
   done
+
+  # A hostile label cannot bypass the deny: the app is reachable through its own competing router (positive control),
+  # yet /_jobs on it answers the friendly 503 and never reaches it.
+  if expect_probe "hostile-label app: a normal path reaches it through its own router (200)" "$hostile_host" "/index.html" 200 no 20; then
+    expect_probe "hostile-label app: /_jobs still answers the friendly 503" "$hostile_host" "/_jobs" 503 yes || true
+    expect_probe "hostile-label app: /_jobs/x still answers the friendly 503" "$hostile_host" "/_jobs/x" 503 yes || true
+    if app_log_has "$LIVE_HOSTILE" 'jobs'; then fail "hostile-label app: a /_jobs request reached it (its log mentions the path)"; else pass "hostile-label app: /_jobs is absent from its log"; fi
+  fi
+  # Not needed any more, and it must not stay routable during a hold.
+  ldk stop -t 1 "$LIVE_HOSTILE" >/dev/null 2>&1 || fail "could not stop the hostile-label app"
 
   # The ping port is not reachable from a sibling container (refused, not a response and not a timeout).
   PROBE_RC=0
@@ -1016,10 +1047,10 @@ do_live() {
 }
 
 # live_hold <app host> <domain>: restart the test app, wait for the user's browser login through the real tunnel, then
-# judge Traefik's access log from the hold on. Only lines that carry Cf-Connecting-Ip count (the script's own probes
-# never do); the Host check applies to the first such entry.
+# judge Traefik's access log (stdout, docker logs --since a host-clock timestamp taken at the hold start). Only lines
+# that carry Cf-Connecting-Ip count (the script's own probes never do), and only those for the test host or its page.
 live_hold() {
-  local app_host="$1" tid start lines entries first_host i
+  local app_host="$1" tid since lines entries ours wrong i
   if ! ldk start "$LIVE_APP" >/dev/null 2>&1; then fail "hold: could not restart the test app"; return 0; fi
   i=1
   while ! { curl_probe "$app_host" "/index.html"; [ "$PROBE_CODE" = "200" ]; }; do
@@ -1029,8 +1060,10 @@ live_hold() {
   done
   tid="$(ldk ps -q --filter "label=com.docker.compose.project=$PROJECT" --filter "label=com.docker.compose.service=traefik")" || { fail "hold: cannot find the traefik container"; return 0; }
   [[ "$tid" =~ $CID_RE ]] || { fail "hold: cannot find the traefik container"; return 0; }
-  start="$(ldk logs "$tid" 2>&1 | wc -l)" || { fail "hold: cannot read the traefik log"; return 0; }
-  start="${start//[[:space:]]/}"
+  # The window is the host's own clock (epoch seconds with a fraction), which docker logs --since accepts: it does not
+  # depend on how stdout and stderr interleave over ssh.
+  since="$(live_run date -u +%s.%N)" || { fail "hold: cannot read the host clock"; return 0; }
+  [[ "$since" =~ ^[0-9]+\.[0-9]+$ ]] || { fail "hold: the host clock returned an unusable timestamp"; return 0; }
   info ""
   info "HOLD: open https://$app_host in a browser, complete the login, then press Enter (timeout ${HOLD_TIMEOUT}s)"
   if ( : <"$HOLD_TTY" ) 2>/dev/null; then
@@ -1041,16 +1074,30 @@ live_hold() {
     wait "$LIVE_WAIT_PID" || true
     LIVE_WAIT_PID=""
   fi
-  lines="$(ldk logs "$tid" 2>&1)" || { fail "hold: cannot read the traefik log after the hold"; return 0; }
-  entries="$(tail -n "+$((start + 1))" <<<"$lines" | grep -F 'Cf-Connecting-Ip' || true)"
+  # stdout only: the access log is stdout, stderr carries Traefik's own diagnostics.
+  lines="$(ldk logs --since "$since" "$tid" 2>/dev/null)" || { fail "hold: cannot read the traefik log after the hold"; return 0; }
+  entries="$(grep -F 'Cf-Connecting-Ip' <<<"$lines" || true)"
   if [ -z "$entries" ]; then
     fail "hold: no request that carries Cf-Connecting-Ip arrived through the real tunnel after the hold began"
     fail "hold: the tunnel entry's Host could not be checked (no entry)"
     return 0
   fi
+  # Other apps may receive tunnel traffic during the hold: only entries for the test host, or for the test page under
+  # another host (a wrong Host), are judged.
+  ours="$(grep -F "\"RequestHost\":\"$app_host\"" <<<"$entries" || true)"
+  if [ -n "$ours" ]; then
+    pass "hold: a request through the real tunnel (Cf-Connecting-Ip) was seen"
+    pass "hold: the tunnel entry's Host equals the public test hostname"
+    return 0
+  fi
+  wrong="$(grep -E '"RequestPath":"(/|/index\.html)"' <<<"$entries" || true)"
+  if [ -z "$wrong" ]; then
+    fail "hold: tunnel requests arrived but none for the test hostname or its page (other apps' traffic is ignored)"
+    fail "hold: the tunnel entry's Host could not be checked (no entry for the test host or page)"
+    return 0
+  fi
   pass "hold: a request through the real tunnel (Cf-Connecting-Ip) was seen"
-  first_host="$(head -n 1 <<<"$entries" | sed -n 's/.*"RequestHost":"\([^"]*\)".*/\1/p')"
-  if [ "$first_host" = "$app_host" ]; then pass "hold: the tunnel entry's Host equals the public test hostname"; else fail "hold: the tunnel entry's Host is not the public test hostname"; fi
+  fail "hold: the tunnel entry's Host is not the public test hostname"
 }
 
 # ---- main ----

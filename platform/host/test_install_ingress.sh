@@ -90,6 +90,13 @@ esac
 exit 2
 EOF
 
+# date: the real one, except for the hold timestamp switches date_fail and date_bad.
+mkstub date <<'EOF'
+[ ! -f "$STATE/date_fail" ] || exit 1
+if [ -f "$STATE/date_bad" ]; then echo "garbage"; exit 0; fi
+exec /usr/bin/date "$@"
+EOF
+
 mkstub ssh <<'EOF'
 cat > "$STATE/ssh_stdin"
 exit 0
@@ -125,8 +132,8 @@ case "$sub" in
     name="$3"
     [ ! -f "$S/inspect_fail_$name" ] || exit 1
     case "$fmt" in
-      *Labels*) cat "$S/labels_$name" 2>/dev/null ;;
-      *Mounts*) cat "$S/mounts_$name" 2>/dev/null ;;
+      *Labels*) [ ! -f "$S/inspect_fail_labels_$name" ] || exit 1; cat "$S/labels_$name" 2>/dev/null ;;
+      *Mounts*) [ ! -f "$S/inspect_fail_mounts_$name" ] || exit 1; cat "$S/mounts_$name" 2>/dev/null ;;
       *Networks*) cat "$S/networks_$name" 2>/dev/null ;;
       *Config.Env*) cat "$S/envcmd_$name" 2>/dev/null ;;
     esac
@@ -138,35 +145,47 @@ case "$sub" in
     done
     [ ! -f "$S/run_fail_$name" ] || exit 1
     touch "$S/created_$name"
+    if [ -f "$S/bad_cid" ] && [ "$name" = "$(cat "$S/bad_cid")" ]; then echo "not-a-container-id"; exit 0; fi
     case "$name" in
       ingress-livetest) echo aaaaaaaaaaaa ;;
       ingress-livetest-sibling) echo bbbbbbbbbbbb ;;
+      ingress-livetest-hostile) echo eeeeeeeeeeee ;;
       *) echo cccccccccccc ;;
     esac
     exit 0 ;;
   ps)
     all="$*"
     case "$all" in
-      *label=platform.app=ingress-livetest*) cat "$S/live_existing_label" 2>/dev/null ;;
-      *name=ingress-livetest*) cat "$S/live_existing_name" 2>/dev/null ;;
-      *com.docker.compose.service=traefik*) echo dddddddddddd ;;
+      *label=platform.app=ingress-livetest*) [ ! -f "$S/ps_fail_label" ] || exit 1; cat "$S/live_existing_label" 2>/dev/null ;;
+      *name=ingress-livetest*) [ ! -f "$S/ps_fail_name" ] || exit 1; cat "$S/live_existing_name" 2>/dev/null ;;
+      *com.docker.compose.service=traefik*)
+        [ ! -f "$S/ps_fail_traefik" ] || exit 1
+        [ -f "$S/traefik_id_empty" ] || echo dddddddddddd ;;
     esac
     exit 0 ;;
-  stop) touch "$S/stopped"; exit 0 ;;
-  start) rm -f "$S/stopped" "$S/killed"; exit 0 ;;
+  stop)
+    [ "${*: -1}" = "ingress-livetest-hostile" ] && { [ ! -f "$S/hostile_stop_fail" ] || exit 1; exit 0; }
+    touch "$S/stopped"; exit 0 ;;
+  start)
+    [ ! -f "$S/start_fail" ] || exit 1
+    [ ! -f "$S/start_stale" ] || exit 0
+    rm -f "$S/stopped" "$S/killed"; exit 0 ;;
   rm)
     for a in "$@"; do [ "$a" = "-f" ] || echo "$a" >> "$S/removed_ids"; done
     [ ! -f "$S/rm_fail" ] || exit 1
     rm -f "$S"/created_*
     exit 0 ;;
   logs)
+    # Traefik's log: "--since <ts>" returns only the entries from the hold on (traefik_log_post); without it the whole
+    # log. Stderr noise is emitted too, to prove the installer reads stdout only.
+    since=""
+    if [ "$1" = "--since" ]; then since="$2"; shift 2; fi
     case "$1" in
       dddddddddddd)
-        n="$(cat "$S/tlog_calls" 2>/dev/null || echo 0)"
-        n=$((n + 1))
-        echo "$n" > "$S/tlog_calls"
-        cat "$S/traefik_log_pre" 2>/dev/null
-        if [ "$n" -ge 2 ]; then cat "$S/traefik_log_post" 2>/dev/null; fi ;;
+        [ ! -f "$S/tlog_fail" ] || exit 1
+        echo "stderr-noise-from-traefik" >&2
+        [ ! -f "$S/stderr_cf_line" ] || cat "$S/stderr_cf_line" >&2
+        if [ -n "$since" ]; then cat "$S/traefik_log_post" 2>/dev/null; else cat "$S/traefik_log_pre" "$S/traefik_log_post" 2>/dev/null; fi ;;
       *) cat "$S/log_$1" 2>/dev/null ;;
     esac
     exit 0 ;;
@@ -234,6 +253,16 @@ case "$sub" in
             respond 502 "$friendly"
           fi
           [ -f "$S/no_app_log" ] || echo "url:$path" >> "$S/log_ingress-livetest"
+          respond 200 ok
+        fi
+        if [ "$host" = "ingress-livetest-hostile.example.test" ] && [ -f "$S/created_ingress-livetest-hostile" ]; then
+          [ ! -f "$S/hostile_unrouted" ] || respond 404 "not found"
+          case "$lower" in
+            *jobs*)
+              if [ -f "$S/hostile_leak" ]; then echo "url:$path" >> "$S/log_ingress-livetest-hostile"; respond 200 ok; fi
+              respond 503 "$friendly" ;;
+          esac
+          echo "url:$path" >> "$S/log_ingress-livetest-hostile"
           respond 200 ok
         fi
         if [ "$host" = "$sib_host" ]; then
@@ -318,6 +347,15 @@ ins verify --live
 expect_rc "--live without --host is a usage error" 2
 ins status --host -oProxyCommand=x
 expect_rc "an option-looking --host is refused" 2
+ins status --host
+expect_rc "--host without a value is a usage error" 2
+expect_out_has "--host without a value is named" "missing value for --host"
+ins status --host ""
+expect_rc "an empty --host value is a usage error" 2
+INSTALL_INGRESS_HEALTH_TIMEOUT=abc ins install
+expect_rc "a non-numeric health timeout is a usage error" 2
+expect_out_has "the health timeout message names the variable" "INSTALL_INGRESS_HEALTH_TIMEOUT must be a whole number"
+no_docker_calls "a bad health timeout runs no docker command"
 ins --help
 expect_rc "--help succeeds" 0
 expect_out_has "--help shows the usage" "Usage: install-ingress.sh"
@@ -329,6 +367,17 @@ ins install --host alias
 expect_rc "streaming install" 0
 expect_calls_has "streams with bash -s" "ssh -o BatchMode=yes -- alias bash -s -- install"
 expect_eq "streams this very script" "$(cmp -s "$STATE/ssh_stdin" "$script" && echo same)" "same"
+# an ssh failure passes through with ssh's own status (the stub is restored right after)
+mkstub ssh <<'EOF'
+cat > /dev/null
+exit 255
+EOF
+ins status --host alias
+expect_rc "an unreachable host passes ssh's status 255 through" 255
+mkstub ssh <<'EOF'
+cat > "$STATE/ssh_stdin"
+exit 0
+EOF
 
 # no usable privilege
 fresh
@@ -411,6 +460,7 @@ precond "token gid equals the docker gid" c_grp_docker "the Docker socket's grou
 precond "accounts cannot be listed" c_grp_noaccts "cannot list accounts"
 c_grp_dup() { touch "$STATE/group_dup"; }
 precond "a second group entry shares the token gid" c_grp_dup "more than one group entry carries gid 64321"
+expect_out_has "a second group entry with a member is reported too" "a group entry with gid 64321 has members; it must have none"
 fresh
 rm "$R/etc/platform/cloudflared.token"
 ins install
@@ -607,6 +657,44 @@ vcase "the gid file is missing" v_gid_file "stored DOCKER_GID file missing"
 vcase "the compose project cannot be read" v_ps_fail "cannot read the state of the compose project"
 vcase "the token file mode drifted" v_token_perm "token file: token file uid:gid/mode is '0:64321 600'"
 
+# fail-closed container_checks branches: an unreadable property is a FAIL, never a pass
+v_inspect_labels() { touch "$STATE/inspect_fail_labels_$TR"; }
+v_inspect_mounts() { touch "$STATE/inspect_fail_mounts_$DP"; }
+v_inspect_all() { touch "$STATE/inspect_fail_$SP"; }
+v_envcmd_inspect() { touch "$STATE/inspect_fail_$CF"; }
+v_envcmd_empty() { : > "$STATE/envcmd_$CF"; }
+vcase "the labels of a container cannot be inspected" v_inspect_labels "FAIL: cannot inspect the labels of $TR"
+vcase "the mounts of a container cannot be inspected" v_inspect_mounts "FAIL: cannot inspect the mounts of $DP"
+vcase "a container cannot be inspected at all (labels)" v_inspect_all "FAIL: cannot inspect the labels of $SP"
+vcase "a container cannot be inspected at all (mounts)" v_inspect_all "FAIL: cannot inspect the mounts of $SP"
+vcase "the Env and Cmd of cloudflared cannot be inspected" v_envcmd_inspect "FAIL: cannot compare the token with the Env and Cmd of $CF"
+vcase "the Env and Cmd of cloudflared come back empty" v_envcmd_empty "FAIL: cannot compare the token with the Env and Cmd of $CF"
+installed
+v_inspect_labels
+ins verify
+expect_out_lacks "an uninspectable container is not reported as clean" "PASS: $TR carries no platform.app label"
+
+# installer drift repair: a drifted payload, a wrong mode and a symlinked directory are put right by a second install
+installed
+echo "# drift" >> "$R$INST/compose.yaml"
+chmod 600 "$R$INST/dynamic/dynamic.yml"
+rm -rf "$R$INST/down-page"
+ln -s "$R$INST/dynamic" "$R$INST/down-page"
+ins install
+expect_rc "install repairs drift" 0
+expect_out_has "the drifted compose.yaml is reported changed" "changed: $R$INST/compose.yaml"
+expect_out_has "the wrong-mode dynamic.yml is reported changed" "changed: $R$INST/dynamic/dynamic.yml"
+expect_out_has "the symlinked directory is reported changed" "changed: $R$INST/down-page/"
+expect_out_has "the file in the replaced directory is placed again" "changed: $R$INST/down-page/index.html"
+expect_out_has "the untouched gid file stays already" "already: $R$INST/docker-gid.env"
+expect_eq "compose.yaml bytes are restored" "$(cmp -s "$R$INST/compose.yaml" "$REPO_COMPOSE" && echo same)" "same"
+expect_eq "dynamic.yml mode is restored" "$(stat -c %a "$R$INST/dynamic/dynamic.yml")" "644"
+expect_eq "down-page is a real directory again" "$([ -d "$R$INST/down-page" ] && [ ! -L "$R$INST/down-page" ] && echo dir)" "dir"
+expect_eq "index.html is back in down-page" "$(cmp -s "$R$INST/down-page/index.html" "$REPO_INDEX" && echo same)" "same"
+expect_calls_has "repairing drift brings the stack up again" " up -d"
+ins verify
+expect_rc "verify passes after the repair" 0
+
 # the token comparison passes on the clean fixture (above) and the failing case's output lacked the token (vcase)
 # status on a host with nothing installed still exits 0
 fresh
@@ -628,7 +716,7 @@ live_fresh() {
 }
 live() { run_cmd "$script" verify --live "$@"; }
 removed_all() { # label
-  expect_eq "$1: all three containers removed by id" "$(sort "$STATE/removed_ids" 2>/dev/null | tr '\n' ' ')" "aaaaaaaaaaaa bbbbbbbbbbbb cccccccccccc "
+  expect_eq "$1: all four containers removed by id" "$(sort "$STATE/removed_ids" 2>/dev/null | tr '\n' ' ')" "aaaaaaaaaaaa bbbbbbbbbbbb cccccccccccc eeeeeeeeeeee "
   expect_eq "$1: no fixture left" "$(find "$STATE" -maxdepth 1 -name 'created_*' | wc -l)" "0"
 }
 
@@ -637,7 +725,7 @@ live_fresh
 ins verify
 expect_calls_lacks "verify without --live creates no container" "run -d"
 expect_calls_lacks "verify without --live removes nothing" "docker rm"
-expect_calls_lacks "verify without --live starts no curl probe" "curl"
+expect_calls_lacks "verify without --live starts no curl probe" "docker exec ingress-livetest-curl curl"
 
 # happy path
 live_fresh
@@ -645,7 +733,13 @@ live
 expect_rc "verify --live passes" 0
 expect_out_has "verify --live says so" "all live checks passed"
 removed_all "happy path"
-expect_calls_has "labelled app: exact argv prefix" "docker run -d --name ingress-livetest --network platform --label platform.app=ingress-livetest --expose 8080 docker.io/library/busybox:1.37.0@sha256:"
+HARDEN_ARGS="--cap-drop ALL --security-opt no-new-privileges:true --memory 32m --pids-limit 64 --user 65534:65534 --tmpfs /tmp"
+expect_calls_has "labelled app: exact argv (hardened, labelled, one exposed port)" "docker run -d --name ingress-livetest --network platform $HARDEN_ARGS --label platform.app=ingress-livetest --expose 8080 docker.io/library/busybox:1.37.0@sha256:"
+# every fixture is hardened, not just the labelled app
+while IFS= read -r l; do
+  [[ "$l" == *"$HARDEN_ARGS"* ]] || { _fail "every live fixture carries the hardening flags" "not hardened: ${l:0:120}"; continue; }
+  _pass
+done < <(grep '^docker run ' "$CALL_LOG")
 sibling_line="$(grep -F -- '--name ingress-livetest-sibling' "$CALL_LOG" | head -n1)"
 expect_eq "the sibling carries no platform.app label" "$(grep -c 'platform.app' <<<"$sibling_line")" "0"
 curl_line="$(grep -F -- '--name ingress-livetest-curl' "$CALL_LOG" | head -n1)"
@@ -656,7 +750,7 @@ while IFS= read -r l; do
   [[ "$l" =~ @sha256:[0-9a-f]{64} ]] || runs_ok="no: $l"
 done < <(grep '^docker run ' "$CALL_LOG")
 expect_eq "every created container image is pinned by tag and digest" "$runs_ok" "yes"
-expect_eq "three containers were created" "$(grep -c '^docker run ' "$CALL_LOG")" "3"
+expect_eq "four containers were created" "$(grep -c '^docker run ' "$CALL_LOG")" "4"
 expect_eq "the test app image is the busybox pin compose.yaml already uses" "$(grep -c "$(sed -n 's/^readonly LIVE_IMAGE="\(.*\)"$/\1/p' "$script")" "$REPO_COMPOSE")" "1"
 expect_eq "the curl image pin has an exact tag and digest" "$(sed -n 's/^readonly CURL_IMAGE="\(.*\)"$/\1/p' "$script" | grep -cE '^[a-z0-9.-]+/[a-z0-9._/-]+:[0-9]+\.[0-9]+\.[0-9]+@sha256:[0-9a-f]{64}$')" "1"
 expect_out_has "positive control passes" "PASS: positive control: a normal path reaches the labelled app (200)"
@@ -670,7 +764,11 @@ expect_out_has "killed listener passes" "PASS: a killed listener in a running co
 expect_out_has "stop-then-down passes" "PASS: a stopped app answers the friendly 503 on /"
 expect_out_has "stop-then-down non-root passes" "PASS: a stopped app answers the friendly 503 on a non-root path"
 expect_out_lacks "a normal run never holds" "HOLD:"
-expect_eq "every probe goes to traefik:80" "$(grep -c '^docker exec ingress-livetest-curl curl' "$CALL_LOG")" "$(grep -cE 'http://traefik:(80|8082)/' "$CALL_LOG")"
+curl_total="$(grep -c '^docker exec ingress-livetest-curl curl' "$CALL_LOG")"
+ping_total="$(grep -c 'http://traefik:8082/' "$CALL_LOG")"
+expect_eq "exactly one call targets the ping port" "$ping_total" "1"
+expect_eq "every non-ping probe goes to traefik:80" "$(grep -c 'http://traefik:80/' "$CALL_LOG")" "$((curl_total - ping_total))"
+expect_eq "the ping probe is a curl from the curl container" "$(grep -c '^docker exec ingress-livetest-curl curl .*http://traefik:8082/' "$CALL_LOG")" "1"
 
 # the same probe set goes through ssh with sudo when not local
 live_fresh
@@ -772,7 +870,85 @@ touch "$STATE/run_fail_ingress-livetest-curl"
 live
 expect_rc "the curl container cannot be created" 1
 expect_out_has "the creation failure is named" "could not create a test container"
-expect_eq "the two containers already created are removed" "$(sort "$STATE/removed_ids" | tr '\n' ' ')" "aaaaaaaaaaaa bbbbbbbbbbbb "
+expect_eq "the two containers already created and the failed name are removed" "$(sort "$STATE/removed_ids" | tr '\n' ' ')" "aaaaaaaaaaaa bbbbbbbbbbbb ingress-livetest-curl "
+
+# a failed run that still created a container, and an unusable container id: the fixed name is force-removed too
+live_fresh
+echo "ingress-livetest-sibling" > "$STATE/bad_cid"
+live
+expect_rc "a malformed container id fails the run" 1
+expect_out_has "the malformed container id is named" "docker run returned an unexpected container id"
+expect_out_has "the manual removal command lists every fixture" "sudo docker rm -f ingress-livetest ingress-livetest-sibling ingress-livetest-curl ingress-livetest-hostile"
+expect_eq "the tracked id and the possibly created name are removed" "$(sort "$STATE/removed_ids" | tr '\n' ' ')" "aaaaaaaaaaaa ingress-livetest-sibling "
+expect_calls_has "a failed start force-removes the fixed container name" "docker rm -f ingress-livetest-sibling"
+
+# input and listing errors stop the run before anything is created
+live_fresh
+rm "$R/etc/platform/ingress.env"
+live
+expect_rc "live: a missing env file fails" 1
+expect_out_has "live: the unreadable env file is named" "cannot read /etc/platform/ingress.env"
+expect_calls_lacks "live: a missing env file creates nothing" "run -d"
+live_fresh
+printf '# nothing\n' > "$R/etc/platform/ingress.env"
+live
+expect_rc "live: a missing PLATFORM_DOMAIN fails" 1
+expect_out_has "live: the missing domain is named" "PLATFORM_DOMAIN on the host is missing or invalid"
+expect_calls_lacks "live: a missing domain creates nothing" "run -d"
+live_fresh
+printf 'PLATFORM_DOMAIN=Not_A_Domain\n' > "$R/etc/platform/ingress.env"
+live
+expect_rc "live: an invalid PLATFORM_DOMAIN fails" 1
+expect_out_has "live: the invalid domain is named" "PLATFORM_DOMAIN on the host is missing or invalid"
+expect_calls_lacks "live: an invalid domain creates nothing" "run -d"
+live_fresh
+touch "$STATE/ps_fail_label"
+live
+expect_rc "live: docker ps failing (label listing) fails" 1
+expect_out_has "live: the label listing failure is named" "cannot list containers over ssh as the administrator"
+expect_calls_lacks "live: a failed label listing creates nothing" "run -d"
+live_fresh
+touch "$STATE/ps_fail_name"
+live
+expect_rc "live: docker ps failing (name listing) fails" 1
+expect_out_has "live: the name listing failure is named" "cannot list containers over ssh as the administrator"
+expect_calls_lacks "live: a failed name listing creates nothing" "run -d"
+
+# the hostile-label probe: a competing high-priority traefik.* router must not let /_jobs through
+live_fresh
+live
+expect_rc "hostile label: the run passes" 0
+hostile_line="$(grep -F -- '--name ingress-livetest-hostile' "$CALL_LOG" | head -n1)"
+hostile_problems() { # a docker run call-log line: prints what the hostile fixture is missing
+  local l="$1" prio
+  [[ "$l" == *"--label platform.app=ingress-livetest-hostile"* ]] || echo "no platform.app label"
+  [[ "$l" == *'--label traefik.http.routers.ingress-livetest-hostile.rule=Host(`ingress-livetest-hostile.example.test`)'* ]] || echo "no competing Host rule label"
+  prio="$(sed -n 's/.*traefik\.http\.routers\.ingress-livetest-hostile\.priority=\([0-9]*\).*/\1/p' <<<"$l")"
+  { [[ "$prio" =~ ^[0-9]+$ ]] && [ "$prio" -ge 2000000000 ]; } || echo "priority '$prio' is not high"
+}
+expect_eq "hostile label: the fixture carries the platform.app label, a Host rule and a high priority" "$(hostile_problems "$hostile_line")" ""
+expect_out_has "hostile label: the control reaches the app through its own router" "PASS: hostile-label app: a normal path reaches it through its own router (200)"
+expect_out_has "hostile label: /_jobs answers 503" "PASS: hostile-label app: /_jobs still answers the friendly 503"
+expect_out_has "hostile label: /_jobs/x answers 503" "PASS: hostile-label app: /_jobs/x still answers the friendly 503"
+expect_out_has "hostile label: the app's log shows no /_jobs" "PASS: hostile-label app: /_jobs is absent from its log"
+expect_calls_has "hostile label: the hostile app is stopped before any hold" "docker stop -t 1 ingress-livetest-hostile"
+lfail "hostile app bypasses the deny" hostile_leak "FAIL: hostile-label app: /_jobs still answers the friendly 503: status 200, want 503"
+lfail "hostile app log shows the path" hostile_leak "hostile-label app: a /_jobs request reached it"
+lfail "hostile app not routed (control)" hostile_unrouted "FAIL: hostile-label app: a normal path reaches it through its own router (200): status 404, want 200"
+lfail "hostile app cannot be stopped" hostile_stop_fail "could not stop the hostile-label app"
+# the probe cannot be weakened unnoticed: a lower priority fails the fixture check, a wrong expected code fails the run
+live_fresh
+sed 's/^readonly HOSTILE_PRIORITY=.*$/readonly HOSTILE_PRIORITY=5/' "$script" > "$T_TMP/mut-hostile-prio.sh"
+chmod +x "$T_TMP/mut-hostile-prio.sh"
+run_cmd "$T_TMP/mut-hostile-prio.sh" verify --live
+hostile_line="$(grep -F -- '--name ingress-livetest-hostile' "$CALL_LOG" | head -n1)"
+expect_out_has_text "$(hostile_problems "$hostile_line")" "priority '5' is not high" "mutation: a lowered hostile priority is caught by the fixture check"
+live_fresh
+sed 's#"/_jobs" 503 yes#"/_jobs" 200 yes#' "$script" > "$T_TMP/mut-hostile-code.sh"
+chmod +x "$T_TMP/mut-hostile-code.sh"
+run_cmd "$T_TMP/mut-hostile-code.sh" verify --live
+expect_rc "mutation: expecting the wrong /_jobs code on the hostile app fails the run" 1
+expect_out_has "mutation: the wrong expected code is named" "FAIL: hostile-label app: /_jobs still answers the friendly 503: status 503, want 200"
 
 # signals during the run still remove every container
 live_bg() { # script args...; sets rc and out from the background run
@@ -871,7 +1047,7 @@ elapsed=$((SECONDS - start))
 expect_rc "hold: ended by the timeout alone when no terminal is readable" 0
 if [ "$elapsed" -ge 1 ] && [ "$elapsed" -lt 20 ]; then _pass; else _fail "hold: the timeout bounds the wait" "took ${elapsed}s"; fi
 export INSTALL_INGRESS_HOLD_TTY="$T_TMP/blocking-tty"
-rm -f "$STATE/tlog_calls" "$STATE/removed_ids" "$STATE/stopped" "$STATE/killed"
+rm -f "$STATE/removed_ids" "$STATE/stopped" "$STATE/killed"
 ( exec 9>"$T_TMP/blocking-tty"; sleep 8 ) &
 holder=$!
 start=$SECONDS
@@ -915,5 +1091,55 @@ rc=$?
 out="$(cat "$T_TMP/bg.out")"
 expect_rc "HUP during the hold exits 129" 129
 removed_all "after HUP during the hold"
+
+# hold: the log window is a host-clock timestamp (docker logs --since), stdout only, and only the test host counts
+hold_fresh
+traefik_line "$APP_HOST" yes > "$STATE/traefik_log_post"
+live --hold
+expect_rc "hold since: a passing run" 0
+expect_eq "hold since: the log is read once with --since an epoch timestamp" "$(grep -cE '^docker logs --since [0-9]+\.[0-9]+ dddddddddddd$' "$CALL_LOG")" "1"
+expect_calls_has "hold since: the timestamp is the host's clock" "date -u +%s.%N"
+hold_fresh
+: > "$STATE/traefik_log_post"
+traefik_line "$APP_HOST" yes > "$STATE/stderr_cf_line"
+live --hold
+expect_rc "hold stdout: a matching line on stderr does not count" 1
+expect_out_has "hold stdout: the stderr line is ignored" "FAIL: hold: no request that carries Cf-Connecting-Ip arrived"
+hold_fresh
+printf '{"RequestHost":"other.example.test","RequestPath":"/api/x","request_Cf-Connecting-Ip":"%s"}\n' "$PROBE_IP" > "$STATE/traefik_log_post"
+live --hold
+expect_rc "hold foreign: tunnel traffic for another app alone fails" 1
+expect_out_has "hold foreign: no entry for the test host or page" "none for the test hostname or its page"
+expect_out_lacks "hold foreign: the foreign request does not pass the tunnel check" "PASS: hold: a request through the real tunnel"
+hold_fresh
+{ printf '{"RequestHost":"other.example.test","RequestPath":"/api/x","request_Cf-Connecting-Ip":"%s"}\n' "$PROBE_IP"; traefik_line "$APP_HOST" yes; } > "$STATE/traefik_log_post"
+live --hold
+expect_rc "hold foreign: the test host entry still passes next to foreign traffic" 0
+expect_out_has "hold foreign: the Host check passes" "PASS: hold: the tunnel entry's Host equals the public test hostname"
+
+# hold: failure branches
+hold_case() { # label, switch file, expected message
+  hold_fresh
+  traefik_line "$APP_HOST" yes > "$STATE/traefik_log_post"
+  touch "$STATE/$2"
+  live --hold
+  expect_rc "hold fails: $1" 1
+  expect_out_has "hold failure message: $1" "$3"
+  expect_out_lacks "hold failure: no wait after: $1" "HOLD:"
+  removed_all "after the hold failure ($1)"
+}
+hold_case "the test app cannot be restarted" start_fail "FAIL: hold: could not restart the test app"
+hold_case "the restarted app is never routed again" start_stale "FAIL: hold: the restarted test app is not routed again (last status 503)"
+hold_case "the traefik container id is empty" traefik_id_empty "FAIL: hold: cannot find the traefik container"
+hold_case "listing the traefik container fails" ps_fail_traefik "FAIL: hold: cannot find the traefik container"
+hold_case "the host clock cannot be read" date_fail "FAIL: hold: cannot read the host clock"
+hold_case "the host clock returns garbage" date_bad "FAIL: hold: the host clock returned an unusable timestamp"
+hold_fresh
+traefik_line "$APP_HOST" yes > "$STATE/traefik_log_post"
+touch "$STATE/tlog_fail"
+live --hold
+expect_rc "hold fails: the traefik log cannot be read after the hold" 1
+expect_out_has "hold failure message: the log read" "FAIL: hold: cannot read the traefik log after the hold"
+removed_all "after the log read failure"
 
 t_finish
