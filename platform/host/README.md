@@ -13,6 +13,7 @@ the host; Claude never runs the live-host targets (they are denied in a worktree
 | `claude-access.sh`, `claude-helper.sh` | Validating wrapper (also the login shell) and root helper for the `claude` debugging identity: `ps`, `stats`, `status`, `logs <app> [lines]`, `restart <app>`. |
 | `install-claude-access.sh` | Creates the `claude` user, its key and the `Match User claude` sshd drop-in; prints one sudoers line for you to install. |
 | `install-ingress.sh` | Installs the ingress stack (Traefik, cloudflared, socket proxy, down page) under `/opt/platform/ingress` and starts it. Never creates the tunnel token or its group (`64321`); checks both fail-closed and prints how to create them. `install`, `status`, `verify`, and `verify --live [--hold]` (disposable containers prove routing and the down-page fallbacks; `--hold` also waits for one real login through the tunnel). Run it with `make host-ingress HOST=<alias> ARGS="..."`. |
+| `verify-ingress.sh` | Client-side, fail-closed public check: a random unused name under your domain must show the Cloudflare Access login wall (open, unreachable and unconfirmed each fail distinctly). Runs on your machine, makes no ssh call, is not embedded. Run it with `make host-verify-ingress HOST=<alias> ARGS="--domain <domain>"` (or `PLATFORM_DOMAIN` in the environment; there is no default domain). `--expect-open HOST` marks a deliberately public name; `--probe-jobs APP-HOST` only prints manual `/_jobs` commands. |
 | `verify-egress.sh` | Read-only check that the host firewall closes container-to-LAN egress. |
 
 The installers embed their payloads (dispatcher, wrapper, helper) because the host has no checkout: edit the
@@ -49,6 +50,14 @@ and run it there directly.
    `make host-verify-egress HOST=<alias>` must all exit 0. Optional: `ARGS="--probe"` on the egress check starts
    a throwaway container, and `ARGS="verify --live --identity <private-key-file>"` on `host-claude-access` runs an
    end-to-end check with a disposable labelled container (both clean up after themselves).
+
+6. Ingress (tunnel, Traefik, Access): follow [`../ingress/README.md`](../ingress/README.md), which has the
+   Cloudflare dashboard checklist (Access app first, then route and DNS), the token and env files with their
+   owners and modes, the label contract, token rotation and rollback. In short:
+   `make host-ingress HOST=<alias> ARGS="install"`, then `ARGS="verify"` (on-host) and
+   `make host-verify-ingress HOST=<alias> ARGS="--domain <domain>"` (public gate) must both exit 0.
+   `ARGS="verify --live"` adds routing probes with disposable containers, and `--hold` waits for one real login.
+   The ingress stack publishes no ports; container-to-host traffic stays out of scope (see Guarantee scope).
 
 `HOST` is required for every `host-*` target, with no default alias; each exits 2 with a usage message when it
 is unset. For the two installers, `status` (the default) reports every check without failing and `verify`

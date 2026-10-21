@@ -4,8 +4,8 @@
 # It requests a random, unused name under the domain the way a stranger would and passes only when the Access login
 # wall is positively seen (access_gate_check rc 0). Anything else fails: open (1), unreachable (2) and unconfirmed (3)
 # each print a distinct message. The check is the shared one, vendored below byte-identically from the stronghold's
-# .claude/scripts/lib/access-gate.sh; this file's path must be registered in `access_gate_copies` there (stronghold
-# follow-up in Step 5 of the ingress plan).
+# .claude/scripts/lib/access-gate.sh; this file's path must be registered in `access_gate_copies` there (a post-merge
+# stronghold follow-up: register `apps/platform/host/verify-ingress.sh` in `access_gate_copies`).
 #
 # This script runs only on the machine you are on. It makes no ssh or sudo call and does not embed as a payload.
 # The on-host checks (container health, routing, /_jobs denial) stay in `install-ingress.sh verify`; run them with

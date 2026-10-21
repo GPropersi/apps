@@ -141,4 +141,30 @@ for tgt in $targets; do
   esac
 done
 
+# Every host-* target must be documented in a Commands-table row of CLAUDE.md (a table row line containing
+# `make <target>`, not merely a longer target name that starts with it).
+missing_rows() { # claude-md-file: prints each discovered target that has no row
+  local file="$1" t
+  for t in $targets; do
+    grep -qE "^[[:space:]]*\|.*make ${t}([^A-Za-z0-9_-]|\$)" "$file" || printf '%s\n' "$t"
+  done
+}
+expect_eq "every host-* target has a Commands row in CLAUDE.md" "$(missing_rows "$root/CLAUDE.md")" ""
+# Mutation: a copy of CLAUDE.md without the host-verify-ingress row must be caught, and only that target.
+mutant="$T_TMP/CLAUDE.mutant.md"
+grep -v 'make host-verify-ingress' "$root/CLAUDE.md" > "$mutant" || true
+expect_eq "a target missing its Commands row is reported" "$(missing_rows "$mutant")" "host-verify-ingress"
+# A row for a longer target name must not satisfy its prefix.
+printf '| x | `make host-ingress-x` |\n' > "$mutant"
+case "$(missing_rows "$mutant")" in
+  *host-ingress*) _pass ;;
+  *) _fail "a longer target name does not satisfy a shorter one" "host-ingress was accepted" ;;
+esac
+# A non-table mention is not a row.
+printf 'Run make host-ingress sometimes.\n' > "$mutant"
+case "$(missing_rows "$mutant")" in
+  *host-ingress*) _pass ;;
+  *) _fail "a prose mention does not count as a Commands row" "host-ingress was accepted" ;;
+esac
+
 t_finish
