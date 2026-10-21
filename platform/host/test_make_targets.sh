@@ -18,7 +18,7 @@ t_stub sudo 0
 
 targets=$(grep -oE '^host-[A-Za-z0-9_-]+:' "$root/Makefile" | tr -d ':')
 n=$(printf '%s\n' "$targets" | grep -c .)
-expect_eq "at least the four known live-host targets exist" "$([ "$n" -ge 4 ] && echo yes || echo no)" "yes"
+expect_eq "at least the five known live-host targets exist" "$([ "$n" -ge 5 ] && echo yes || echo no)" "yes"
 
 for tgt in $targets; do
   t_reset_calls
@@ -51,6 +51,7 @@ dry_case "claude-access, ARGS unset" host-claude-access install-claude-access.sh
 dry_case "deploy-user with ARGS" host-deploy-user install-deploy-user.sh ARGS='install --pubkey-file k'
 dry_case "claude-access with ARGS" host-claude-access install-claude-access.sh ARGS='install --pubkey-file k'
 dry_case "verify-egress with ARGS" host-verify-egress verify-egress.sh ARGS='--probe'
+dry_case "verify-ingress with ARGS" host-verify-ingress verify-ingress.sh ARGS='--domain example.test'
 dry_case "ingress, ARGS unset" host-ingress install-ingress.sh
 dry_case "ingress with ARGS" host-ingress install-ingress.sh ARGS='verify --live --hold'
 # make -n leaves the shell expansion of ARGS unexpanded, so the real recipes run here against stub scripts in a
@@ -59,7 +60,7 @@ stub_tree="$T_TMP/stub-tree"
 rm -rf "$stub_tree"
 mkdir -p "$stub_tree/platform/host"
 cp -- "$root/Makefile" "$stub_tree/Makefile"
-for stub in install-deploy-user.sh install-claude-access.sh install-ingress.sh verify-egress.sh; do
+for stub in install-deploy-user.sh install-claude-access.sh install-ingress.sh verify-egress.sh verify-ingress.sh; do
   printf '#!/usr/bin/env bash\nprintf "%%s\\n" "$*" > "$STUB_ARGV"\n' > "$stub_tree/platform/host/$stub"
   chmod +x "$stub_tree/platform/host/$stub"
 done
@@ -91,6 +92,10 @@ stub_run host-verify-egress '--probe'
 expect_eq "ARGS reaches verify-egress" "$(cat "$stub_argv")" "--probe --host alias"
 stub_run host-verify-egress
 expect_eq "ARGS unset: verify-egress gets only --host" "$(cat "$stub_argv")" "--host alias"
+stub_run host-verify-ingress '--domain example.test'
+expect_eq "ARGS set: verify-ingress receives ARGS then --host" "$(cat "$stub_argv")" "--domain example.test --host alias"
+stub_run host-verify-ingress
+expect_eq "ARGS unset: verify-ingress gets only --host (no domain default)" "$(cat "$stub_argv")" "--host alias"
 
 # make test on scratch trees: a failing test fails the run, a passing tree passes, an empty tree is an error.
 scratch_make() {
