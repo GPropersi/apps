@@ -1,0 +1,142 @@
+# Data stack: one shared Postgres and one shared Redis for every app, on the `platform` network only.
+#
+#   apps -> postgres:5432 / redis:6379 (the service names are the DNS names on `platform`); nothing is published.
+#
+# Host-side inputs (never written here, validated by install-data.sh): the admin secrets
+# /etc/platform/postgres-admin.password and /etc/platform/redis-admin.password (root:64322 0640, read through
+# group_add 64322), and the payloads installed to /opt/platform/data (pg_hba.conf, redis-entrypoint.sh).
+#
+# Rules this file keeps (platform/data/test_data_stack.sh enforces them):
+# - It stays inside the small YAML subset (block style only) so the tests can read it without a YAML library.
+# - No password appears in any environment value or command argument: Traefik can read every container's
+#   Config.Env until master step 11, so every secret is a mounted file. The one literal is the Redis healthcheck's
+#   `--pass placeholder`: the nopass `health` user accepts any password, and the flag makes redis-cli send AUTH.
+# - Postgres: log_statement=none and log_min_error_statement=panic keep a failing CREATE ROLE ... PASSWORD from
+#   writing its statement (and so the password) into the container log. pg_hba.conf has one `local` line
+#   (`local all postgres peer`, used by `docker exec` as the postgres uid) and only scram-sha-256 `host` lines.
+# - Redis: noeviction (queued jobs are never evicted) with AOF everysec. maxmemory is half the cgroup cap because the
+#   AOF rewrite buffer and copy-on-write pages are not counted by maxmemory. Redis memory is shared by all apps with
+#   no per-app quota: a full Redis rejects every app's writes (monitored by `install-data.sh verify`).
+# - Every service drops all capabilities, cannot gain privileges, has a read-only root, a memory limit and restarts
+#   unless stopped.
+name: platform-data
+
+services:
+  postgres:
+    image: docker.io/library/postgres:18.6@sha256:edb0c08dc33befd0262ab3b5cf1c4f3f8cfd8b09e88c05b45adee29d6761ddb6
+    container_name: platform-data-postgres
+    command:
+      - postgres
+      - -c
+      - hba_file=/etc/postgresql/pg_hba.conf
+      - -c
+      - log_statement=none
+      - -c
+      - log_min_error_statement=panic
+      - -c
+      - shared_buffers=128MB
+      - -c
+      - effective_cache_size=512MB
+      - -c
+      - work_mem=4MB
+      - -c
+      - maintenance_work_mem=48MB
+      - -c
+      - max_connections=60
+      - -c
+      - huge_pages=off
+      - -c
+      - wal_compression=on
+      - -c
+      - max_parallel_workers_per_gather=0
+    environment:
+      POSTGRES_PASSWORD_FILE: /etc/platform/postgres-admin.password
+    volumes:
+      - platform-data-postgres:/var/lib/postgresql
+      - /etc/platform/postgres-admin.password:/etc/platform/postgres-admin.password:ro
+      - /opt/platform/data/pg_hba.conf:/etc/postgresql/pg_hba.conf:ro
+    tmpfs:
+      - /tmp
+      - /var/run/postgresql
+    user: "999:999"
+    group_add:
+      - "64322"
+    networks:
+      - platform
+    restart: unless-stopped
+    mem_limit: 512m
+    shm_size: 128m
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    read_only: true
+    healthcheck:
+      test:
+        - CMD
+        - pg_isready
+        - -U
+        - postgres
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  redis:
+    image: docker.io/library/redis:8.10.2@sha256:5c02d7c0f8d75af45958c0294a8004f2e14b42df98a1103e3a669aa7ec787be6
+    container_name: platform-data-redis
+    entrypoint:
+      - /usr/local/bin/redis-entrypoint.sh
+    command:
+      - --maxmemory
+      - 96mb
+      - --maxmemory-policy
+      - noeviction
+      - --appendonly
+      - "yes"
+      - --appendfsync
+      - everysec
+      - --aclfile
+      - /data/users.acl
+    volumes:
+      - platform-data-redis:/data
+      - /etc/platform/redis-admin.password:/etc/platform/redis-admin.password:ro
+      - /opt/platform/data/redis-entrypoint.sh:/usr/local/bin/redis-entrypoint.sh:ro
+    tmpfs:
+      - /tmp
+    user: "999:999"
+    group_add:
+      - "64322"
+    networks:
+      - platform
+    restart: unless-stopped
+    mem_limit: 192m
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    read_only: true
+    healthcheck:
+      test:
+        - CMD
+        - redis-cli
+        - --user
+        - health
+        - --pass
+        - placeholder
+        - --no-auth-warning
+        - ping
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+volumes:
+  platform-data-postgres:
+    name: platform-data-postgres
+  platform-data-redis:
+    name: platform-data-redis
+
+networks:
+  platform:
+    external: true
