@@ -86,8 +86,10 @@ make host-verify-ingress HOST=<alias> ARGS="--domain <your domain>"
   `https://<name>.<domain>` on its single exposed port.
 - **Traefik sees only containers with `platform.app`.** Traefik, cloudflared, the socket proxy, the down page and
   later Postgres and Redis are unlabelled and never become routers.
-- **Apps must not carry `traefik.*` labels.** An app-supplied label could shadow the `/_jobs` deny; the deploy
-  path enforces this later.
+- **Apps must not carry `traefik.*` labels.** An app-supplied label could shadow the `/_jobs` deny (a
+  higher-priority router would bypass it). Deploy-path requirement: the deploy path must reject any `traefik.*`
+  label, and must validate `platform.app` as a lowercase DNS label, before an app is deployed. Nothing in the
+  ingress stack enforces either rule.
 - **`/_jobs` is denied** at the edge for every app (case-insensitive, and the normalised and encoded variants
   recorded in `dynamic.yml`); it never reaches the app. The jobs runner is reached another way.
 - **502, 503 and 504 are replaced by the friendly page.** Any app response with one of these statuses gets the down
@@ -100,6 +102,10 @@ The ingress stack publishes **no ports**; all inbound traffic arrives through th
 traffic (INPUT, not forwarded) is still out of scope, as in the egress guarantee (`platform/host/README.md`). The
 Access gate is verified from outside by `make host-verify-ingress`; routing and the `/_jobs` denial by
 `verify --live`.
+
+**Environment exposure.** Traefik can read every container's environment variables through the socket proxy
+(the allowlist includes `GET /containers/<id>/json`, which the Docker provider needs), until the file-provider
+migration (master plan Step 11). No app may rely on env-only secrets being hidden from the ingress tier.
 
 ## Rotating the tunnel token
 

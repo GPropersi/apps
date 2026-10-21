@@ -140,7 +140,7 @@ contains_word() { [[ " $2 " == *" $1 "* ]]; }
 
 # run_checks <stack-dir> <extra-scan-file>: fill REASONS (empty means the stack passes).
 run_checks() {
-  local dir="$1" extra="$2" cf df s k v i got
+  local dir="$1" extra="$2" cf df s k v i got got_nets want_nets
   REASONS=()
   cf="$T_TMP/c-flat"
   df="$T_TMP/d-flat"
@@ -216,15 +216,17 @@ run_checks() {
       *) r "socket-proxy: unexpected argument '$i'" ;;
     esac
   done < "$T_TMP/sp-args"
-  local pth
+  local pth get_re head_re
+  get_re="$(grep -m1 -- '^-allowGET=' "$T_TMP/sp-args" | sed -e 's/^-allowGET=//' -e 's/\$\$/$/')"
+  head_re="$(grep -m1 -- '^-allowHEAD=' "$T_TMP/sp-args" | sed -e 's/^-allowHEAD=//' -e 's/\$\$/$/')"
   for pth in /version /v1.43/version /containers/json /v1.43/containers/json /containers/abc123/json /v1.43/containers/abc123/json /events /v1.43/events; do
-    grep -qE -e "$(grep -m1 -- '^-allowGET=' "$T_TMP/sp-args" | sed -e 's/^-allowGET=//' -e 's/\$\$/$/')" <<<"$pth" || r "socket-proxy GET regex rejects $pth"
+    grep -qE -e "$get_re" <<<"$pth" || r "socket-proxy GET regex rejects $pth"
   done
   for pth in /containers/abc123/exec /containers/abc123/logs /containers/abc123/json/x /containers/abc123/json/ /images/json /containers/create /info /_ping /v1.43/containers/abc123/archive; do
-    grep -qE -e "$(grep -m1 -- '^-allowGET=' "$T_TMP/sp-args" | sed -e 's/^-allowGET=//' -e 's/\$\$/$/')" <<<"$pth" && r "socket-proxy GET regex allows $pth"
+    grep -qE -e "$get_re" <<<"$pth" && r "socket-proxy GET regex allows $pth"
   done
-  grep -qE -e "$(grep -m1 -- '^-allowHEAD=' "$T_TMP/sp-args" | sed -e 's/^-allowHEAD=//' -e 's/\$\$/$/')" <<<"/v1.43/_ping" || r "socket-proxy HEAD regex rejects /_ping"
-  grep -qE -e "$(grep -m1 -- '^-allowHEAD=' "$T_TMP/sp-args" | sed -e 's/^-allowHEAD=//' -e 's/\$\$/$/')" <<<"/version" && r "socket-proxy HEAD regex allows /version"
+  grep -qE -e "$head_re" <<<"/v1.43/_ping" || r "socket-proxy HEAD regex rejects /_ping"
+  grep -qE -e "$head_re" <<<"/version" && r "socket-proxy HEAD regex allows /version"
   [[ "$(ys_get "$cf" services/socket-proxy/user)" =~ ^[1-9][0-9]*:[0-9]+$ ]] || r "socket-proxy must run as a fixed non-root user"
 
   # -- down-page

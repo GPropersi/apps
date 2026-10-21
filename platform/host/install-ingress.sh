@@ -764,7 +764,6 @@ do_checks() {
 
 do_report() {
   require_privilege
-  TMP="$(mktemp -d)"
   do_checks
   if [ "$FAILURES" -gt 0 ]; then
     printf 'install-ingress: %d check(s) failed\n' "$FAILURES"

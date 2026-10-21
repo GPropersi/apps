@@ -16,7 +16,8 @@ the host; Claude never runs the live-host targets (they are denied in a worktree
 | `verify-ingress.sh` | Client-side, fail-closed public check: a random unused name under your domain must show the Cloudflare Access login wall (open, unreachable and unconfirmed each fail distinctly). Runs on your machine, makes no ssh call, is not embedded. Run it with `make host-verify-ingress HOST=<alias> ARGS="--domain <domain>"` (or `PLATFORM_DOMAIN` in the environment; there is no default domain). `--expect-open HOST` marks a deliberately public name; `--probe-jobs APP-HOST` only prints manual `/_jobs` commands. |
 | `verify-egress.sh` | Read-only check that the host firewall closes container-to-LAN egress. |
 
-The installers embed their payloads (dispatcher, wrapper, helper) because the host has no checkout: edit the
+The installers embed their payloads (dispatcher, wrapper, helper, and for the ingress installer compose.yaml,
+dynamic.yml and the down page's index page) because the host has no checkout: edit the
 source file, run `make embed`, and `make lint` fails if an embedded copy differs from its source.
 
 ## Identities
@@ -60,12 +61,13 @@ and run it there directly.
    The ingress stack publishes no ports; container-to-host traffic stays out of scope (see Guarantee scope).
 
 `HOST` is required for every `host-*` target, with no default alias; each exits 2 with a usage message when it
-is unset. For the two installers, `status` (the default) reports every check without failing and `verify`
+is unset. For the three installers, `status` (the default) reports every check without failing and `verify`
 exits 1 on any failure; the egress check has no mode and always exits 1 on a failure. `--probe` needs the LAN
 default gateway to fall inside a deny range (otherwise it exits 2 rather than pass vacuously).
 
-`install-deploy-user.sh` and `install-claude-access.sh` intentionally duplicate shared scaffolding, because each is
-streamed standalone over `ssh bash -s` and cannot source a common file. A fix to one must be mirrored in the other.
+`install-deploy-user.sh`, `install-claude-access.sh` and `install-ingress.sh` intentionally duplicate shared
+scaffolding, because each is streamed standalone over `ssh bash -s` and cannot source a common file. A fix to one
+must be mirrored in the others.
 
 ## Streaming invocation
 

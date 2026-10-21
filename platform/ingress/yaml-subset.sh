@@ -109,8 +109,7 @@ ys_flatten() {
   '
 }
 
-# The file is passed on stdin to ys_flatten; these helpers take the flattened file.
-ys_flatten_file() { ys_flatten < "$1"; }
+# ys_flatten reads the YAML on stdin; these helpers take the flattened file.
 
 ys_get() { awk -F '\t' -v p="$2" '$1 == p { print substr($0, length(p) + 2); exit }' "$1"; }
 ys_has() { awk -F '\t' -v p="$2" '$1 == p { f = 1 } END { exit f ? 0 : 1 }' "$1"; }

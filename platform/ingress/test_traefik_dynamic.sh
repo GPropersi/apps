@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # Pre-merge run of the pinned Traefik against dynamic.yml and the Traefik settings in compose.yaml.
 #
-# Needs docker; on a host without a usable docker daemon (CI has none) it skips with a loud notice. Step 6 of the
-# ingress plan requires one un-skipped run before merge.
+# Needs docker; on a host without a usable docker daemon (CI has none) it skips with a loud notice. Run it once
+# un-skipped on a docker host before merge.
 #
-# What it proves (the live host reconfirms it in Step 7):
+# What it proves (the live host reconfirms it):
 #   - the /_jobs deny never lets a request reach an app (shared table + variant list), with a positive control in
 #     the same run, and a mutation pass proves the checks can fail;
 #   - an unmatched host, an app 503 and an app 502 get the friendly page body with the status kept;

@@ -84,6 +84,9 @@ expect_out_lacks() {
   if grep -qF -- "$2" <<<"$out"; then _fail "$1" "output unexpectedly has: $2"; else _pass; fi
 }
 
+# expect_out_has_text <text> <fixed-string> <label>: the given text (not $out) contains it.
+expect_out_has_text() { if grep -qF -- "$2" <<<"$1"; then _pass; else _fail "$3" "lacks: $2"; fi; }
+
 # expect_eq <label> <got> <want>
 expect_eq() {
   if [ "$2" = "$3" ]; then _pass; else _fail "$1" "got '$2', want '$3'"; fi

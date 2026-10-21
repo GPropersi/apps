@@ -534,7 +534,6 @@ gid_mismatch() { # script path: prints MISMATCH lines when the two numbers diffe
 }
 expect_eq "the token gid constant equals the compose group_add gid" "$(gid_mismatch "$script")" ""
 sed 's/^readonly TOKEN_GID=64321$/readonly TOKEN_GID=64322/' "$script" > "$T_TMP/mut-const.sh"
-expect_out_has_text() { if grep -qF -- "$2" <<<"$1"; then _pass; else _fail "$3" "lacks: $2"; fi; }
 expect_out_has_text "$(gid_mismatch "$T_TMP/mut-const.sh")" "MISMATCH: TOKEN_GID=64322 but compose group_add=64321" "mutation: changing the constant fails the gid check"
 sed 's/^      - "64321"$/      - "64399"/' "$script" > "$T_TMP/mut-compose.sh"
 expect_out_has_text "$(gid_mismatch "$T_TMP/mut-compose.sh")" "MISMATCH: TOKEN_GID=64321 but compose group_add=64399" "mutation: changing the embedded compose group_add fails the gid check"
