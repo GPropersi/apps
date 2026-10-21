@@ -6,7 +6,7 @@ Self-hosted app platform: platform code, templates and apps.
 
 | Path | Purpose |
 |---|---|
-| `platform/` | Host and platform scripts (deploy entry point, jobs runner, backups, status page) and repo lint |
+| `platform/` | Host and platform scripts (deploy entry point, jobs runner, backups, status page), the ingress and shared data (Postgres, Redis) stacks, the app registry and repo lint |
 | `apps/` | One directory per app, `apps/<name>/` |
 | `templates/` | Starting points used to scaffold a new app |
 | `.github/workflows/` | CI (and, later, build and deploy on pushes to `main`) |

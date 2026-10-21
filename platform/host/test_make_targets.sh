@@ -18,7 +18,7 @@ t_stub sudo 0
 
 targets=$(grep -oE '^host-[A-Za-z0-9_-]+:' "$root/Makefile" | tr -d ':')
 n=$(printf '%s\n' "$targets" | grep -c .)
-expect_eq "at least the five known live-host targets exist" "$([ "$n" -ge 5 ] && echo yes || echo no)" "yes"
+expect_eq "at least the six known live-host targets exist" "$([ "$n" -ge 6 ] && echo yes || echo no)" "yes"
 
 for tgt in $targets; do
   t_reset_calls
@@ -54,13 +54,15 @@ dry_case "verify-egress with ARGS" host-verify-egress verify-egress.sh ARGS='--p
 dry_case "verify-ingress with ARGS" host-verify-ingress verify-ingress.sh ARGS='--domain example.test'
 dry_case "ingress, ARGS unset" host-ingress install-ingress.sh
 dry_case "ingress with ARGS" host-ingress install-ingress.sh ARGS='verify --live --hold'
+dry_case "data, ARGS unset" host-data install-data.sh
+dry_case "data with ARGS" host-data install-data.sh ARGS='verify'
 # make -n leaves the shell expansion of ARGS unexpanded, so the real recipes run here against stub scripts in a
 # scratch tree that record their argv; nothing reaches ssh or a host.
 stub_tree="$T_TMP/stub-tree"
 rm -rf "$stub_tree"
 mkdir -p "$stub_tree/platform/host"
 cp -- "$root/Makefile" "$stub_tree/Makefile"
-for stub in install-deploy-user.sh install-claude-access.sh install-ingress.sh verify-egress.sh verify-ingress.sh; do
+for stub in install-deploy-user.sh install-claude-access.sh install-ingress.sh install-data.sh verify-egress.sh verify-ingress.sh; do
   printf '#!/usr/bin/env bash\nprintf "%%s\\n" "$*" > "$STUB_ARGV"\n' > "$stub_tree/platform/host/$stub"
   chmod +x "$stub_tree/platform/host/$stub"
 done
@@ -88,6 +90,11 @@ expect_rc "stub run: ingress, ARGS unset" 0
 expect_eq "ARGS unset: ingress defaults to status" "$(cat "$stub_argv")" "status --host alias"
 stub_run host-ingress 'verify --live --hold'
 expect_eq "ARGS set: ingress receives ARGS then --host" "$(cat "$stub_argv")" "verify --live --hold --host alias"
+stub_run host-data
+expect_rc "stub run: data, ARGS unset" 0
+expect_eq "ARGS unset: data defaults to status" "$(cat "$stub_argv")" "status --host alias"
+stub_run host-data 'install'
+expect_eq "ARGS set: data receives ARGS then --host" "$(cat "$stub_argv")" "install --host alias"
 stub_run host-verify-egress '--probe'
 expect_eq "ARGS reaches verify-egress" "$(cat "$stub_argv")" "--probe --host alias"
 stub_run host-verify-egress
