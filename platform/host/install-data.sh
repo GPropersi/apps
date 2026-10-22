@@ -42,7 +42,7 @@
 # Known gap: verify never logs in to Postgres with the admin password file (Postgres reads POSTGRES_PASSWORD_FILE only at
 # first init, so a later change to the file diverges silently) and does not inspect the live containers' HostConfig
 # (read-only root, dropped capabilities, memory limit); the on-disk compose.yaml bytes are compared instead. Both are
-# validated only by the Step 6 live run.
+# validated only by the live run (platform/data/test_data_live.sh).
 #
 # Test overrides (env, test-only): INSTALL_DATA_ROOT (path prefix for every default host path), INSTALL_DATA_SUDO (the
 # privilege prefix; "sudo -n" by default, none when already root), INSTALL_DATA_SOCKET (the Docker socket path),
@@ -138,7 +138,7 @@ payload_compose() {
 # Rules this file keeps (platform/data/test_data_stack.sh enforces them):
 # - It stays inside the small YAML subset (block style only) so the tests can read it without a YAML library.
 # - No password appears in any environment value or command argument: Traefik can read every container's
-#   Config.Env until master step 11, so every secret is a mounted file. The one literal is the Redis healthcheck's
+#   Config.Env (a known gap, to be closed separately), so every secret is a mounted file. The one literal is the Redis healthcheck's
 #   `--pass placeholder`: the nopass `health` user accepts any password, and the flag makes redis-cli send AUTH.
 # - Postgres: log_statement=none and log_min_error_statement=panic keep a failing CREATE ROLE ... PASSWORD from
 #   writing its statement (and so the password) into the container log. pg_hba.conf has one `local` line
@@ -287,8 +287,11 @@ payload_pg_hba() {
 #
 # The one local line is for `docker exec` (new-db and verify run as the postgres uid, so they need no password).
 # Every host line uses scram-sha-256; `samenet` is the platform network, so no address literal appears here.
-# platform/data/test_data_stack.sh enforces: exactly this one local line, and host lines with scram-sha-256 only.
+# The postgres superuser never logs in over the network: the reject line comes first (first match wins).
+# platform/data/test_data_stack.sh enforces: exactly this one local line, the reject line first, then host lines with
+# scram-sha-256 only.
 local all postgres peer
+host all postgres samenet reject
 host all all samenet scram-sha-256
 PLATFORM_PAYLOAD_EOF
 }
@@ -402,7 +405,7 @@ payload_new_db() {
 # Usage: new-db.sh <app>
 # Exit: 0 done | 1 refused or failed (the phase is named; nothing half-written) | 2 usage error
 #
-# What it does, in this order (platform-data plan, Decision 4):
+# What it does, in this order (each phase refuses before changing anything):
 #   1. Validates the name (APP_RE, the installed reserved-names list, the Postgres identifier rule) before any docker
 #      call or file write. A missing or unreadable list fails closed.
 #   2. Takes the per-app lock <secrets root>/.<app>.lock (flock, bounded wait).
@@ -1279,8 +1282,8 @@ check_postgres() {
   else
     fail "cannot read the Postgres hba_file"
   fi
-  if v="$(pg_query "SELECT count(*) FROM pg_hba_file_rules WHERE error IS NOT NULL OR auth_method IS NULL OR auth_method NOT IN ('peer', 'scram-sha-256')")" && [[ "$v" =~ ^[0-9]+$ ]]; then
-    if [ "$v" -eq 0 ]; then pass "every pg_hba rule parses and uses peer or scram-sha-256"; else fail "pg_hba_file_rules has $v rule(s) with an error or an auth method other than peer or scram-sha-256"; fi
+  if v="$(pg_query "SELECT count(*) FROM pg_hba_file_rules WHERE error IS NOT NULL OR auth_method IS NULL OR auth_method NOT IN ('peer', 'scram-sha-256', 'reject')")" && [[ "$v" =~ ^[0-9]+$ ]]; then
+    if [ "$v" -eq 0 ]; then pass "every pg_hba rule parses and uses peer, scram-sha-256 or reject"; else fail "pg_hba_file_rules has $v rule(s) with an error or an auth method other than peer, scram-sha-256 or reject"; fi
   else
     fail "cannot read pg_hba_file_rules"
   fi

@@ -250,9 +250,9 @@ out="$(docker exec "$RDC" redis-cli --no-auth-warning ping 2>&1)"
 expect_re "default user (no auth) is rejected" "$out" 'NOAUTH|WRONGPASS'
 out="$(docker exec "$RDC" redis-cli --user default --pass wrong --no-auth-warning ping 2>&1)"
 expect_re "default user with a password is rejected" "$out" 'WRONGPASS|NOAUTH'
-# Postgres admin password file (with a trailing newline) really is the postgres password over TCP; peer works locally.
+# The postgres superuser is rejected over the network even with the right password; peer works locally.
 out="$(printf '%s\n' "$pg_pw" | docker exec -i "$PGC" sh -c 'IFS= read -r PGPASSWORD; export PGPASSWORD; exec psql -X -h 127.0.0.1 -U postgres -d postgres -At -c "select 1"' 2>&1)"
-expect_eq "Postgres admin password (file with a trailing newline) works over scram" "$out" 1
+expect_re "Postgres superuser is rejected over TCP even with the admin password" "$out" 'pg_hba.conf rejects connection'
 expect_eq "Postgres admin works over the local socket (peer)" "$(pg_admin 'select 2')" 2
 cap "SHOW hba_file; log settings" "$(pg_admin 'SHOW hba_file'; pg_admin 'SHOW log_statement'; pg_admin 'SHOW log_min_error_statement')"
 cap "pg_hba_file_rules" "$(pg_admin 'SELECT rule_number, line_number, type, database, user_name, address, auth_method, error FROM pg_hba_file_rules')"
@@ -264,7 +264,7 @@ expect_has "verify before new-db: no apps yet" "$vout" "already: no apps yet"
 expect_has "verify: containers running and healthy" "$vout" "PASS: both containers are running and healthy"
 expect_has "verify: Redis ACL users pass on a fresh stack" "$vout" "PASS: Redis ACL users"
 expect_has "verify: hba_file is the installed file" "$vout" "PASS: Postgres hba_file is /etc/postgresql/pg_hba.conf"
-expect_has "verify: every pg_hba rule parses" "$vout" "PASS: every pg_hba rule parses and uses peer or scram-sha-256"
+expect_has "verify: every pg_hba rule parses" "$vout" "PASS: every pg_hba rule parses and uses peer, scram-sha-256 or reject"
 expect_has "verify: log_statement" "$vout" "PASS: Postgres log_statement is none"
 expect_has "verify: log_min_error_statement" "$vout" "PASS: Postgres log_min_error_statement is panic"
 expect_has "verify: Redis eviction policy" "$vout" "PASS: Redis eviction policy is noeviction"

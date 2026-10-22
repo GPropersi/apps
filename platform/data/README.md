@@ -9,7 +9,7 @@ Compose service names `postgres` and `redis`.
 | File | Role |
 |---|---|
 | `compose.yaml` | The two services, hardened like the ingress stack (pinned image and digest, `cap_drop: ALL`, `no-new-privileges`, read-only root, memory limit, no published ports). Fixed container names `platform-data-postgres` and `platform-data-redis` (one data stack per host, by design). |
-| `pg_hba.conf` | Mounted read-only. One `local all postgres peer` line (used by `docker exec` as the postgres uid, so `new-db` and `verify` need no password) and `scram-sha-256` `host` lines on `samenet`. No `trust`. |
+| `pg_hba.conf` | Mounted read-only. One `local all postgres peer` line (used by `docker exec` as the postgres uid, so `new-db` and `verify` need no password) a first `host all postgres samenet reject` line (the superuser never logs in over the network), then `scram-sha-256` `host` lines on `samenet`. No `trust`. |
 | `redis-entrypoint.sh` | Mounted read-only as the Redis entrypoint. Builds `users.acl` from the admin secret file at first start (atomic write), then execs `redis-server`. |
 | `new-db.sh` | The `platform new-db <app>` helper, installed to `/opt/platform/data/new-db.sh` (`root:root 0755`) and run by the dispatcher as `deploy`. Gives one app its own Postgres role and database and its own Redis user, writing the credentials to the secret files below. See "Provisioning an app". |
 | `test_data_stack.sh`, `test_redis_entrypoint.sh`, `test_new_db.sh` | Offline tests (`make test`). |
@@ -22,7 +22,7 @@ steps can find them by name. `pg_dump` must match the pinned Postgres major.
 ## Secrets
 
 Every secret is a mounted file; no password is in any container's environment or command line (Traefik can read every
-container's environment until master step 11).
+container's environment, a known gap to be closed separately).
 
 - Admin secrets are user-created, never written or printed by the installer: `/etc/platform/postgres-admin.password`
   and `/etc/platform/redis-admin.password`, `root:64322 0640`, a single line. The containers read them through

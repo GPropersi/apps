@@ -6,7 +6,7 @@
 # Usage: new-db.sh <app>
 # Exit: 0 done | 1 refused or failed (the phase is named; nothing half-written) | 2 usage error
 #
-# What it does, in this order (platform-data plan, Decision 4):
+# What it does, in this order (each phase refuses before changing anything):
 #   1. Validates the name (APP_RE, the installed reserved-names list, the Postgres identifier rule) before any docker
 #      call or file write. A missing or unreadable list fails closed.
 #   2. Takes the per-app lock <secrets root>/.<app>.lock (flock, bounded wait).

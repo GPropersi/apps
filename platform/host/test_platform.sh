@@ -275,7 +275,7 @@ expect_out_has "ls: docker ps failure prints an error line" "platform: ls failed
 expect_out_lacks "ls: docker ps failure prints no partial rows" "web"
 
 # Unparseable rows exit 1 with no rows (the good row is not printed either).
-for bad in "web${tab}running" "web${tab}running${tab}Up${tab}extra" "${tab}running${tab}Up" "Bad_App${tab}running${tab}Up" "web${tab}${tab}Up" "garbage"; do
+for bad in "web${tab}running" "web${tab}running${tab}Up${tab}extra" "${tab}running${tab}Up" "Bad_App${tab}running${tab}Up" "web${tab}${tab}Up" "web${tab}Running${tab}Up" "garbage"; do
   rows "good${tab}running${tab}Up" "$bad"
   ls_case "bad row" 0
   expect_rc "ls: unparseable row exits 1: $bad" 1

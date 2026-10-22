@@ -81,6 +81,10 @@ printf 'chores\trunning\tnone\nchores\texited\tnone\n' > "$live"
 run_ls --live-from "$live"
 if [ "$rc" -ne 0 ]; then _pass; else _fail "a repeated live app exits non-zero" "rc=0"; fi
 expect_out_lacks "a repeated live app prints no table" "OWNER"
+printf 'chores\trunning\tnone\n\nnotes\trunning\tnone\n' > "$live"
+run_ls --live-from "$live"
+if [ "$rc" -ne 0 ]; then _pass; else _fail "a blank line mid-file exits non-zero" "rc=0"; fi
+expect_out_lacks "a blank line mid-file prints no table" "OWNER"
 run_ls --live-from "$T_TMP/missing.tsv"
 if [ "$rc" -ne 0 ]; then _pass; else _fail "a missing live file exits non-zero" "rc=0"; fi
 expect_out_lacks "a missing live file prints no table" "OWNER"

@@ -225,8 +225,14 @@ run_checks() {
     [ "$(grep -cE '^[[:space:]]*local([[:space:]]|$)' "$hba")" = 1 ] || r "pg_hba.conf must have exactly one local line (got: $(grep -cE '^[[:space:]]*local([[:space:]]|$)' "$hba"))"
     grep -qxF 'local all postgres peer' <<<"$locals" || r "pg_hba.conf must contain exactly the line: local all postgres peer"
     grep -qiE 'trust' "$hba" && r "pg_hba.conf must not contain trust anywhere"
-    local line cnt=0
+    local line cnt=0 first_host=1 norm
     while IFS= read -r line; do
+      norm="$(sed -E 's/[[:space:]]+/ /g; s/^ //; s/ $//' <<<"$line")"
+      if [ "$first_host" = 1 ]; then
+        first_host=0
+        [ "$norm" = "host all postgres samenet reject" ] || r "pg_hba.conf first host line must be exactly: host all postgres samenet reject"
+        continue
+      fi
       cnt=$((cnt + 1))
       read -ra f <<<"$line"
       { [ "${#f[@]}" -eq 5 ] && [ "${f[0]}" = host ] && [ "${f[3]}" = samenet ]; } || r "pg_hba.conf host line must be exactly 'host <database> <user> samenet <method>': $line"
@@ -486,6 +492,10 @@ mutate "local line method changed" "exactly the line: local all postgres peer" h
 mutate "extra local line" "exactly one local line" hba - - after '^local all postgres peer' 'local all all scram-sha-256'
 mutate "extra local trust line" "must not contain trust anywhere" hba - - after '^local all postgres peer' 'local all all trust'
 mutate "host lines removed" "has no host line" hba - - delete '^host '
+mutate "superuser reject line removed" "first host line must be exactly" hba - - delete '^host all postgres'
+mutate "superuser reject line made scram" "first host line must be exactly" hba - - replace '^host all postgres' 'host all postgres samenet scram-sha-256'
+mutate "superuser reject line commented out" "first host line must be exactly" hba - - replace '^host all postgres' '#'
+mutate "superuser reject line scoped to another user" "first host line must be exactly" hba - - sub 'all postgres' 'all someone'
 mutate "an unknown line type" "other than local or host" hba - - after '^local all postgres peer' 'include x'
 
 # ---- mutation cases: redis ----

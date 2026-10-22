@@ -46,7 +46,7 @@ Unknown keys inside a job are errors.
 ## `platform ls` output contract
 
 `platform ls` (the dispatcher subcommand, run on the host; no registry there) prints stable TSV, **one row per
-app**, sorted by app name, three columns: `app<TAB>state<TAB>health`. Step 13 consumes it.
+app**, sorted by app name, three columns: `app<TAB>state<TAB>health`. Scripts that read the host's app list depend on this format.
 
 | Column | Values |
 |---|---|

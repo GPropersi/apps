@@ -3,7 +3,7 @@
 # logging fakesudo, and docker/stat/getent/chown/install/ssh are stateful stubs on PATH (owners are recorded by the
 # chown and install stubs and reported by the stat stub; modes are real). No docker, firewall or network is touched.
 #
-# FIXTURE SHAPES CONFIRMED BY THE LIVE RUN (platform/data/test_data_live.sh, Step 6): `docker inspect` State|Health,
+# FIXTURE SHAPES CONFIRMED BY THE LIVE RUN (platform/data/test_data_live.sh): `docker inspect` State|Health,
 # Redis `ACL LIST` (including the sanitize-payload tokens and the per-app rule order), `CONFIG GET`, `INFO memory` and
 # `psql -At` output match the real servers; verify itself runs against them there. The mutation cases stay here.
 #

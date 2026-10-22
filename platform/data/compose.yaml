@@ -9,7 +9,7 @@
 # Rules this file keeps (platform/data/test_data_stack.sh enforces them):
 # - It stays inside the small YAML subset (block style only) so the tests can read it without a YAML library.
 # - No password appears in any environment value or command argument: Traefik can read every container's
-#   Config.Env until master step 11, so every secret is a mounted file. The one literal is the Redis healthcheck's
+#   Config.Env (a known gap, to be closed separately), so every secret is a mounted file. The one literal is the Redis healthcheck's
 #   `--pass placeholder`: the nopass `health` user accepts any password, and the flag makes redis-cli send AUTH.
 # - Postgres: log_statement=none and log_min_error_statement=panic keep a failing CREATE ROLE ... PASSWORD from
 #   writing its statement (and so the password) into the container log. pg_hba.conf has one `local` line

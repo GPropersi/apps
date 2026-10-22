@@ -4,7 +4,7 @@
 # "### redis" header per call). The secrets root is a real temp directory with the setgid bit, the lock is the real
 # flock, and the reserved-names list is a copy of the tracked registry file (comment lines included).
 #
-# FIXTURE SHAPES CONFIRMED BY THE LIVE RUN (platform/data/test_data_live.sh, Step 6): the real psql preflight reply is
+# FIXTURE SHAPES CONFIRMED BY THE LIVE RUN (platform/data/test_data_live.sh): the real psql preflight reply is
 # "<roles>|<databases>" and redis-cli's non-tty replies are "OK" and the one-name-per-line ACL USERS list, exactly as
 # stubbed here; the real new-db.sh ran against real servers there. The mutation cases stay.
 #
