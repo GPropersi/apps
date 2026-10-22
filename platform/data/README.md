@@ -97,3 +97,9 @@ REDIS_HOST REDIS_PORT REDIS_USER REDIS_PASSWORD_FILE REDIS_KEY_PREFIX
 
 Secrets are files, never values. The per-app secrets directory is `/var/lib/platform/secrets/<app>` (files
 `db-password` and `redis-password`), mounted read-only into the app container with `group_add: ["64323"]`.
+
+**Secrets mount rule (hard isolation requirement).** Every per-app secrets directory shares group 64323, so a
+container holding that group can read every app's credentials under any directory it mounts. An app may therefore
+mount only its own `/var/lib/platform/secrets/<app>/` files, never the secrets root or any parent of it.
+Enforcement belongs in the later deploy tooling that generates the compose file; `app.yaml` has no mounts key, so the
+registry validator cannot check it.

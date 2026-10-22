@@ -64,6 +64,13 @@ Columns `APP OWNER TEMPLATE MEM ACCESS STATE`. STATE is `-` offline; with live i
 live row, and `UNREGISTERED` for a live app with no `app.yaml` (listed, exit 1). An invalid `app.yaml` or malformed
 live input prints an error, exits 1 and prints no table.
 
+## Secrets mounts
+
+`app.yaml` has no mounts key, so the validator cannot check mounts. The rule is documented in
+`platform/data/README.md` ("Secrets mount rule"): an app may mount only its own `<secrets-root>/<app>/` files, never
+the secrets root or a parent, because the shared group 64323 makes this a hard isolation requirement. Enforcement
+belongs in the deploy tooling that generates the compose file.
+
 ## Dropped on purpose
 
 Per-app `db` and `redis` booleans and a per-app connection limit are not in the schema: nothing reads them yet,
