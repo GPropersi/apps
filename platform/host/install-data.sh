@@ -50,7 +50,8 @@
 # (default platform-data-postgres / platform-data-redis), and per-path overrides, absolute and not prefixed by the root,
 # so the live test can run the server-side checks against throwaway containers: INSTALL_DATA_DIR, INSTALL_DATA_VAR_DIR,
 # INSTALL_DATA_SECRETS_ROOT, INSTALL_DATA_PG_ADMIN_FILE, INSTALL_DATA_REDIS_ADMIN_FILE, INSTALL_DATA_OVERCOMMIT_FILE, and
-# INSTALL_DATA_REDIS_CTR_ADMIN_FILE (where the Redis container sees its admin file). The docker, stat, getent, install,
+# INSTALL_DATA_REDIS_CTR_ADMIN_FILE (where the Redis container sees its admin file), and INSTALL_DATA_NETWORK (the Docker
+# network the containers must be on only; "platform" by default). The docker, stat, getent, install,
 # chown and chmod commands are the ones on PATH, so a test puts stubs there.
 set -euo pipefail
 
@@ -63,7 +64,9 @@ export PATH="$PATH:/usr/sbin:/sbin"
 readonly ADMIN_GID=64322
 readonly SECRETS_GID=64323
 readonly PROJECT="platform-data"
-readonly NETWORK="platform"
+NETWORK="${INSTALL_DATA_NETWORK:-platform}"
+[[ "$NETWORK" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*$ ]] || { printf '%s\n' "INSTALL_DATA_NETWORK must be a Docker network name (letters, digits, _ . -)" >&2; exit 2; }
+readonly NETWORK
 # Where the Postgres container sees the mounted pg_hba.conf (the bind mount and hba_file in compose.yaml).
 readonly PG_CTR_HBA="/etc/postgresql/pg_hba.conf"
 readonly APP_RE='^[a-z][a-z0-9-]{1,30}$'
@@ -140,6 +143,11 @@ payload_compose() {
 # - Postgres: log_statement=none and log_min_error_statement=panic keep a failing CREATE ROLE ... PASSWORD from
 #   writing its statement (and so the password) into the container log. pg_hba.conf has one `local` line
 #   (`local all postgres peer`, used by `docker exec` as the postgres uid) and only scram-sha-256 `host` lines.
+# - Postgres memory (measured by test_data_live.sh): a heavy sort + hash-aggregate session costs about 15MB of private
+#   memory with hash_mem_multiplier=1 (about twice that with the default 2), on top of 128MB shared_buffers and the
+#   container's page cache. 24 such sessions at once stay inside the 512m cap only with hash_mem_multiplier=1; the
+#   per-role cap of 3 connections and the 60-connection ceiling do not bound the sum, so a query-heavy app needs a bigger
+#   mem_limit, not just more connections.
 # - Redis: noeviction (queued jobs are never evicted) with AOF everysec. maxmemory is half the cgroup cap because the
 #   AOF rewrite buffer and copy-on-write pages are not counted by maxmemory. Redis memory is shared by all apps with
 #   no per-app quota: a full Redis rejects every app's writes (monitored by `install-data.sh verify`).
@@ -175,6 +183,8 @@ services:
       - wal_compression=on
       - -c
       - max_parallel_workers_per_gather=0
+      - -c
+      - hash_mem_multiplier=1
     environment:
       POSTGRES_PASSWORD_FILE: /etc/platform/postgres-admin.password
     volumes:

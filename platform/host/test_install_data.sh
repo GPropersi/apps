@@ -3,10 +3,9 @@
 # logging fakesudo, and docker/stat/getent/chown/install/ssh are stateful stubs on PATH (owners are recorded by the
 # chown and install stubs and reported by the stat stub; modes are real). No docker, firewall or network is touched.
 #
-# FIXTURES FLAGGED UNVERIFIED: the shapes of the stubbed `docker inspect` (State, Labels, Networks, Env/Cmd/Healthcheck),
-# `docker network inspect`, `docker port`, Redis `ACL LIST` / `CONFIG GET` / `INFO memory` and `psql -At` output are
-# reconstructed from the documented formats, not captured from a live host. The Step 6 live-docker run replaces them
-# with real captures; the mutation cases stay.
+# FIXTURE SHAPES CONFIRMED BY THE LIVE RUN (platform/data/test_data_live.sh, Step 6): `docker inspect` State|Health,
+# Redis `ACL LIST` (including the sanitize-payload tokens and the per-app rule order), `CONFIG GET`, `INFO memory` and
+# `psql -At` output match the real servers; verify itself runs against them there. The mutation cases stay here.
 #
 # No routable address literals and no real password: the fixture passwords below are fake strings.
 # SC2016: stub bodies and payload checks are single-quoted on purpose. SC1091: lib.sh is sourced by relative path.
@@ -220,7 +219,8 @@ RPW='fixture-redis-admin-password-0002'
 PGC=platform-data-postgres
 RDC=platform-data-redis
 ACL_BASE=$'user admin on sanitize-payload #fixturehash ~* &* +@all\nuser default off sanitize-payload resetchannels -@all\nuser health on nopass sanitize-payload resetchannels -@all +ping'
-ACL_APP='user app1 on sanitize-payload #fixturehash ~app1:* resetchannels +@all -@dangerous -scan -randomkey -dbsize'
+# ACL_BASE and ACL_APP have the shape captured from the live run (Redis 8.10.2, `ACL LIST` after new-db).
+ACL_APP='user app1 on sanitize-payload #fixturehash ~app1:* resetchannels -@all +@read +@write +@keyspace +@string +@hash +@list +@set +@sortedset +@stream +@connection -@dangerous -@scripting -@pubsub -scan -randomkey -dbsize'
 
 # fresh: a clean root and clean state for the next scenario, all inputs valid, nothing installed yet.
 fresh() {
@@ -305,6 +305,9 @@ ins --host -oProxyCommand=x
 expect_rc "option-looking --host" 2
 INSTALL_DATA_HEALTH_TIMEOUT=abc ins verify
 expect_rc "non-numeric health timeout" 2
+INSTALL_DATA_NETWORK='bad name;x' ins verify
+expect_rc "malformed INSTALL_DATA_NETWORK" 2
+expect_out_has "malformed network name is explained" "INSTALL_DATA_NETWORK must be a Docker network name"
 ins --help
 expect_rc "--help succeeds" 0
 expect_out_has "--help shows the usage line" "Usage: install-data.sh"
@@ -787,7 +790,7 @@ echo 1 > "$STATE/pg_apps"
 ins verify
 expect_rc "verify passes with a provisioned app (valid Redis user, revoked PUBLIC CONNECT)" 0
 expect_out_has "the revoked posture is a PASS" "PASS: PUBLIC has no CONNECT on postgres and template1"
-printf '%s\n%s\n%s\n' "$ACL_BASE" "$ACL_APP" 'user other-app on #fixturehash ~other-app:* resetchannels +@all -@dangerous -scan -randomkey -dbsize' > "$STATE/acl_list"
+printf '%s\n%s\n%s\n' "$ACL_BASE" "$ACL_APP" 'user other-app on #fixturehash ~other-app:* resetchannels -@all +@read +@write -@dangerous -scan -randomkey -dbsize' > "$STATE/acl_list"
 ins verify
 expect_rc "verify passes with two provisioned apps" 0
 

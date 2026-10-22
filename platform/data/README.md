@@ -41,6 +41,11 @@ container's environment until master step 11).
 | postgres | 512m | `shared_buffers` 128MB, `max_connections` 60, `shm_size` 128m |
 | redis | 192m | `maxmemory` 96mb (half the cap: the AOF rewrite buffer and copy-on-write pages are not counted by `maxmemory`) |
 
+Postgres runs with `hash_mem_multiplier=1`. A heavy sort + hash-aggregate session costs about 15MB of private memory
+with it (about twice that with the default 2), and 24 concurrent heavy sessions only fit the 512m cap with 1. The
+per-role connection cap of 3 does not bound the sum over roles. `platform/data/test_data_live.sh` measures this (the
+concurrent-session rounds and the Redis fill) against the real servers.
+
 Redis memory is shared by all apps with no per-app quota. With `maxmemory-policy noeviction` (queued jobs must never
 be evicted) a full Redis rejects every app's writes. This is not prevented, only monitored: `install-data.sh verify`
 prints a WARN at about 80% of `maxmemory`. Redis isolation is key and command scoped, not resource scoped.

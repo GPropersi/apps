@@ -14,6 +14,11 @@
 # - Postgres: log_statement=none and log_min_error_statement=panic keep a failing CREATE ROLE ... PASSWORD from
 #   writing its statement (and so the password) into the container log. pg_hba.conf has one `local` line
 #   (`local all postgres peer`, used by `docker exec` as the postgres uid) and only scram-sha-256 `host` lines.
+# - Postgres memory (measured by test_data_live.sh): a heavy sort + hash-aggregate session costs about 15MB of private
+#   memory with hash_mem_multiplier=1 (about twice that with the default 2), on top of 128MB shared_buffers and the
+#   container's page cache. 24 such sessions at once stay inside the 512m cap only with hash_mem_multiplier=1; the
+#   per-role cap of 3 connections and the 60-connection ceiling do not bound the sum, so a query-heavy app needs a bigger
+#   mem_limit, not just more connections.
 # - Redis: noeviction (queued jobs are never evicted) with AOF everysec. maxmemory is half the cgroup cap because the
 #   AOF rewrite buffer and copy-on-write pages are not counted by maxmemory. Redis memory is shared by all apps with
 #   no per-app quota: a full Redis rejects every app's writes (monitored by `install-data.sh verify`).
@@ -49,6 +54,8 @@ services:
       - wal_compression=on
       - -c
       - max_parallel_workers_per_gather=0
+      - -c
+      - hash_mem_multiplier=1
     environment:
       POSTGRES_PASSWORD_FILE: /etc/platform/postgres-admin.password
     volumes:

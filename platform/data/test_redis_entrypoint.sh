@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Offline test for redis-entrypoint.sh: runs the real script against a throwaway /data and admin file with a stub
 # redis-server on PATH that records its argv, its environment and the users.acl it was started with.
-# The stub's shape is UNVERIFIED until the live run of the data stack (plan Step 6).
+# The real entrypoint also ran in the real Redis image in test_data_live.sh (Step 6): the hash it writes is accepted by
+# Redis for both admin-file variants (with and without one trailing newline).
 # shellcheck disable=SC1091
 set -uo pipefail
 

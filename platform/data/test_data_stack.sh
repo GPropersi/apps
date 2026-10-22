@@ -40,6 +40,7 @@ declare -A pg_want=(
   [huge_pages]=off
   [wal_compression]=on
   [max_parallel_workers_per_gather]=0
+  [hash_mem_multiplier]=1
 )
 pg_ranged=" max_connections shared_buffers "
 
@@ -47,6 +48,7 @@ pg_ranged=" max_connections shared_buffers "
 host_registry="docker.io"
 host_label="platform.app"
 host_files=" README.md lib.sh yaml-subset.sh install-data.sh redis-entrypoint.sh test_data_stack.sh test_redis_entrypoint.sh "
+host_files="$host_files data-live.txt test_traefik_dynamic.sh 127.x State.OOMKilled postgres.public com.docker.compose.project platform.sh test_data_live.sh memory.current memory.stat memory.peak memory.max memory.events pg.log fill.txt up.txt up2.txt up3.txt pull-err compose.reversed postgres-admin.password redis-admin.password "
 host_files="$host_files new-db.sh test_new_db.sh reserved-names.txt logger.log stdin.log APP.lock myapp.lock other.lock docker.real c1.out c2.out State.Status State.Health.Status users.acl.tmp postgres-admin.password redis-admin.password Config.Env "
 host_exts=" yml yaml env acl conf "
 
@@ -450,6 +452,8 @@ mutate "postgres major missing from the table" "not in the major-to-path table" 
 mutate "log_statement not none" "postgres setting log_statement is 'all'" compose postgres 2 replace '^      - log_statement=none' '      - log_statement=all'
 mutate "log_min_error_statement not panic" "log_min_error_statement is 'error'" compose postgres 2 replace '^      - log_min_error_statement=panic' '      - log_min_error_statement=error'
 mutate "log_min_error_statement removed" "log_min_error_statement is missing" compose postgres 2 delete '^      - log_min_error_statement=panic'
+mutate "hash_mem_multiplier removed" "hash_mem_multiplier is missing" compose postgres 2 delete '^      - hash_mem_multiplier=1'
+mutate "hash_mem_multiplier changed to 2" "hash_mem_multiplier is '2'" compose postgres 2 replace '^      - hash_mem_multiplier=1' '      - hash_mem_multiplier=2'
 mutate "max_connections below the headroom" "max_connections 54 is below" compose postgres 2 replace '^      - max_connections=60' '      - max_connections=54'
 MUT_ABSENT=1 mutate "max_connections exactly at the headroom (3 x 15 + 10) is valid" "max_connections" compose postgres 2 replace '^      - max_connections=60' '      - max_connections=55'
 MUT_ABSENT=1 mutate "shared_buffers at the upper bound is valid" "shared_buffers" compose postgres 2 replace '^      - shared_buffers=128MB' '      - shared_buffers=192MB'
