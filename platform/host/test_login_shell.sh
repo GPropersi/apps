@@ -53,9 +53,9 @@ expect_rc "openssh shape dispatches" 0
 expect_out_has "openssh shape passes SSH_ORIGINAL_COMMAND unsplit" "GOT[rollback myapp] argc=0"
 
 # Through the real dispatcher: a valid command reaches the placeholder (exit 3), proving end-to-end dispatch.
-run_cmd env SSH_ORIGINAL_COMMAND="ls" bash "$real_wrapper" -c "$real_dispatcher"
+run_cmd env SSH_ORIGINAL_COMMAND="rollback myapp" bash "$real_wrapper" -c "$real_dispatcher"
 expect_rc "openssh shape reaches the real dispatcher" 3
-expect_out_has "real dispatcher placeholder ran" "ls is not implemented"
+expect_out_has "real dispatcher placeholder ran" "rollback is not implemented"
 
 # A non-matching command over the key returns the dispatcher usage error, never a shell.
 run_cmd env SSH_ORIGINAL_COMMAND="bash" bash "$real_wrapper" -c "$real_dispatcher"

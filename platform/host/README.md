@@ -7,7 +7,7 @@ the host; Claude never runs the live-host targets (they are denied in a worktree
 
 | File | Role |
 |---|---|
-| `platform.sh` | The `platform` dispatcher: the only command the `deploy` identity can run. Validates one unsplit string against an allowlist. `new-db <app>` hands over to `/opt/platform/data/new-db.sh` (exit 1 with "run `make host-data ... install`" when it is not installed). `deploy`, `rollback` and `ls` are placeholders that exit 3 (not implemented) until later steps. |
+| `platform.sh` | The `platform` dispatcher: the only command the `deploy` identity can run. Validates one unsplit string against an allowlist. `new-db <app>` hands over to `/opt/platform/data/new-db.sh` (exit 1 with "run `make host-data ... install`" when it is not installed). `ls` prints one TSV row per labelled app (`app`, `state`, `health`; contract in [`../registry/README.md`](../registry/README.md)) and exits 1 on a docker failure. `make host-app-ls HOST=<alias>` runs it over ssh as `sudo -n /usr/local/bin/platform ls`, so it needs the passwordless sudo the other `host-*` targets use. `deploy` and `rollback` are placeholders that exit 3 (not implemented) until later steps. |
 | `login-shell.sh` | Root-owned validating login shell of `deploy` (`platform-login`). Never starts a shell; hands one `-c` command to the dispatcher. |
 | `install-deploy-user.sh` | Creates the `deploy` user, its forced-command key and the `Match User deploy` sshd drop-in. |
 | `claude-access.sh`, `claude-helper.sh` | Validating wrapper (also the login shell) and root helper for the `claude` debugging identity: `ps`, `stats`, `status`, `logs <app> [lines]`, `restart <app>`. |

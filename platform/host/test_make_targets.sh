@@ -104,6 +104,41 @@ expect_eq "ARGS set: verify-ingress receives ARGS then --host" "$(cat "$stub_arg
 stub_run host-verify-ingress
 expect_eq "ARGS unset: verify-ingress gets only --host (no domain default)" "$(cat "$stub_argv")" "--host alias"
 
+# host-app-ls: ssh is stubbed (argv logged, output and rc from env), app-ls.sh is a stub that records that it ran
+# and the live file it was handed. The exact ssh argv is asserted.
+mkdir -p "$stub_tree/platform/registry"
+printf '#!/usr/bin/env bash\nprintf "ran %%s\\n" "$*" >> "$APP_LS_LOG"\ncat "$2" >> "$APP_LS_LOG"\nexit "${APP_LS_RC:-0}"\n' > "$stub_tree/platform/registry/app-ls.sh"
+chmod +x "$stub_tree/platform/registry/app-ls.sh"
+printf '#!/usr/bin/env bash\nprintf "ssh" >> "$CALL_LOG"\nfor a in "$@"; do printf " %%s" "$a" >> "$CALL_LOG"; done\nprintf "\\n" >> "$CALL_LOG"\nprintf "%%s" "${SSH_STUB_OUT-}"\nif [ "${SSH_STUB_RC:-0}" -ne 0 ]; then echo "remote platform ls refused ZQXD1" >&2; fi\nexit "${SSH_STUB_RC:-0}"\n' > "$STUB_BIN/ssh"
+chmod +x "$STUB_BIN/ssh"
+app_ls_log="$T_TMP/app-ls.log"
+host_app_ls() { # ssh-rc ssh-stdout [app-ls-rc]
+  : > "$app_ls_log"
+  t_reset_calls
+  run_cmd env APP_LS_LOG="$app_ls_log" SSH_STUB_RC="$1" SSH_STUB_OUT="$2" APP_LS_RC="${3:-0}" make -s -C "$stub_tree" host-app-ls HOST=alias
+}
+host_app_ls 0 $'myapp\trunning\thealthy\n'
+expect_rc "host-app-ls with a working ssh" 0
+expect_eq "host-app-ls invokes exactly ssh <alias> sudo -n /usr/local/bin/platform ls" "$(t_calls)" "ssh alias sudo -n /usr/local/bin/platform ls"
+expect_out_has_text "$(cat "$app_ls_log")" $'myapp\trunning\thealthy' "host-app-ls hands the remote output to app-ls.sh --live-from"
+expect_out_has_text "$(cat "$app_ls_log")" "--live-from" "host-app-ls calls app-ls.sh with --live-from"
+host_app_ls 0 ""
+expect_rc "host-app-ls with empty live output and rc 0 is accepted" 0
+expect_out_has_text "$(cat "$app_ls_log")" "ran --live-from" "an empty live file still reaches app-ls.sh"
+host_app_ls 255 "partial"
+if [ "$rc" -ne 0 ]; then _pass; else _fail "host-app-ls with a failing ssh exits non-zero" "rc=0"; fi
+expect_out_has "a failing ssh shows the remote error" "ZQXD1"
+expect_out_has "a failing ssh says no table was printed" "no table printed"
+expect_eq "a failing ssh never reaches app-ls.sh" "$(cat "$app_ls_log")" ""
+host_app_ls 0 "x" 1
+if [ "$rc" -ne 0 ]; then _pass; else _fail "host-app-ls propagates a non-zero app-ls.sh" "rc=0"; fi
+# app-ls ignores HOST: it never calls ssh.
+t_reset_calls
+run_cmd env HOST=alias make -s -C "$root" app-ls
+expect_rc "make app-ls offline" 0
+expect_eq "app-ls with HOST set makes no ssh call" "$(t_calls)" ""
+t_stub ssh 0
+
 # make test on scratch trees: a failing test fails the run, a passing tree passes, an empty tree is an error.
 scratch_make() {
   local dir="$1"
@@ -133,9 +168,9 @@ run_cmd make -s -C "$scratch" test
 expect_rc "make test with no tests is an error" 2
 expect_out_has "the empty tree names what is missing" "no platform/**/test_*.sh found"
 
-# No live-host target may be offered in a worktree: the allowed list in CLAUDE.md is help, lint, test, embed only.
+# No live-host target may be offered in a worktree: the allowed list in CLAUDE.md is help, lint, test, embed, app-ls only.
 allowed=$(grep -E '^- \*\*Worktree allowed targets:\*\*' "$root/CLAUDE.md" || true)
-for want in help lint test embed; do
+for want in help lint test embed app-ls; do
   case "$allowed" in
     *"$want"*) _pass ;;
     *) _fail "allowed targets line lists $want" "line missing or renamed" ;;

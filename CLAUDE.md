@@ -40,6 +40,8 @@ Design and phases live in the stronghold: `~/code/plans/stronghold/open/app-host
   | Lint (public-repo hygiene + embed drift + app.yaml registry validation + shellcheck) | `make lint` |
   | Tests (every `platform/**/test_*.sh`) | `make test` |
   | Regenerate embedded installer payloads | `make embed` |
+  | List registered apps (registry only, offline) | `make app-ls` |
+  | Live host: registered apps plus live state; needs the passwordless sudo the other `host-*` targets use (you run it; `HOST` required) | `make host-app-ls HOST=<alias>` |
   | Live host: deploy identity installer (you run it; `HOST` required) | `make host-deploy-user HOST=<alias> ARGS="install --pubkey-file PATH"` |
   | Live host: claude identity installer (you run it; `HOST` required) | `make host-claude-access HOST=<alias> ARGS="install --pubkey-file PATH"` |
   | Live host: ingress stack installer (you run it; `HOST` required) | `make host-ingress HOST=<alias> ARGS="install"` |
@@ -50,7 +52,7 @@ Design and phases live in the stronghold: `~/code/plans/stronghold/open/app-host
 - **Issue labels:** n/a
 - **PR reviewer:** `GPropersi`
 - **Worktree policy:** `build-only`
-- **Worktree allowed targets:** `help, lint, test, embed`
+- **Worktree allowed targets:** `help, lint, test, embed, app-ls`
 - **Worktree link:** `n/a`
 - **Worktree setup:** `n/a`
 - **Worktree teardown:** `n/a`

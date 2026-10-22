@@ -127,6 +127,68 @@ not_implemented() {
   exit 3
 }
 
+# list_apps: one TSV row per labelled app, `app<TAB>state<TAB>health`, sorted by app name (contract: platform/registry/README.md).
+# state is `running` only when every container of the app runs, else the most severe non-running state
+# (restarting > dead > exited > paused > created; a state outside that list ranks above all and prints verbatim).
+# health is the worst across the set (unhealthy > starting > healthy), else none. A docker failure or an unparseable
+# row exits 1 with an error line and no rows, so empty output with rc 0 only ever means "no labelled containers".
+list_apps() {
+  local raw line app state status h r
+  local tab=$'\t'
+  local -A app_rank=() app_state=() app_hrank=()
+  local ps_rc=0
+  raw="$(docker ps -a --filter label=platform.app --format "{{.Label \"platform.app\"}}${tab}{{.State}}${tab}{{.Status}}")" || ps_rc=$?
+  if [ "$ps_rc" -ne 0 ]; then
+    echo "platform: ls failed: docker ps returned an error (rc=$ps_rc)" >&2
+    exit 1
+  fi
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    # Split on the tab by hand (read would collapse an empty leading field); the column count is checked first.
+    if [ "$(awk -F '\t' '{ print NF }' <<<"$line")" -ne 3 ]; then
+      echo "platform: ls failed: unparseable docker ps row" >&2
+      exit 1
+    fi
+    app="${line%%"$tab"*}"
+    status="${line#*"$tab"}"
+    state="${status%%"$tab"*}"
+    status="${status#*"$tab"}"
+    if ! [[ "$app" =~ $APP_RE ]] || ! [[ "$state" =~ ^[a-z]+$ ]]; then
+      echo "platform: ls failed: unparseable docker ps row" >&2
+      exit 1
+    fi
+    case "$state" in
+      running) r=0 ;;
+      created) r=1 ;;
+      paused) r=2 ;;
+      exited) r=3 ;;
+      dead) r=4 ;;
+      restarting) r=5 ;;
+      *) r=9 ;;
+    esac
+    case "$status" in
+      *"(unhealthy)"*) h=3 ;;
+      *"(health: starting)"*) h=2 ;;
+      *"(healthy)"*) h=1 ;;
+      *) h=0 ;;
+    esac
+    # Unknown states tie at rank 9: the lexicographically smaller name wins, so ordering never matters.
+    if [ -z "${app_rank[$app]+set}" ] || [ "$r" -gt "${app_rank[$app]}" ] ||
+      { [ "$r" -eq 9 ] && [ "${app_rank[$app]}" -eq 9 ] && [[ "$state" < "${app_state[$app]}" ]]; }; then
+      app_rank[$app]=$r
+      app_state[$app]=$state
+    fi
+    if [ -z "${app_hrank[$app]+set}" ] || [ "$h" -gt "${app_hrank[$app]}" ]; then
+      app_hrank[$app]=$h
+    fi
+  done <<<"$raw"
+  local -a hname=(none healthy starting unhealthy)
+  while IFS= read -r app; do
+    [ -n "$app" ] || continue
+    printf '%s\t%s\t%s\n' "$app" "${app_state[$app]}" "${hname[${app_hrank[$app]}]}"
+  done < <(printf '%s\n' "${!app_rank[@]}" | LC_ALL=C sort)
+}
+
 if [ "${SSH_ORIGINAL_COMMAND+set}" = "set" ]; then
   cmd="$SSH_ORIGINAL_COMMAND"
 else
@@ -185,7 +247,7 @@ case "$sub" in
     ;;
   ls)
     need_args 0
-    not_implemented ls
+    list_apps
     ;;
   *)
     reject unknown-command "$len"

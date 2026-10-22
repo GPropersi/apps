@@ -7,6 +7,7 @@ schema does not list (a typo is an error, never ignored).
 |---|---|
 | `validate-app-yaml.sh <file>...` | Validator. Exit 0 valid, 1 invalid (one `file: reason` line per problem), 2 usage. |
 | `validate-tracked.sh` | Validates every tracked `apps/*/app.yaml` of the current repo; passes with none. Run by `make lint`. |
+| `app-ls.sh [--live-from FILE]` | App listing behind `make app-ls` (registry only, offline) and `make host-app-ls HOST=<alias>` (registry joined with `platform ls` output). |
 | `reserved-names.txt` | Refused app names. Also read on the host by `platform new-db`. |
 | `app.yaml.example` | A valid example. Copy it to `apps/<name>/app.yaml` and edit. |
 | `test_*.sh` | Offline tests (`make test`). |
@@ -41,6 +42,27 @@ Unknown top-level keys, duplicate keys and wrong types are errors.
 | `catch_up` | no | `true` or `false` (unquoted), default `false`. |
 
 Unknown keys inside a job are errors.
+
+## `platform ls` output contract
+
+`platform ls` (the dispatcher subcommand, run on the host; no registry there) prints stable TSV, **one row per
+app**, sorted by app name, three columns: `app<TAB>state<TAB>health`. Step 13 consumes it.
+
+| Column | Values |
+|---|---|
+| `app` | The `platform.app` label value, matching `^[a-z][a-z0-9-]{1,30}$`. |
+| `state` | `running` only if every container of the app (stopped ones included) is running. Otherwise the most severe non-running state: `restarting` > `dead` > `exited` > `paused` > `created`. A state outside that list (for example `removing`) ranks above all and is printed verbatim. The result never depends on `docker ps` ordering. |
+| `health` | The worst across the app's containers, read from the `Status` text: `unhealthy` > `starting` > `healthy`, else `none`. |
+
+Empty output with exit 0 means no labelled containers. A `docker ps` failure or an unparseable row exits 1 with an
+error line on stderr and no rows, so an empty rc-0 result never hides a failure.
+
+## `app-ls.sh` table
+
+Columns `APP OWNER TEMPLATE MEM ACCESS STATE`. STATE is `-` offline; with live input it is `<state>` or
+`<state> (<health>)` when health is not `none` (`running (unhealthy)`), `not deployed` for a registered app with no
+live row, and `UNREGISTERED` for a live app with no `app.yaml` (listed, exit 1). An invalid `app.yaml` or malformed
+live input prints an error, exits 1 and prints no table.
 
 ## Dropped on purpose
 
