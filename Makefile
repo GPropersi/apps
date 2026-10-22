@@ -1,5 +1,5 @@
 .DEFAULT_GOAL := help
-.PHONY: help lint test embed host-deploy-user host-claude-access host-verify-egress host-ingress host-verify-ingress
+.PHONY: help lint test embed app-ls host-app-ls host-deploy-user host-claude-access host-verify-egress host-ingress host-data host-verify-ingress
 
 # Live-host targets (host-*) stream a script to the app host over SSH. HOST (an ssh alias) is required, with no
 # default alias; ARGS is passed to the script. They are for you to run, never inside a worktree.
@@ -11,9 +11,10 @@ export ARGS
 help: ## Show this help
 	@awk 'BEGIN {FS = ":.*## "} /^[a-zA-Z_-]+:.*## / {printf "  %-18s %s\n", $$1, $$2}' $(MAKEFILE_LIST)
 
-lint: ## Public-repo hygiene, embedded-payload drift check, shellcheck (pinned version) on tracked *.sh
+lint: ## Public-repo hygiene, embedded-payload drift check, app.yaml registry validation, shellcheck (pinned version) on tracked *.sh
 	@platform/lint/check-public-hygiene.sh
 	@platform/lint/embed-payloads.sh --check
+	@platform/registry/validate-tracked.sh
 	@want=$$(cat platform/lint/SHELLCHECK_VERSION); have=$$(shellcheck --version 2>/dev/null | sed -n 's/^version: //p'); \
 	[ "$$have" = "$$want" ] || { echo "lint: shellcheck $$want required (platform/lint/SHELLCHECK_VERSION), found $${have:-none}" >&2; exit 1; }
 	@git ls-files -z -- '*.sh' | xargs -0 -r shellcheck
@@ -37,6 +38,19 @@ host-claude-access: ## LIVE: claude identity installer (HOST=<alias> ARGS="insta
 host-ingress: ## LIVE: ingress stack installer (HOST=<alias> ARGS="install | verify | verify --live [--hold]"; default status)
 	@[ -n "$$HOST" ] || { echo 'usage: make host-ingress HOST=<ssh-alias> [ARGS="install | status | verify | verify --live [--hold]"]' >&2; exit 2; }
 	@platform/host/install-ingress.sh $${ARGS:-status} --host "$$HOST"
+
+host-data: ## LIVE: shared Postgres and Redis installer (HOST=<alias> ARGS="install | verify"; default status)
+	@[ -n "$$HOST" ] || { echo 'usage: make host-data HOST=<ssh-alias> [ARGS="install | status | verify"]' >&2; exit 2; }
+	@platform/host/install-data.sh $${ARGS:-status} --host "$$HOST"
+
+app-ls: ## List the registered apps (apps/*/app.yaml), registry only and offline; ignores HOST
+	@platform/registry/app-ls.sh
+
+host-app-ls: ## LIVE: registered apps plus live container state over ssh (HOST=<alias>; needs the passwordless sudo the other host-* targets use)
+	@[ -n "$$HOST" ] || { echo 'usage: make host-app-ls HOST=<ssh-alias>' >&2; exit 2; }
+	@tmp=$$(mktemp) || exit 1; \
+	if ! ssh "$$HOST" sudo -n /usr/local/bin/platform ls > "$$tmp"; then rm -f "$$tmp"; echo "host-app-ls: platform ls over ssh failed, no table printed" >&2; exit 1; fi; \
+	platform/registry/app-ls.sh --live-from "$$tmp"; rc=$$?; rm -f "$$tmp"; exit $$rc
 
 host-verify-ingress: ## LIVE: public Access-gate check from here (HOST=<alias>; domain via PLATFORM_DOMAIN or ARGS="--domain D")
 	@[ -n "$$HOST" ] || { echo 'usage: make host-verify-ingress HOST=<ssh-alias> [ARGS="--domain D | --expect-open H | --probe-jobs H"] (or PLATFORM_DOMAIN=D in the environment)' >&2; exit 2; }

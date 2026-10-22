@@ -13,7 +13,7 @@ here is **run by you**; Claude never touches the live host or the Cloudflare acc
 | `down-page/index.html` | The static "this app is down or does not exist" page. |
 | `jobs-paths.table` | The `/_jobs` path variants the tests probe. |
 | `env.example` | Placeholder for the host-side `/etc/platform/ingress.env`. |
-| `test_*.sh`, `yaml-subset.sh` | Offline tests of the files above (`make test`). |
+| `test_*.sh` | Offline tests of the files above (`make test`); they read the YAML with `../lib/yaml-subset.sh`. |
 
 `test_traefik_dynamic.sh` runs the pinned Traefik for real and needs docker, so it skips (exit 0, loud notice) on a
 host without it, as in CI. For the pre-merge run on a docker host use `REQUIRE_DOCKER=1 platform/ingress/test_traefik_dynamic.sh`:

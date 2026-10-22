@@ -7,17 +7,19 @@ the host; Claude never runs the live-host targets (they are denied in a worktree
 
 | File | Role |
 |---|---|
-| `platform.sh` | The `platform` dispatcher: the only command the `deploy` identity can run. Validates one unsplit string against an allowlist. `deploy`, `rollback`, `new-db` and `ls` are placeholders that exit 3 (not implemented) until later steps. |
+| `platform.sh` | The `platform` dispatcher: the only command the `deploy` identity can run. Validates one unsplit string against an allowlist. `new-db <app>` hands over to `/opt/platform/data/new-db.sh` (exit 1 with "run `make host-data ... install`" when it is not installed). `ls` prints one TSV row per labelled app (`app`, `state`, `health`; contract in [`../registry/README.md`](../registry/README.md)) and exits 1 on a docker failure. `make host-app-ls HOST=<alias>` runs it over ssh as `sudo -n /usr/local/bin/platform ls`, so it needs the passwordless sudo the other `host-*` targets use. `deploy` and `rollback` are placeholders that exit 3 (not implemented) until later steps. |
 | `login-shell.sh` | Root-owned validating login shell of `deploy` (`platform-login`). Never starts a shell; hands one `-c` command to the dispatcher. |
 | `install-deploy-user.sh` | Creates the `deploy` user, its forced-command key and the `Match User deploy` sshd drop-in. |
 | `claude-access.sh`, `claude-helper.sh` | Validating wrapper (also the login shell) and root helper for the `claude` debugging identity: `ps`, `stats`, `status`, `logs <app> [lines]`, `restart <app>`. |
 | `install-claude-access.sh` | Creates the `claude` user, its key and the `Match User claude` sshd drop-in; prints one sudoers line for you to install. |
 | `install-ingress.sh` | Installs the ingress stack (Traefik, cloudflared, socket proxy, down page) under `/opt/platform/ingress` and starts it. Never creates the tunnel token or its group (`64321`); checks both fail-closed and prints how to create them. `install`, `status`, `verify`, and `verify --live [--hold]` (disposable containers prove routing and the down-page fallbacks; `--hold` also waits for one real login through the tunnel). Run it with `make host-ingress HOST=<alias> ARGS="..."`. |
+| `install-data.sh` | Installs the shared data stack (one Postgres, one Redis) under `/opt/platform/data` and starts it on the `platform` network. Never creates the two admin password files or their groups (`64322` admin secrets, `64323` app secrets); checks them, the `deploy` user and the network fail-closed and prints how to create them. Creates `/var/lib/platform` (`root:root 0755`) and the secrets root `/var/lib/platform/secrets` (`deploy:64323 2710`, setgid, so `platform new-db` as `deploy` needs no `chgrp`). `install`, `status`, `verify` (published ports, labels, networks, secrets in Env/Cmd/Healthcheck, Redis ACL users, eviction, AOF, Postgres logging and PUBLIC `CONNECT`, installed modes; a `WARN:` at about 80% of Redis `maxmemory` never fails it). Run it with `make host-data HOST=<alias> ARGS="..."`. Stack details: [`../data/README.md`](../data/README.md). |
 | `verify-ingress.sh` | Client-side, fail-closed public check: a random unused name under your domain must show the Cloudflare Access login wall (open, unreachable and unconfirmed each fail distinctly). Runs on your machine, makes no ssh call, is not embedded. Run it with `make host-verify-ingress HOST=<alias> ARGS="--domain <domain>"` (or `PLATFORM_DOMAIN` in the environment; there is no default domain). `--expect-open HOST` marks a deliberately public name; `--probe-jobs APP-HOST` only prints manual `/_jobs` commands. |
 | `verify-egress.sh` | Read-only check that the host firewall closes container-to-LAN egress. |
 
-The installers embed their payloads (dispatcher, wrapper, helper, and for the ingress installer compose.yaml,
-dynamic.yml and the down page's index page) because the host has no checkout: edit the
+The installers embed their payloads (dispatcher, wrapper, helper, for the ingress installer compose.yaml,
+dynamic.yml and the down page's index page, and for the data installer compose.yaml, pg_hba.conf,
+redis-entrypoint.sh, reserved-names.txt and new-db.sh) because the host has no checkout: edit the
 source file, run `make embed`, and `make lint` fails if an embedded copy differs from its source.
 
 ## Identities
@@ -60,12 +62,27 @@ and run it there directly.
    `ARGS="verify --live"` adds routing probes with disposable containers, and `--hold` waits for one real login.
    The ingress stack publishes no ports; container-to-host traffic stays out of scope (see Guarantee scope).
 
+7. Shared data (Postgres and Redis): needs steps 3 and 6 done first (the `deploy` user and the `platform` network).
+   Create the two groups, once, with no members: `sudo groupadd --gid 64322 platform-data-admin` and
+   `sudo groupadd --gid 64323 platform-app-secrets`. Create the two admin password files, each a single line,
+   `root:64322`, mode `0640` (`sudo install -m 0640 -o root -g 64322 /dev/null <file>`, then
+   `openssl rand -hex 24 | sudo tee <file> >/dev/null`): `/etc/platform/postgres-admin.password` and
+   `/etc/platform/redis-admin.password`. The installer never writes them. Then
+   `make host-data HOST=<alias> ARGS="install"` and `ARGS="verify"` (both exit 0). `install` lists every missing
+   input together, with these commands, and installs nothing until they are all in place. `verify` WARNs (exit
+   status unchanged) until the host sets `vm.overcommit_memory=1` (`sudo sysctl vm.overcommit_memory=1`, persisted
+   in a sysctl drop-in file): the installer never sets it, so expect that WARN on the first verify.
+8. After this merges and before you use `platform new-db` or `platform ls`, roll out the updated dispatcher:
+   `make host-deploy-user HOST=<alias> ARGS="install --pubkey-file <path-to-deploy-pub>"`, then `ARGS=verify`.
+   `platform new-db` also needs the helper from step 7: re-run `make host-data HOST=<alias> ARGS="install"` once so
+   `/opt/platform/data/new-db.sh` is installed (`verify` checks its owner, mode and bytes).
+
 `HOST` is required for every `host-*` target, with no default alias; each exits 2 with a usage message when it
-is unset. For the three installers, `status` (the default) reports every check without failing and `verify`
+is unset. For the four installers, `status` (the default) reports every check without failing and `verify`
 exits 1 on any failure; the egress check has no mode and always exits 1 on a failure. `--probe` needs the LAN
 default gateway to fall inside a deny range (otherwise it exits 2 rather than pass vacuously).
 
-`install-deploy-user.sh`, `install-claude-access.sh` and `install-ingress.sh` intentionally duplicate shared
+`install-deploy-user.sh`, `install-claude-access.sh`, `install-ingress.sh` and `install-data.sh` intentionally duplicate shared
 scaffolding, because each is streamed standalone over `ssh bash -s` and cannot source a common file. A fix to one
 must be mirrored in the others.
 

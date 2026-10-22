@@ -214,6 +214,10 @@ if [[ "$out" =~ ([0-9]+)\ payload\(s\) ]] && [ "${BASH_REMATCH[1]}" -ge 2 ]; the
   mkdir -p "$real/platform/ingress/down-page"
   cp "$repo_root/platform/ingress/compose.yaml" "$repo_root/platform/ingress/dynamic.yml" "$real/platform/ingress/"
   cp "$repo_root/platform/ingress/down-page/index.html" "$real/platform/ingress/down-page/"
+  # the data installer's payload sources (explicit list: a new payload source must be added here)
+  mkdir -p "$real/platform/data" "$real/platform/registry"
+  cp "$repo_root/platform/data/compose.yaml" "$repo_root/platform/data/pg_hba.conf" "$repo_root/platform/data/redis-entrypoint.sh" "$repo_root/platform/data/new-db.sh" "$real/platform/data/"
+  cp "$repo_root/platform/registry/reserved-names.txt" "$real/platform/registry/"
   echo '# drift' >> "$real/platform/host/platform.sh"
   run_cmd "$tool" --check --root "$real"
   expect_rc "a drifted dispatcher source fails the check" 1
@@ -257,6 +261,34 @@ if [[ "$out" =~ ([0-9]+)\ payload\(s\) ]] && [ "${BASH_REMATCH[1]}" -ge 2 ]; the
   run_cmd "$tool" --check --root "$real"
   expect_rc "an altered embedded compose copy fails the check" 1
   expect_out_has "the altered embedded compose copy is named" "DRIFT platform/host/install-ingress.sh: platform/ingress/compose.yaml"
+  run_cmd "$tool" --root "$real"
+  expect_rc "regenerating after the altered ingress copy" 0
+
+  # the data installer's five payloads are checked too (one mutation per payload)
+  for src in data/compose.yaml data/pg_hba.conf data/redis-entrypoint.sh registry/reserved-names.txt data/new-db.sh; do
+    run_cmd "$tool" --root "$real"
+    expect_rc "regenerating before the data $src drift" 0
+    echo '# drift' >> "$real/platform/$src"
+    run_cmd "$tool" --check --root "$real"
+    expect_rc "a drifted data $src source fails the check" 1
+    expect_out_has "drift names the data installer and $src" "DRIFT platform/host/install-data.sh: platform/$src"
+  done
+  run_cmd "$tool" --root "$real"
+  expect_rc "regenerating after the data drifts" 0
+
+  # an edited embedded data copy is drift too (one altered copy per payload, regenerated in between)
+  for spec in 's/^name: platform-data$/name: platform-data-x/|data/compose.yaml' \
+    's/^local all postgres peer$/local all postgres trust/|data/pg_hba.conf' \
+    's/^umask 077$/umask 022/|data/redis-entrypoint.sh' \
+    's/^cloudflared$/cloudflaredx/|registry/reserved-names.txt' \
+    's/^readonly PW_LEN=40$/readonly PW_LEN=8/|data/new-db.sh'; do
+    run_cmd "$tool" --root "$real"
+    expect_rc "regenerating before the altered embedded ${spec#*|} copy" 0
+    sed -i "${spec%|*}" "$real/platform/host/install-data.sh"
+    run_cmd "$tool" --check --root "$real"
+    expect_rc "an altered embedded ${spec#*|} copy fails the check" 1
+    expect_out_has "the altered embedded ${spec#*|} copy is named" "DRIFT platform/host/install-data.sh: platform/${spec#*|}"
+  done
 }
 
 t_finish

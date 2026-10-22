@@ -1,0 +1,27 @@
+# App names the platform refuses (one per line; blank lines and # comments are ignored).
+# Read by validate-app-yaml.sh in the repo, and on the host by `platform new-db` through the copy that
+# install-data.sh installs.
+#
+# Rule beyond this list: an app's Postgres identifier is its name with "-" replaced by "_"; that identifier
+# must not start with pg_ or equal postgres, template0, template1 or public. Both the validator and new-db
+# apply it, so the two cannot diverge.
+postgres
+redis
+valkey
+pgbouncer
+traefik
+cloudflared
+socket-proxy
+down-page
+status
+platform
+runner
+backup
+admin
+health
+default
+www
+ingress-livetest
+ingress-livetest-sibling
+ingress-livetest-curl
+ingress-livetest-hostile
