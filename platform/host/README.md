@@ -69,9 +69,10 @@ and run it there directly.
    `openssl rand -hex 24 | sudo tee <file> >/dev/null`): `/etc/platform/postgres-admin.password` and
    `/etc/platform/redis-admin.password`. The installer never writes them. Then
    `make host-data HOST=<alias> ARGS="install"` and `ARGS="verify"` (both exit 0). `install` lists every missing
-   input together, with these commands, and installs nothing until they are all in place. `verify` WARNs (exit
-   status unchanged) until the host sets `vm.overcommit_memory=1` (`sudo sysctl vm.overcommit_memory=1`, persisted
-   in a sysctl drop-in file): the installer never sets it, so expect that WARN on the first verify.
+   input together, with these commands, and installs nothing until they are all in place. `install` also writes
+   a sysctl drop-in file named `99-platform-redis` (`vm.overcommit_memory = 1`) and sets the live value, so it
+   survives a reboot. `verify` WARNs (exit status unchanged) when the live value is not 1 or the drop-in is missing or
+   different; re-run `install` to fix it.
 8. After this merges and before you use `platform new-db` or `platform ls`, roll out the updated dispatcher:
    `make host-deploy-user HOST=<alias> ARGS="install --pubkey-file <path-to-deploy-pub>"`, then `ARGS=verify`.
    `platform new-db` also needs the helper from step 7: re-run `make host-data HOST=<alias> ARGS="install"` once so

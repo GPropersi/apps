@@ -51,8 +51,8 @@ Redis memory is shared by all apps with no per-app quota. With `maxmemory-policy
 be evicted) a full Redis rejects every app's writes. This is not prevented, only monitored: `install-data.sh verify`
 prints a WARN at about 80% of `maxmemory`. Redis isolation is key and command scoped, not resource scoped.
 
-Host note: Redis wants `vm.overcommit_memory=1` for background saves under memory pressure. `verify` checks it and
-prints the instruction; this stack never sets it.
+Host note: Redis wants `vm.overcommit_memory=1` for background saves under memory pressure. `install-data.sh install`
+writes a sysctl drop-in file named `99-platform-redis` and sets the live value; `verify` WARNs when either is wrong.
 
 ## App Redis ACL
 

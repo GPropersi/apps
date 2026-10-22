@@ -253,7 +253,7 @@ fresh() {
   export INSTALL_DATA_HEALTH_TIMEOUT=2
   export INSTALL_DATA_POLL=0.1
   unset INSTALL_DATA_PG_CONTAINER INSTALL_DATA_REDIS_CONTAINER INSTALL_DATA_DIR INSTALL_DATA_VAR_DIR INSTALL_DATA_SECRETS_ROOT
-  unset INSTALL_DATA_PG_ADMIN_FILE INSTALL_DATA_REDIS_ADMIN_FILE INSTALL_DATA_OVERCOMMIT_FILE INSTALL_DATA_REDIS_CTR_ADMIN_FILE
+  unset INSTALL_DATA_PG_ADMIN_FILE INSTALL_DATA_REDIS_ADMIN_FILE INSTALL_DATA_OVERCOMMIT_FILE INSTALL_DATA_SYSCTL_FILE INSTALL_DATA_REDIS_CTR_ADMIN_FILE
 }
 
 ins() { run_cmd "$script" "$@"; }
@@ -466,6 +466,11 @@ if cmp -s "$(D)/redis-entrypoint.sh" "$here/../data/redis-entrypoint.sh" && cmp 
 else
   _fail "the installed payloads equal their tracked sources"
 fi
+SYSCTL_DROPIN="$R/etc/sysctl.d/99-platform-redis.conf"
+expect_eq "the sysctl drop-in holds exactly the overcommit setting" "$(cat "$SYSCTL_DROPIN")" "vm.overcommit_memory = 1"
+expect_eq "the sysctl drop-in is mode 644" "$(/usr/bin/stat -c '%a' "$SYSCTL_DROPIN")" "644"
+expect_out_has "the sysctl drop-in is reported" "changed: $SYSCTL_DROPIN"
+expect_out_has "a live overcommit value of 1 is left alone" "already: vm.overcommit_memory is 1"
 
 # the gid in the script equals the group_add of both services in compose.yaml
 if [ "$(grep -c '^      - "64322"$' "$here/../data/compose.yaml")" = "2" ]; then _pass; else _fail "compose.yaml group_add holds the admin gid for both services"; fi
@@ -480,6 +485,7 @@ expect_out_has "second install reports already: for the stack" "already: stack r
 expect_out_has "second install reports already: for the secrets root" "already: $(SECRETS)/"
 expect_out_has "second install reports already: for the entrypoint" "already: $(D)/redis-entrypoint.sh"
 expect_out_has "second install reports already: for new-db.sh" "already: $(D)/new-db.sh"
+expect_out_has "second install reports already: for the sysctl drop-in" "already: $SYSCTL_DROPIN"
 expect_only_plain_up "second install makes no mutating docker call besides the plain up -d"
 expect_calls_has "second install runs a plain up -d (closes the stale-container window)" "up -d --remove-orphans"
 expect_calls_lacks "second install does not recreate" "--force-recreate"
@@ -851,6 +857,23 @@ rm -f "$R/proc/sys/vm/overcommit_memory"
 ins verify
 expect_rc "an unreadable overcommit file exits 0" 0
 expect_out_has "an unreadable overcommit file prints a WARN" "WARN: vm.overcommit_memory is 'unreadable'"
+
+# install sets the live value and persists it; verify flags a live value with no drop-in (it would revert at reboot)
+fresh
+echo 0 > "$R/proc/sys/vm/overcommit_memory"
+ins install
+expect_rc "install with overcommit 0" 0
+expect_out_has "install sets the live value" "changed: vm.overcommit_memory set to 1 (was '0')"
+expect_eq "the live value is 1 after install" "$(cat "$R/proc/sys/vm/overcommit_memory")" "1"
+ins verify
+expect_out_has "verify passes a persisted overcommit" "PASS: vm.overcommit_memory is 1 and persisted"
+rm -f "$SYSCTL_DROPIN"
+ins verify
+expect_rc "a missing drop-in exits 0" 0
+expect_out_has "a missing drop-in WARNs that it reverts at boot" "WARN: vm.overcommit_memory is 1 now but"
+printf '%s\n' 'vm.overcommit_memory = 0' > "$SYSCTL_DROPIN"
+ins verify
+expect_out_has "a differing drop-in WARNs too" "WARN: vm.overcommit_memory is 1 now but"
 
 # status never fails, whatever is wrong
 snap_restore
