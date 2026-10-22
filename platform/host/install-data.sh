@@ -20,6 +20,8 @@
 #   /opt/platform/data           root:root 0755: compose.yaml, pg_hba.conf, reserved-names.txt and connection.env 0644,
 #                                redis-entrypoint.sh 0755 (a 0644 entrypoint cannot be run by the non-root container user),
 #                                new-db.sh 0755 (run by `platform new-db` as the deploy user)
+#   the sysctl drop-in 99-platform-redis (under sysctl.d) root:root 0644: vm.overcommit_memory = 1, so Redis background
+#                                saves keep working after a reboot; the live value is also set to 1 now
 #
 # The payload files (compose.yaml, pg_hba.conf, redis-entrypoint.sh, reserved-names.txt, new-db.sh) are embedded below
 # (BEGIN-PAYLOAD/END-PAYLOAD) because the host has no checkout: `platform/lint/embed-payloads.sh` regenerates them from
@@ -29,8 +31,9 @@
 # Usage: install-data.sh [install|status|verify] [--host ALIAS]
 #   install   checks every precondition first (deploy user, platform network, both admin password files, both groups,
 #             the secrets paths) and reports all problems together; nothing is installed and no mutating docker command
-#             runs until they all pass. Then it places the files, creates the two directories, starts the stack and
-#             waits (bounded) for both containers to be healthy. Idempotent: a second run with unchanged inputs reports
+#             runs until they all pass. Then it places the files, creates the two directories, writes the sysctl drop-in
+#             and sets the live vm.overcommit_memory (a failed live write only WARNs), starts the stack and waits
+#             (bounded) for both containers to be healthy. Idempotent: a second run with unchanged inputs reports
 #             "already:" for every item and makes no mutating docker call. A changed compose.yaml, pg_hba.conf or
 #             redis-entrypoint.sh recreates the containers (a bind-mounted file is not re-read otherwise).
 #   status    report every check (PASS/FAIL/WARN), exit 0
@@ -50,10 +53,10 @@
 # (default platform-data-postgres / platform-data-redis), and per-path overrides, absolute and not prefixed by the root,
 # so the live test can run the server-side checks against throwaway containers: INSTALL_DATA_DIR, INSTALL_DATA_VAR_DIR,
 # INSTALL_DATA_SECRETS_ROOT, INSTALL_DATA_PG_ADMIN_FILE, INSTALL_DATA_REDIS_ADMIN_FILE, INSTALL_DATA_OVERCOMMIT_FILE,
-# INSTALL_DATA_SYSCTL_FILE (the vm.overcommit_memory drop-in), and
-# INSTALL_DATA_REDIS_CTR_ADMIN_FILE (where the Redis container sees its admin file), and INSTALL_DATA_NETWORK (the Docker
-# network the containers must be on only; "platform" by default). The docker, stat, getent, install,
-# chown and chmod commands are the ones on PATH, so a test puts stubs there.
+# INSTALL_DATA_SYSCTL_FILE (the vm.overcommit_memory drop-in), INSTALL_DATA_REDIS_CTR_ADMIN_FILE (where the Redis
+# container sees its admin file), and INSTALL_DATA_NETWORK (the Docker network the containers must be on only;
+# "platform" by default). The docker, stat, getent, install, chown and chmod commands are the ones on PATH, so a test
+# puts stubs there.
 set -euo pipefail
 
 export LC_ALL=C
@@ -1026,7 +1029,10 @@ install_overcommit() {
     info "already: vm.overcommit_memory is 1"
     return 0
   fi
-  priv sh -c 'printf "1\n" > "$1"' sh "$OVERCOMMIT_FILE" || die "cannot set vm.overcommit_memory"
+  if ! priv sh -c 'printf "1\n" > "$1"' sh "$OVERCOMMIT_FILE"; then
+    warn "cannot set vm.overcommit_memory (is '${v:-unreadable}'): the drop-in is in place, so it applies at the next boot"
+    return 0
+  fi
   info "changed: vm.overcommit_memory set to 1 (was '${v:-unreadable}')"
   CHANGED=1
 }
@@ -1333,10 +1339,10 @@ check_overcommit() {
   local v
   if ! v="$(priv cat -- "$OVERCOMMIT_FILE" 2>/dev/null)" || [ "$v" != "1" ]; then
     warn "vm.overcommit_memory is '${v:-unreadable}', Redis wants 1 for background saves under memory pressure: run install, which writes $SYSCTL_FILE and sets it"
-  elif [ -f "$SYSCTL_FILE" ] && sysctl_payload | cmp -s - "$SYSCTL_FILE"; then
+  elif [ -f "$SYSCTL_FILE" ] && sysctl_payload | cmp -s - "$SYSCTL_FILE" && [ "$(file_meta "$SYSCTL_FILE" 2>/dev/null)" = "0:0 644" ]; then
     pass "vm.overcommit_memory is 1 and persisted in $SYSCTL_FILE"
   else
-    warn "vm.overcommit_memory is 1 now but $SYSCTL_FILE is missing or differs, so it reverts at the next boot: run install"
+    warn "vm.overcommit_memory is 1 now but $SYSCTL_FILE is missing, differs or is not root:root 0644, so it may revert at the next boot: run install"
   fi
 }
 

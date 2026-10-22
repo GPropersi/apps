@@ -873,7 +873,30 @@ expect_rc "a missing drop-in exits 0" 0
 expect_out_has "a missing drop-in WARNs that it reverts at boot" "WARN: vm.overcommit_memory is 1 now but"
 printf '%s\n' 'vm.overcommit_memory = 0' > "$SYSCTL_DROPIN"
 ins verify
+expect_rc "a differing drop-in exits 0" 0
 expect_out_has "a differing drop-in WARNs too" "WARN: vm.overcommit_memory is 1 now but"
+ins install
+expect_out_has "install rewrites a differing drop-in" "changed: $SYSCTL_DROPIN"
+expect_eq "the rewritten drop-in holds the setting" "$(cat "$SYSCTL_DROPIN")" "vm.overcommit_memory = 1"
+ins verify
+expect_out_has "verify passes after the rewrite" "PASS: vm.overcommit_memory is 1 and persisted"
+chmod 600 "$SYSCTL_DROPIN"
+ins verify
+expect_rc "a wrong drop-in mode exits 0" 0
+expect_out_has "a wrong drop-in mode WARNs" "WARN: vm.overcommit_memory is 1 now but"
+
+# an unreadable live value is still set; a live value that cannot be written only WARNs and install carries on
+fresh
+rm -f "$R/proc/sys/vm/overcommit_memory"
+ins install
+expect_rc "install with an unreadable overcommit file" 0
+expect_out_has "an unreadable live value is reported and set" "changed: vm.overcommit_memory set to 1 (was 'unreadable')"
+fresh
+rm -f "$R/proc/sys/vm/overcommit_memory"
+mkdir "$R/proc/sys/vm/overcommit_memory"
+ins install
+expect_rc "a live overcommit write failure does not fail install" 0
+expect_out_has "a live overcommit write failure WARNs" "WARN: cannot set vm.overcommit_memory"
 
 # status never fails, whatever is wrong
 snap_restore
