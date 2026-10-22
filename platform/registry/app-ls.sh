@@ -99,8 +99,7 @@ fi
 
 live_state() { # app: prints the folded STATE for a live row
   local s h
-  s="$(awk -F '\t' -v a="$1" '$1 == a { print $2; exit }' "$work/live.tsv")"
-  h="$(awk -F '\t' -v a="$1" '$1 == a { print $3; exit }' "$work/live.tsv")"
+  IFS=$'\t' read -r s h < <(awk -F '\t' -v a="$1" '$1 == a { print $2 "\t" $3; exit }' "$work/live.tsv") || true
   if [ "$h" = none ] || [ -z "$h" ]; then printf '%s' "$s"; else printf '%s (%s)' "$s" "$h"; fi
 }
 

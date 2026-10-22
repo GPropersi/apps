@@ -17,7 +17,6 @@ here="$(cd "$(dirname "$0")" && pwd)"
 . "$here/../lib/yaml-subset.sh"
 
 APP_RE='^[a-z][a-z0-9-]{1,30}$'
-HANDLE_RE='^[a-z][a-z0-9-]{1,30}$'
 JOB_RE='^[a-z][a-z0-9_-]{0,62}$'
 TEMPLATES=" go-react go-htmx fastapi-react flask node-hono "
 TOP_KEYS=" schema_version name owner purpose template memory_cap port health_path access jobs "
@@ -213,8 +212,8 @@ check_scalar_keys() {
       owner)
         if [[ "$v" == *@* ]]; then
           err "owner must be a short handle, not an email address"
-        elif ! [[ "$v" =~ $HANDLE_RE ]]; then
-          err "owner '$v' must match $HANDLE_RE"
+        elif ! [[ "$v" =~ $APP_RE ]]; then
+          err "owner '$v' must match $APP_RE"
         fi
         ;;
       purpose)

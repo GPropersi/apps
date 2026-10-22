@@ -49,7 +49,7 @@ host_registry="docker.io"
 host_label="platform.app"
 host_files=" README.md lib.sh yaml-subset.sh install-data.sh redis-entrypoint.sh test_data_stack.sh test_redis_entrypoint.sh "
 host_files="$host_files data-live.txt test_traefik_dynamic.sh 127.x State.OOMKilled postgres.public com.docker.compose.project platform.sh test_data_live.sh memory.current memory.stat memory.peak memory.max memory.events pg.log fill.txt up.txt up2.txt up3.txt pull-err compose.reversed postgres-admin.password redis-admin.password "
-host_files="$host_files new-db.sh test_new_db.sh reserved-names.txt logger.log stdin.log APP.lock myapp.lock other.lock docker.real c1.out c2.out State.Status State.Health.Status users.acl.tmp postgres-admin.password redis-admin.password Config.Env "
+host_files="$host_files new-db.sh test_new_db.sh reserved-names.txt logger.log stdin.log APP.lock myapp.lock other.lock docker.real c1.out c2.out State.Status State.Health State.Health.Status users.acl.tmp postgres-admin.password redis-admin.password Config.Env "
 host_exts=" yml yaml env acl conf "
 
 hostname_ok() {

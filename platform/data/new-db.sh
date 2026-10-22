@@ -30,11 +30,17 @@
 # that times out kills only the docker client: the psql or redis-cli process may finish inside the container later;
 # every statement is idempotent, so a re-run converges.
 #
-# Env overrides (tests only; the dispatcher runs this script with a scrubbed environment): NEW_DB_PG_CONTAINER / NEW_DB_REDIS_CONTAINER (default platform-data-postgres /
-# platform-data-redis), NEW_DB_RESERVED_NAMES (default /opt/platform/data/reserved-names.txt), NEW_DB_SECRETS_ROOT
+# Env overrides (tests only; the dispatcher runs this script with a scrubbed environment):
+# NEW_DB_PG_CONTAINER / NEW_DB_REDIS_CONTAINER (default platform-data-postgres / platform-data-redis),
+# NEW_DB_RESERVED_NAMES (default /opt/platform/data/reserved-names.txt), NEW_DB_SECRETS_ROOT
 # (default /var/lib/platform/secrets), NEW_DB_REDIS_CTR_ADMIN_FILE (the admin file as the Redis container sees it),
 # NEW_DB_LOCK_WAIT (seconds, default 30), NEW_DB_EXEC_TIMEOUT (seconds per docker call, default 30).
 set -euo pipefail
+
+if [ "${BASH_VERSINFO[0]}" -lt 5 ] || { [ "${BASH_VERSINFO[0]}" -eq 5 ] && [ "${BASH_VERSINFO[1]}" -lt 1 ]; }; then
+  echo "new-db: needs bash >= 5.1" >&2
+  exit 1
+fi
 
 export LC_ALL=C
 
@@ -147,7 +153,7 @@ redis_phase() {
 # ---- 1. name validation (before any docker call or file write) ----
 
 validate_name() {
-  local line pg reserved=""
+  local line reserved=""
   [[ "$APP" =~ $APP_RE ]] || die "invalid app name (want $APP_RE)" 1
   if [ ! -r "$RESERVED_FILE" ] || [ ! -f "$RESERVED_FILE" ]; then
     die "the reserved-names list is missing or unreadable ($RESERVED_FILE): run \`make host-data HOST=<alias> ARGS=install\`" 1
@@ -161,9 +167,8 @@ validate_name() {
   done <"$RESERVED_FILE"
   [ -n "$reserved" ] || die "the reserved-names list has no entries ($RESERVED_FILE): run \`make host-data HOST=<alias> ARGS=install\`" 1
   PGROLE="${APP//-/_}"
-  pg="$PGROLE"
-  case "$pg" in
-    pg_* | postgres | template0 | template1 | public) die "the name '$APP' maps to the refused Postgres identifier '$pg'" 1 ;;
+  case "$PGROLE" in
+    pg_* | postgres | template0 | template1 | public) die "the name '$APP' maps to the refused Postgres identifier '$PGROLE'" 1 ;;
     *) ;;
   esac
 }
@@ -194,7 +199,7 @@ take_lock() {
 check_healthy() {
   local name
   for name in "$PG" "$REDIS"; do
-    phase "health-$name" "" docker inspect --format '{{.State.Status}}|{{.State.Health.Status}}' "$name"
+    phase "health-$name" "" docker inspect --format '{{.State.Status}}|{{if .State.Health}}{{.State.Health.Status}}{{end}}' "$name"
     if [ "$PHASE_OUT" != "running|healthy" ]; then
       log "container $name is not healthy (${PHASE_OUT//[^A-Za-z0-9|_-]/?})"
       err "new-db: phase 'health' failed: container $name is not running and healthy. Nothing was written."

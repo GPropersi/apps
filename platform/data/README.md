@@ -13,6 +13,7 @@ Compose service names `postgres` and `redis`.
 | `redis-entrypoint.sh` | Mounted read-only as the Redis entrypoint. Builds `users.acl` from the admin secret file at first start (atomic write), then execs `redis-server`. |
 | `new-db.sh` | The `platform new-db <app>` helper, installed to `/opt/platform/data/new-db.sh` (`root:root 0755`) and run by the dispatcher as `deploy`. Gives one app its own Postgres role and database and its own Redis user, writing the credentials to the secret files below. See "Provisioning an app". |
 | `test_data_stack.sh`, `test_redis_entrypoint.sh`, `test_new_db.sh` | Offline tests (`make test`). |
+| `test_data_live.sh` | Live checks against real containers; skips without docker. |
 
 Data lives in the named volumes `platform-data-postgres` (mounted at `/var/lib/postgresql`, the data path of the
 pinned major 18; majors up to 17 use `/var/lib/postgresql/data`) and `platform-data-redis` (`/data`), so later backup
