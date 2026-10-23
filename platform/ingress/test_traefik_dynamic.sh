@@ -182,7 +182,11 @@ start_traefik() {
     sleep 0.5
   done
   echo "positive control did not reach the backend: Traefik not routing, check the provider network"
-  docker logs "$tname" 2>&1 | tail -n 20
+  # The 404 access-log lines would fill the tail and hide the provider error, so drop them and add the socket-proxy's log.
+  echo "-- traefik (access-log lines dropped):"
+  docker logs "$tname" 2>&1 | grep -v '"RequestAddr"' | tail -n 20
+  echo "-- socket-proxy:"
+  docker logs "$sname" 2>&1 | tail -n 10
   return 1
 }
 

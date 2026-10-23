@@ -11,6 +11,14 @@
 # Address seeds must never be literal dotted-quads in a test file (the hygiene check flags them):
 # build them with t_ip4 from pieces.
 
+# A suite launched from a background job or a detached unit (the push gate) inherits INT, HUP and QUIT as ignored, and a
+# signal ignored at shell entry can be neither trapped nor un-ignored. The signal cases would then pass in a terminal
+# and fail there. Re-exec once with the default dispositions so the result does not depend on the launcher.
+if [ -z "${PLATFORM_TEST_SIGRESET:-}" ] && [ -f "$0" ]; then
+  export PLATFORM_TEST_SIGRESET=1
+  exec env --default-signal=INT,HUP,QUIT bash "$0" "$@"
+fi
+
 passed=0
 failed=0
 rc=0
