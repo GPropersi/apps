@@ -218,6 +218,10 @@ if [[ "$out" =~ ([0-9]+)\ payload\(s\) ]] && [ "${BASH_REMATCH[1]}" -ge 2 ]; the
   mkdir -p "$real/platform/data" "$real/platform/registry"
   cp "$repo_root/platform/data/compose.yaml" "$repo_root/platform/data/pg_hba.conf" "$repo_root/platform/data/redis-entrypoint.sh" "$repo_root/platform/data/new-db.sh" "$real/platform/data/"
   cp "$repo_root/platform/registry/reserved-names.txt" "$real/platform/registry/"
+  # the backup installer's payload sources (explicit list: a new payload source must be added here)
+  mkdir -p "$real/platform/backup"
+  cp "$repo_root/platform/backup/backup.sh" "$repo_root/platform/backup/restore.sh" "$repo_root/platform/backup/window.env" "$real/platform/backup/"
+  cp "$repo_root/platform/backup/platform-backup.service" "$repo_root/platform/backup/platform-backup-timer.timer" "$real/platform/backup/"
   echo '# drift' >> "$real/platform/host/platform.sh"
   run_cmd "$tool" --check --root "$real"
   expect_rc "a drifted dispatcher source fails the check" 1

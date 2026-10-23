@@ -56,13 +56,15 @@ dry_case "ingress, ARGS unset" host-ingress install-ingress.sh
 dry_case "ingress with ARGS" host-ingress install-ingress.sh ARGS='verify --live --hold'
 dry_case "data, ARGS unset" host-data install-data.sh
 dry_case "data with ARGS" host-data install-data.sh ARGS='verify'
+dry_case "backup, ARGS unset" host-backup install-backup.sh
+dry_case "backup with ARGS" host-backup install-backup.sh ARGS='verify'
 # make -n leaves the shell expansion of ARGS unexpanded, so the real recipes run here against stub scripts in a
 # scratch tree that record their argv; nothing reaches ssh or a host.
 stub_tree="$T_TMP/stub-tree"
 rm -rf "$stub_tree"
 mkdir -p "$stub_tree/platform/host"
 cp -- "$root/Makefile" "$stub_tree/Makefile"
-for stub in install-deploy-user.sh install-claude-access.sh install-ingress.sh install-data.sh verify-egress.sh verify-ingress.sh; do
+for stub in install-deploy-user.sh install-claude-access.sh install-ingress.sh install-data.sh install-backup.sh verify-egress.sh verify-ingress.sh; do
   printf '#!/usr/bin/env bash\nprintf "%%s\\n" "$*" > "$STUB_ARGV"\n' > "$stub_tree/platform/host/$stub"
   chmod +x "$stub_tree/platform/host/$stub"
 done
@@ -95,6 +97,11 @@ expect_rc "stub run: data, ARGS unset" 0
 expect_eq "ARGS unset: data defaults to status" "$(cat "$stub_argv")" "status --host alias"
 stub_run host-data 'install'
 expect_eq "ARGS set: data receives ARGS then --host" "$(cat "$stub_argv")" "install --host alias"
+stub_run host-backup
+expect_rc "stub run: backup, ARGS unset" 0
+expect_eq "ARGS unset: backup defaults to status" "$(cat "$stub_argv")" "status --host alias"
+stub_run host-backup 'run-now'
+expect_eq "ARGS set: backup receives ARGS then --host" "$(cat "$stub_argv")" "run-now --host alias"
 stub_run host-verify-egress '--probe'
 expect_eq "ARGS reaches verify-egress" "$(cat "$stub_argv")" "--probe --host alias"
 stub_run host-verify-egress
@@ -138,6 +145,18 @@ run_cmd env HOST=alias make -s -C "$root" app-ls
 expect_rc "make app-ls offline" 0
 expect_eq "app-ls with HOST set makes no ssh call" "$(t_calls)" ""
 t_stub ssh 0
+
+# host-restore: ssh is stubbed and its exact argv asserted; ARGS words reach restore.sh as separate arguments, and
+# nothing else (no streamed script, no env file) is involved.
+t_reset_calls
+run_cmd env -u ARGS make -s -C "$stub_tree" host-restore HOST=alias
+expect_eq "host-restore with ARGS unset passes no arguments to restore.sh" "$(t_calls)" "ssh -o BatchMode=yes -- alias sudo -n /opt/platform/backup/restore.sh"
+t_reset_calls
+run_cmd env ARGS='list' make -s -C "$stub_tree" host-restore HOST=alias
+expect_eq "host-restore list argv" "$(t_calls)" "ssh -o BatchMode=yes -- alias sudo -n /opt/platform/backup/restore.sh list"
+t_reset_calls
+run_cmd env ARGS='app myapp --into myapp_restored' make -s -C "$stub_tree" host-restore HOST=alias
+expect_eq "host-restore app argv" "$(t_calls)" "ssh -o BatchMode=yes -- alias sudo -n /opt/platform/backup/restore.sh app myapp --into myapp_restored"
 
 # make test on scratch trees: a failing test fails the run, a passing tree passes, an empty tree is an error.
 scratch_make() {

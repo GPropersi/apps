@@ -1,5 +1,5 @@
 .DEFAULT_GOAL := help
-.PHONY: help lint test embed app-ls host-app-ls host-deploy-user host-claude-access host-verify-egress host-ingress host-data host-verify-ingress
+.PHONY: help lint test embed app-ls host-app-ls host-deploy-user host-claude-access host-verify-egress host-ingress host-data host-backup host-restore host-verify-ingress
 
 # Live-host targets (host-*) stream a script to the app host over SSH. HOST (an ssh alias) is required, with no
 # default alias; ARGS is passed to the script. They are for you to run, never inside a worktree.
@@ -42,6 +42,14 @@ host-ingress: ## LIVE: ingress stack installer (HOST=<alias> ARGS="install | ver
 host-data: ## LIVE: shared Postgres and Redis installer (HOST=<alias> ARGS="install | verify"; default status)
 	@[ -n "$$HOST" ] || { echo 'usage: make host-data HOST=<ssh-alias> [ARGS="install | status | verify"]' >&2; exit 2; }
 	@platform/host/install-data.sh $${ARGS:-status} --host "$$HOST"
+
+host-backup: ## LIVE: nightly backup installer (HOST=<alias> ARGS="install | restore-only | verify | run-now | init-repo"; default status)
+	@[ -n "$$HOST" ] || { echo 'usage: make host-backup HOST=<ssh-alias> [ARGS="install | restore-only | status | verify | run-now | init-repo"]' >&2; exit 2; }
+	@platform/host/install-backup.sh $${ARGS:-status} --host "$$HOST"
+
+host-restore: ## LIVE: restore.sh as root over ssh (HOST=<alias> ARGS="list | app APP --into DB | secrets APP | host-files | full --confirm-destroy")
+	@[ -n "$$HOST" ] || { echo 'usage: make host-restore HOST=<ssh-alias> ARGS="list | app APP --into DB | secrets APP | host-files | full --confirm-destroy"' >&2; exit 2; }
+	@ssh -o BatchMode=yes -- "$$HOST" sudo -n /opt/platform/backup/restore.sh $$ARGS
 
 app-ls: ## List the registered apps (apps/*/app.yaml), registry only and offline; ignores HOST
 	@platform/registry/app-ls.sh

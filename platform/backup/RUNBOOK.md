@@ -85,7 +85,8 @@ no key and no ACL user besides `default`, `admin` and `health`, and the admin pa
 snapshot. There is no override. It restores the secrets, loads the Postgres globals, restores every database, re-applies
 the `REVOKE CONNECT ... FROM PUBLIC` hardening on `postgres` and `template1`, loads Redis through a one-shot container
 (the stack runs `appendonly yes`, which would ignore a bare RDB), and runs `install-data.sh verify` when that script is
-present.
+present. No installer places `install-data.sh` on the host (it runs from the workstation), so on the Pi that step is
+skipped and logged: run `make host-data HOST=<alias> ARGS="verify"` yourself as step 7.
 
 ## 5. Wipe procedure (acceptance drill and any in-place recovery)
 

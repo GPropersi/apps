@@ -46,6 +46,8 @@ Design and phases live in the stronghold: `~/code/plans/stronghold/open/app-host
   | Live host: claude identity installer (you run it; `HOST` required) | `make host-claude-access HOST=<alias> ARGS="install --pubkey-file PATH"` |
   | Live host: ingress stack installer (you run it; `HOST` required) | `make host-ingress HOST=<alias> ARGS="install"` |
   | Live host: shared Postgres and Redis installer (you run it; `HOST` required) | `make host-data HOST=<alias> ARGS="install"` |
+  | Live host: nightly backup installer and checks, incl. `run-now` and `init-repo` (you run it; `HOST` required) | `make host-backup HOST=<alias> ARGS="install"` |
+  | Live host: restore from the backup, runs `restore.sh` as root over ssh (you run it; `HOST` required) | `make host-restore HOST=<alias> ARGS="list"` |
   | Live host: public Access-gate check, run from here (`HOST` required; domain via `PLATFORM_DOMAIN` or `--domain`) | `make host-verify-ingress HOST=<alias> ARGS="--domain D"` |
   | Live host: read-only egress check (`HOST` required) | `make host-verify-egress HOST=<alias> ARGS="--probe"` |
 - **GitHub project board:** n/a

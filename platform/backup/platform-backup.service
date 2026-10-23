@@ -1,0 +1,15 @@
+[Unit]
+Description=Platform nightly backup to R2 (restic)
+Wants=network-online.target
+After=network-online.target time-sync.target docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+User=root
+ExecStart=/opt/platform/backup/backup.sh nightly
+TimeoutStartSec=4500
+Nice=10
+IOSchedulingClass=idle
+MemoryHigh=384M
+MemoryMax=512M

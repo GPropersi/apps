@@ -2,6 +2,8 @@
 # The skip contract of test_backup_live.sh, proven without docker or restic: with restic absent from PATH the live test
 # exits 0 with a loud banner; under REQUIRE_DOCKER=1 the same skip is a failure (exit 1). A stub docker answers every call,
 # so the restic check is the one that decides. Also: BR2LIVE_SKIP=1 skips (exit 0) and fails under REQUIRE_DOCKER=1.
+# SC1091: lib.sh is sourced by relative path. SC2034: rc and out are set by run_live and read by lib.sh's expect_* helpers.
+# shellcheck disable=SC1091,SC2034
 set -uo pipefail
 
 here="$(cd "$(dirname "$0")" && pwd)"

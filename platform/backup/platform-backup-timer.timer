@@ -1,0 +1,11 @@
+[Unit]
+Description=Platform nightly backup timer (inside the 03:30-05:00 backup window)
+
+[Timer]
+OnCalendar=*-*-* 03:35:00 America/Chicago
+Persistent=true
+AccuracySec=1min
+Unit=platform-backup.service
+
+[Install]
+WantedBy=timers.target

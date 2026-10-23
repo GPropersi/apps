@@ -23,7 +23,7 @@
 #   exit 2 with an env-file refusal        -> PLATFORM_BACKUP_ENV_OWNER missing or not the test user's uid:gid
 #   restic not found                       -> the test skips (exit 1 under REQUIRE_DOCKER=1): install restic 0.18.1
 #   image pull timeout                     -> pre-pull the two images pinned in platform/data/compose.yaml
-# shellcheck disable=SC1091,SC2015
+# shellcheck disable=SC1091,SC2015,SC2016
 set -uo pipefail
 
 here="$(cd "$(dirname "$0")" && pwd)"
