@@ -161,7 +161,11 @@ case "$all" in
     ;;
   *" LASTSAVE"*) inject redis-lastsave; cat "$CASE_DIR/lastsave"; exit 0 ;;
   *" BGSAVE"*)
-    if [ -f "$CASE_DIR/bgsave_sets" ]; then cp "$CASE_DIR/bgsave_sets" "$CASE_DIR/lastsave"; fi
+    bn="$(cat "$CASE_DIR/bgsave_n" 2> /dev/null || echo 0)"
+    echo "$((bn + 1))" > "$CASE_DIR/bgsave_n"
+    if [ -f "$CASE_DIR/bgsave_sets_on_2nd" ]; then
+      if [ "$bn" -ge 1 ]; then cp "$CASE_DIR/bgsave_sets_on_2nd" "$CASE_DIR/lastsave"; fi
+    elif [ -f "$CASE_DIR/bgsave_sets" ]; then cp "$CASE_DIR/bgsave_sets" "$CASE_DIR/lastsave"; fi
     if [ -f "$CASE_DIR/bgsave_reply" ]; then cat "$CASE_DIR/bgsave_reply"; exit "$(cat "$CASE_DIR/bgsave_rc" 2> /dev/null || echo 0)"; fi
     echo "Background saving started"
     exit 0
@@ -1037,6 +1041,21 @@ expect_out_has "LASTSAVE never changes: bounded by 120s" "phase=redis start time
 expect_calls_has "LASTSAVE never changes: positive control, BGSAVE was issued" "BGSAVE"
 expect_calls_lacks "LASTSAVE never changes: no docker cp" "docker cp"
 expect_calls_lacks "LASTSAVE never changes: no restic backup" "restic backup"
+expect_out_has "LASTSAVE never changes: BGSAVE is retried once, logged" "issuing BGSAVE once more"
+expect_eq "LASTSAVE never changes: exactly two BGSAVE calls (one retry)" "$(grep -c ' BGSAVE' "$CALL_LOG")" "2"
+
+# LASTSAVE does not advance on the first BGSAVE (same-second edge) but does on the retry
+new_case
+rm -f "$C/bgsave_sets"
+printf '200' > "$C/bgsave_sets_on_2nd"
+run_real 'main nightly'
+expect_rc "same-second LASTSAVE: the retried BGSAVE lets the run succeed" 0
+expect_out_has "same-second LASTSAVE: the retry is logged" "redis LASTSAVE still 100 after 60s with no save running; issuing BGSAVE once more"
+expect_eq "same-second LASTSAVE: exactly two BGSAVE calls" "$(grep -c ' BGSAVE' "$CALL_LOG")" "2"
+expect_calls_has "same-second LASTSAVE: the RDB is copied after the retry" "docker cp"
+new_case
+run_real 'main nightly'
+expect_eq "normal LASTSAVE change: a single BGSAVE (no retry)" "$(grep -c ' BGSAVE' "$CALL_LOG")" "1"
 
 new_case
 printf '1 ok\n' > "$C/info_seq"

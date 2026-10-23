@@ -56,6 +56,8 @@ NOTIFY_PHASE_SECS=30
 UNLOCK_SECS=120
 REDIS_PHASE_SECS=120
 REDIS_CALL_SECS=30
+# Poll time after the first BGSAVE before it is issued once more (see _redis_run); the phase bound is REDIS_PHASE_SECS.
+REDIS_POLL_SECS=60
 # In-container path of the Redis admin password file (the data stack mounts it there; same constant as new-db.sh).
 REDIS_CTR_ADMIN_FILE=/etc/platform/redis-admin.password
 # Docker volumes that are backed up logically (dumps), so the volume inventory does not warn about them.
@@ -654,24 +656,32 @@ redis_cli() {
   timed_io "redis:$label" "$secs" - "$out" docker exec -i "$REDIS_CONTAINER" sh -c "$REDIS_ADMIN_SNIPPET" sh "$REDIS_CTR_ADMIN_FILE" "$@"
 }
 
-# _redis_run: BGSAVE and wait for a finished save, then copy dump.rdb and users.acl. Returns 124 at the bound.
+# _redis_bgsave <outfile>: one BGSAVE. A save already running (redis-cli may exit non-zero on that error reply) or scheduled
+# behind an AOF rewrite is waited for like our own: the poll needs LASTSAVE to change and a finished, ok save.
+_redis_bgsave() {
+  local f="$1" rc=0
+  redis_cli bgsave "$f" BGSAVE || rc=$?
+  if grep -qE 'Background saving started|Background saving scheduled|already in progress' "$f"; then
+    return 0
+  elif [ "$rc" -ne 0 ]; then
+    return "$rc"
+  fi
+  PHASE_MSG="BGSAVE refused"
+  return 1
+}
+
+# _redis_run: BGSAVE and wait for a finished save, then copy dump.rdb and users.acl. Returns 124 at the bound. LASTSAVE has
+# one-second resolution: a periodic save finishing in the same second as the previous one leaves it unchanged although the
+# RDB is fresh. So when LASTSAVE is still unchanged after REDIS_POLL_SECS with no save running, BGSAVE is issued ONCE more
+# (logged) and polled again until the phase bound.
 _redis_run() {
-  local f="$WORK/redis-out" l0 l line inprog status rc=0 stage="$STAGING/redis"
+  local f="$WORK/redis-out" l0 l line inprog status rc=0 stage="$STAGING/redis" retried=0 attempt_end
   redis_cli lastsave "$f" LASTSAVE || rc=$?
   if [ "$rc" -ne 0 ]; then return "$rc"; fi
   l0="$(tr -d '\r\n' < "$f")"
   if [[ ! "$l0" =~ ^[0-9]+$ ]]; then PHASE_MSG="unexpected LASTSAVE reply"; return 1; fi
-  redis_cli bgsave "$f" BGSAVE || rc=$?
-  # A save already running (redis-cli may exit non-zero on that error reply) or scheduled behind an AOF rewrite is
-  # waited for like our own: the poll below needs LASTSAVE to change and a finished, ok save.
-  if grep -qE 'Background saving started|Background saving scheduled|already in progress' "$f"; then
-    rc=0
-  elif [ "$rc" -ne 0 ]; then
-    return "$rc"
-  else
-    PHASE_MSG="BGSAVE refused"
-    return 1
-  fi
+  _redis_bgsave "$f" || return $?
+  attempt_end=$(($(now_epoch) + REDIS_POLL_SECS))
   while :; do
     rc=0
     redis_cli lastsave "$f" LASTSAVE || rc=$?
@@ -692,6 +702,11 @@ _redis_run() {
       # The status reports the PREVIOUS save until the new one finishes, so it counts only when nothing is running.
       if [ "$status" = "err" ]; then PHASE_MSG="redis BGSAVE failed (rdb_last_bgsave_status:err)"; return 1; fi
       if [ "$status" = "ok" ] && [[ "$l" =~ ^[0-9]+$ ]] && [ "$l" != "$l0" ]; then break; fi
+      if [ "$retried" -eq 0 ] && [ "$(now_epoch)" -ge "$attempt_end" ]; then
+        retried=1
+        log "WARN: redis LASTSAVE still $l0 after ${REDIS_POLL_SECS}s with no save running; issuing BGSAVE once more"
+        _redis_bgsave "$f" || return $?
+      fi
     fi
     poll_sleep
   done
