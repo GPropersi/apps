@@ -209,6 +209,10 @@ a="$(grep -F 'readonly REDIS_ADMIN_SNIPPET=' "$script")"
 # install-data.sh holds two identical lines: its own and the embedded copy of new-db.sh (make embed keeps that in sync)
 b="$(grep -F 'readonly REDIS_ADMIN_SNIPPET=' "$here/../host/install-data.sh" | sort -u)"
 if [ -n "$a" ] && [ "$a" = "$b" ]; then _pass; else _fail "new-db.sh and install-data.sh carry the same REDIS_ADMIN_SNIPPET"; fi
+# the backup runner carries the third copy
+bk_runner="$here/../backup/backup$(printf '.%s' sh)"
+c="$(grep -F 'readonly REDIS_ADMIN_SNIPPET=' "$bk_runner")"
+if [ -n "$a" ] && [ "$a" = "$c" ]; then _pass; else _fail "the backup runner and this script carry the same REDIS_ADMIN_SNIPPET"; fi
 
 # ---- 1. usage, names, the reserved list: no docker call and no file written ----
 

@@ -1,10 +1,12 @@
 #!/usr/bin/env bash
-# Offline tests for backup.sh (Step 1 framework: env, lock, logging, notify, state file, window, deadline).
+# Offline tests for backup.sh (framework: env, lock, logging, notify, state file, window, deadline; data phases:
+# preflight, Postgres, Redis, restic, volume inventory).
 # Every case runs backup.sh SOURCED in a fresh real bash (so set -e and the traps behave as in production) with the
-# shared PLATFORM_BACKUP_* overrides pointing into a per-case temp dir, stubs for restic, docker and curl on PATH,
-# and a stubbed clock (now_epoch, now_hhmm, window_file) injected through the BASH_SOURCE source guard. The deadline,
-# clamp and TERM/INT cases drive the real timed/phase runner with test-only dummy phases (PHASES is replaced in the
-# case body; no dummy phase ships in backup.sh). The lock is the real flock.
+# shared PLATFORM_BACKUP_* overrides pointing into a per-case temp dir, stateful stubs for restic, docker and curl on
+# PATH (failure injection through $CASE_DIR/fail_<key> files holding the exit code), and a stubbed clock (now_epoch,
+# now_hhmm, window_file, poll_sleep) injected through the BASH_SOURCE source guard. The framework cases (sections 0-12)
+# use run_case, which replaces PHASES with a dummy phase (the deadline, clamp and TERM/INT cases use test-only dummy
+# phases; none ships in backup.sh). Section 13 uses run_real, which keeps the real phase list. The lock is the real flock.
 #
 # No real credentials: every secret below is a fake marker string.
 # SC2016: stub and case bodies are single-quoted on purpose. SC1091: lib.sh is sourced by relative path.
@@ -51,18 +53,119 @@ exit 0
 EOF
 chmod +x "$STUB_BIN/curl"
 
-# restic: logs argv, records the password it saw, prints an error containing secrets and exits 1.
+# restic: logs argv, records the password and the scrubbed variables it saw, and works as a stateful stub. A file
+# $CASE_DIR/fail_<key> (key: preflight, restic-backup, restic-forget, restic-check, restic-unlock) holds the exit code to
+# fail with, after printing an error that contains secrets. `backup` records the staging file list and mode, prints a
+# restic --json summary (unless $CASE_DIR/no_summary) and can advance the stubbed clock (adv_after_backup).
 cat > "$STUB_BIN/restic" <<'EOF'
 #!/usr/bin/env bash
 printf 'restic' >> "$CALL_LOG"
 for a in "$@"; do printf ' %s' "$a" >> "$CALL_LOG"; done
 printf '\n' >> "$CALL_LOG"
 printf '%s' "$RESTIC_PASSWORD" > "$CASE_DIR/restic-saw"
-echo "Fatal: wrong password $RESTIC_PASSWORD for repo $RESTIC_REPOSITORY using key $AWS_SECRET_ACCESS_KEY id $AWS_ACCESS_KEY_ID" >&2
-exit 1
+printf 'RESTIC_PASSWORD_FILE=[%s] AWS_SESSION_TOKEN=[%s] AWS_PROFILE=[%s] RESTIC_CACERT=[%s]\n' "${RESTIC_PASSWORD_FILE-}" "${AWS_SESSION_TOKEN-}" "${AWS_PROFILE-}" "${RESTIC_CACERT-}" > "$CASE_DIR/restic-env"
+case "$1" in
+  cat) key=preflight ;;
+  backup) key=restic-backup ;;
+  forget) key=restic-forget ;;
+  check) key=restic-check ;;
+  unlock) key=restic-unlock ;;
+  *) key=other ;;
+esac
+if [ -f "$CASE_DIR/fail_$key" ]; then
+  echo "Fatal: wrong password $RESTIC_PASSWORD for repo $RESTIC_REPOSITORY using key $AWS_SECRET_ACCESS_KEY id $AWS_ACCESS_KEY_ID" >&2
+  if [ -f "$CASE_DIR/long_err" ]; then printf 'E%.0s' $(seq 1 700) >&2; echo >&2; fi
+  exit "$(cat "$CASE_DIR/fail_$key")"
+fi
+case "$1" in
+  backup)
+    find "$PLATFORM_BACKUP_ROOT/staging" -type f 2> /dev/null | sed "s#^$PLATFORM_BACKUP_ROOT/staging/##" | sort > "$CASE_DIR/staging-at-backup"
+    stat -c %a "$PLATFORM_BACKUP_ROOT" "$PLATFORM_BACKUP_ROOT/staging" > "$CASE_DIR/staging-mode" 2> /dev/null
+    if [ -f "$CASE_DIR/adv_after_backup" ]; then cp "$CASE_DIR/adv_after_backup" "$CLK"; fi
+    if [ ! -f "$CASE_DIR/no_summary" ]; then
+      echo '{"message_type":"status","percent_done":0.5}'
+      echo '{"message_type":"summary","files_new":3,"snapshot_id":"abcdef0123456789"}'
+      echo '{"message_type":"status","percent_done":1}'
+    fi
+    if [ -f "$CASE_DIR/backup_rc3" ]; then exit 3; fi
+    ;;
+  forget)
+    if [ -f "$CASE_DIR/forget_slow" ]; then sleep 5; fi
+    if [ -f "$CASE_DIR/forget_jump" ]; then printf '1200' > "$CLK"; exit 124; fi
+    ;;
+esac
+exit 0
 EOF
 chmod +x "$STUB_BIN/restic"
-t_stub docker 0
+
+# docker: logs argv, stateful. exec psql prints $CASE_DIR/dblist; pg_dumpall, pg_dump (DUMP-<db>), pg_restore --list
+# (reads the dump from stdin), the Redis admin snippet (LASTSAVE reads lastsave, BGSAVE copies bgsave_sets over it when
+# present, INFO reads the info_seq line per call, the last one repeating), cp and volume ls (volumes). Failure keys:
+# pg-list, pg-globals, pg-db_<db>, pg-verify_<db>, redis-lastsave, redis-cp, volumes.
+cat > "$STUB_BIN/docker" <<'EOF'
+#!/usr/bin/env bash
+printf 'docker' >> "$CALL_LOG"
+for a in "$@"; do printf ' %s' "$a" >> "$CALL_LOG"; done
+printf '\n' >> "$CALL_LOG"
+inject() {
+  if [ -f "$CASE_DIR/fail_$1" ]; then
+    echo "docker: injected failure $1" >&2
+    exit "$(cat "$CASE_DIR/fail_$1")"
+  fi
+}
+all=" $* "
+case "$1" in
+  cp)
+    inject redis-cp
+    dest="${*: -1}"
+    printf 'COPY' > "$dest"
+    if [ -f "$CASE_DIR/adv_after_cp" ] && [ "${dest##*/}" = users.acl ]; then cp "$CASE_DIR/adv_after_cp" "$CLK"; fi
+    exit 0
+    ;;
+  volume)
+    inject volumes
+    cat "$CASE_DIR/volumes"
+    exit 0
+    ;;
+  exec) ;;
+  *) exit 0 ;;
+esac
+case "$all" in
+  *" psql "*) inject pg-list; cat "$CASE_DIR/dblist"; exit 0 ;;
+  *" pg_dumpall "*) inject pg-globals; echo '-- globals'; exit 0 ;;
+  *" pg_dump "*)
+    db=""
+    prev=""
+    for a in "$@"; do if [ "$prev" = -d ]; then db="$a"; fi; prev="$a"; done
+    inject "pg-db_$db"
+    echo "DUMP-$db"
+    exit 0
+    ;;
+  *" pg_restore "*)
+    body="$(cat)"
+    inject "pg-verify_${body#DUMP-}"
+    exit 0
+    ;;
+  *" LASTSAVE"*) inject redis-lastsave; cat "$CASE_DIR/lastsave"; exit 0 ;;
+  *" BGSAVE"*)
+    if [ -f "$CASE_DIR/bgsave_sets" ]; then cp "$CASE_DIR/bgsave_sets" "$CASE_DIR/lastsave"; fi
+    if [ -f "$CASE_DIR/bgsave_reply" ]; then cat "$CASE_DIR/bgsave_reply"; exit "$(cat "$CASE_DIR/bgsave_rc" 2> /dev/null || echo 0)"; fi
+    echo "Background saving started"
+    exit 0
+    ;;
+  *" INFO "*)
+    n="$(cat "$CASE_DIR/info_n" 2> /dev/null || echo 0)"
+    n=$((n + 1))
+    echo "$n" > "$CASE_DIR/info_n"
+    line="$(sed -n "${n}p" "$CASE_DIR/info_seq")"
+    if [ -z "$line" ]; then line="$(tail -n 1 "$CASE_DIR/info_seq")"; fi
+    printf '# Persistence\r\nrdb_bgsave_in_progress:%s\r\nrdb_last_bgsave_status:%s\r\n' "${line%% *}" "${line##* }"
+    exit 0
+    ;;
+esac
+exit 0
+EOF
+chmod +x "$STUB_BIN/docker"
 
 # ---- per-case fixtures ----
 
@@ -106,6 +209,16 @@ new_case() {
   printf '04:00' > "$HHMM"
   printf 'BACKUP_WINDOW_START=03:30\nBACKUP_WINDOW_END=05:00\nBACKUP_WINDOW_TZ=America/Chicago\n' > "$WINF"
   mkenv
+  # Fixtures for the real data phases (section 13): two databases, the two data volumes, a Redis that saves at once.
+  printf 'app_one\napp_two\n' > "$C/dblist"
+  printf 'platform-data-postgres\nplatform-data-redis\n' > "$C/volumes"
+  printf '100' > "$C/lastsave"
+  printf '200' > "$C/bgsave_sets"
+  printf '0 ok\n' > "$C/info_seq"
+  mkdir -p "$C/secrets/app_one"
+  printf 'x' > "$C/secrets/app_one/db-password"
+  printf 'x' > "$C/pg.pw"
+  printf 'x' > "$C/redis.pw"
 }
 
 PRELUDE="$(
@@ -124,14 +237,22 @@ ph_noclamp() { timed ph_noclamp 60 true; }
 ph_fastclamp() { timed ph_fastclamp 600 true; }
 ph_hhmm() { printf '%s' "$HHMM_TO" > "$HHMM"; }
 ph_dump() { printf '%s' "$RESTIC_PASSWORD" > "$C/pw"; }
+poll_sleep() { printf '%s' "$(($(cat "$CLK") + 10))" > "$CLK"; echo x >> "$C/polls"; }
 EOF
 )"
 export PRELUDE
 
-# run_case <body>: backup.sh sourced into a fresh bash, then the body (usually "PHASES=(...); main nightly").
+# run_case <body>: backup.sh sourced into a fresh bash with the dummy default PHASES=(ph_ok), then the body (usually
+# "PHASES=(...); main nightly").
 run_case() {
   rc=0
-  out="$(env CASE_BODY="$1" bash -c '. "$SCRIPT"; eval "$PRELUDE"; eval "$CASE_BODY"' 2>&1)" || rc=$?
+  out="$(env CASE_BODY="$1" bash -c '. "$SCRIPT"; eval "$PRELUDE"; PHASES=(ph_ok); eval "$CASE_BODY"' 2>&1)" || rc=$?
+}
+
+# run_real <body>: the same with the real phase list.
+run_real() {
+  rc=0
+  out="$(env CASE_BODY="$1" bash -c '. "$SCRIPT"; eval "$PRELUDE"; eval "$CASE_BODY"' 2>&1 < /dev/null)" || rc=$?
 }
 
 # run_bg <body>: the same in the background (job control on, so INT is not ignored); sets BGPID, output in $C/bg.out.
@@ -321,6 +442,7 @@ expect_rc "positive control: blank and # lines skipped, same keys accepted" 0
 # ---------------------------------------------------------------------------------------------------------------
 # 4. Masking
 new_case
+printf '1' > "$C/fail_restic-backup"
 run_case 'PHASES=(ph_restic); main nightly'
 expect_rc "failing restic phase exits 1" 1
 expect_eq "positive control: the stub saw the real password" "$(cat "$C/restic-saw")" "$PW_SECRET"
@@ -387,6 +509,7 @@ expect_text_has "curl error text logged, masked" "$(logtext)" "curl: (22) HTTP 4
 expect_text_lacks "webhook URL not logged in plain" "$(logtext)" "$HOOK_SECRET"
 new_case
 printf 'curl: (22) HTTP 404\n' > "$C/curl.fail"
+printf '1' > "$C/fail_restic-backup"
 run_case 'PHASES=(ph_restic); main nightly'
 expect_rc "a failed run with a failed webhook still exits 1" 1
 
@@ -617,5 +740,324 @@ for i in $(seq 1 40); do
 done
 run_case 'PHASES=(ph_ok); main nightly'
 expect_eq "recent logs beyond 30 are kept (age rule)" "$(find "$C/logs" -name '*.log' | wc -l | tr -d ' ')" "41"
+
+# ---------------------------------------------------------------------------------------------------------------
+# 13. Data phases (real PHASES list, stateful docker and restic stubs)
+lineno() { grep -nF -m1 -- "$1" "$CALL_LOG" | cut -d: -f1; }
+expect_lt() { if [ -n "$2" ] && [ -n "$3" ] && [ "$2" -lt "$3" ]; then _pass; else _fail "$1" "want line '$2' < '$3'"; fi; }
+staged() { cat "$C/staging-at-backup" 2> /dev/null || true; }
+
+# 13a. Happy path
+new_case
+run_real 'main nightly'
+expect_rc "real run: all phases ok" 0
+expect_eq "real run: state ok" "$(state 3)" "ok"
+expect_eq "real run: snapshot id from the --json summary" "$(state 4)" "abcdef0123456789"
+expect_eq "real run: one success notify" "$(ncurl)" "1"
+expect_text_has "success notify has the snapshot id" "$(payload)" "snapshot abcdef0123456789"
+expect_text_has "success notify has the database count" "$(payload)" "databases 2"
+expect_text_has "success notify has the duration" "$(payload)" "run ok in "
+expect_text_lacks "known volumes only: no not-backed-up warning" "$(payload)" "not backed up"
+expect_out_has "state databases logged" "state databases=2"
+l_psql="$(lineno 'psql')"
+l_all="$(lineno 'pg_dumpall')"
+l_d1="$(lineno 'pg_dump -U postgres -Fc -d app_one')"
+l_d2="$(lineno 'pg_dump -U postgres -Fc -d app_two')"
+l_rb="$(lineno 'restic backup')"
+expect_lt "order: database list before pg_dumpall" "$l_psql" "$l_all"
+expect_lt "order: pg_dumpall before the first pg_dump" "$l_all" "$l_d1"
+expect_lt "order: every pg_dump before restic backup" "$l_d2" "$l_rb"
+expect_lt "order: pg_dumpall before restic backup" "$l_all" "$l_rb"
+rl="$(grep -F 'restic backup' "$CALL_LOG")"
+for want in "$C/secrets" "$C/pg.pw" "$C/redis.pw" "$C/root/staging" "--exclude .*.lock" "--exclude .tmp.*" "--host platform" "--tag platform --tag nightly" "--json"; do
+  expect_text_has "restic backup argv has: $want" "$rl" "$want"
+done
+expect_calls_has "positive control: manual tag path not used on nightly" "--tag nightly"
+expect_calls_has "forget runs with the retention flags" "restic forget --prune --host platform --tag platform --group-by host --keep-daily 7 --keep-weekly 4 --keep-monthly 6"
+expect_calls_has "check runs" "restic check"
+expect_calls_has "preflight is restic cat config" "restic cat config"
+expect_calls_lacks "no restic init in a good run" "restic init"
+expect_calls_has "redis rdb copied" "docker cp platform-data-redis:/data/dump.rdb $C/root/staging/redis/dump.rdb"
+expect_calls_has "redis acl copied" "docker cp platform-data-redis:/data/users.acl $C/root/staging/redis/users.acl"
+for f in postgres/globals.sql postgres/app_one.dump postgres/app_two.dump redis/dump.rdb redis/users.acl; do
+  expect_text_has "staging held $f when restic backup ran" "$(staged)" "$f"
+done
+expect_eq "staging root 0700 and staging 0700 at backup time" "$(tr '\n' ' ' < "$C/staging-mode")" "700 700 "
+expect_absent "staging wiped after a fully successful run" "$C/root/staging"
+expect_calls_lacks "no password in any argv" "$PW_SECRET"
+expect_calls_lacks "no AWS secret in any argv" "$AWS_SECRET"
+expect_calls_lacks "no webhook in any argv" "tokenmarker"
+expect_eq "positive control: restic saw the password through its environment" "$(cat "$C/restic-saw")" "$PW_SECRET"
+
+new_case
+run_real 'main manual'
+expect_rc "manual run ok" 0
+expect_calls_has "manual tag" "--tag platform --tag manual"
+expect_calls_lacks "manual run has no nightly tag" "--tag nightly"
+
+# 13b. Caller environment is scrubbed (a hand run without sudo)
+new_case
+rc=0
+out="$(RESTIC_PASSWORD_FILE=/caller/pw AWS_SESSION_TOKEN=calltoken AWS_PROFILE=callprof RESTIC_CACERT=/caller/ca env CASE_BODY='main nightly' bash -c '. "$SCRIPT"; eval "$PRELUDE"; eval "$CASE_BODY"' 2>&1 < /dev/null)" || rc=$?
+expect_rc "run with hostile caller environment ok" 0
+expect_eq "caller RESTIC_PASSWORD_FILE, AWS_SESSION_TOKEN and AWS_PROFILE never reach restic" "$(cat "$C/restic-env")" "RESTIC_PASSWORD_FILE=[] AWS_SESSION_TOKEN=[] AWS_PROFILE=[] RESTIC_CACERT=[]"
+expect_eq "positive control: restic ran with the file's password" "$(cat "$C/restic-saw")" "$PW_SECRET"
+
+# 13c. pg-list: validation, zero databases, failures
+for bad in 'Bad-Name' '../etc' 'a' '1abc' 'has space' 'UPPER'; do
+  new_case
+  printf 'app_one\n%s\n' "$bad" > "$C/dblist"
+  run_real 'main nightly'
+  expect_rc "database name '$bad' fails the run" 1
+  expect_eq "name '$bad': failed_phase=pg-list" "$(state 5)" "pg-list"
+  expect_calls_has "name '$bad': positive control, the list was queried" "psql"
+  expect_calls_lacks "name '$bad': no pg_dumpall" "pg_dumpall"
+  expect_calls_lacks "name '$bad': no pg_dump at all" "pg_dump -U"
+  expect_calls_lacks "name '$bad': no restic backup" "restic backup"
+  expect_eq "name '$bad': no file written anywhere under staging" "$(find "$C/root" -type f | wc -l | tr -d ' ')" "0"
+  expect_absent "name '$bad': no file named after it in staging" "$C/root/staging/etc.dump"
+done
+new_case
+: > "$C/dblist"
+run_real 'main nightly'
+expect_rc "zero databases is valid" 0
+expect_out_has "zero databases logged" "state databases=0"
+expect_calls_has "zero databases: pg_dumpall still ran" "pg_dumpall"
+expect_calls_lacks "zero databases: no pg_dump" "pg_dump -U"
+expect_text_has "zero databases: count in the notify" "$(payload)" "databases 0"
+
+# 13d. Each phase failure: rc 1 and rc 124, exit 1, failed_phase, one failure notify, no later destructive phase
+# row: <fail key> <failed_phase> <a call that must NOT appear>
+while read -r key phase never; do
+  for code in 1 124; do
+    new_case
+    printf '%s' "$code" > "$C/fail_$key"
+    run_real 'main nightly'
+    expect_rc "$key rc=$code: exit 1" 1
+    expect_eq "$key rc=$code: state failed" "$(state 3)" "failed"
+    expect_eq "$key rc=$code: failed_phase=$phase" "$(state 5)" "$phase"
+    expect_eq "$key rc=$code: exactly one failure notify" "$(ncurl)" "1"
+    expect_text_has "$key rc=$code: notify names the phase" "$(payload)" "FAILED at phase $phase"
+    expect_calls_lacks "$key rc=$code: no later destructive phase ($never)" "$never"
+    if [ "$code" -eq 124 ]; then expect_out_has "$key rc=124: TIMED OUT logged" "TIMED OUT"; fi
+  done
+done <<'EOF'
+preflight preflight pg_dumpall
+pg-list pg-list pg_dumpall
+pg-globals pg-globals restic backup
+pg-db_app_two pg-db:app_two restic backup
+pg-verify_app_one pg-db:app_one restic backup
+redis-lastsave redis restic backup
+redis-cp redis restic backup
+restic-backup restic-backup restic forget
+restic-forget restic-forget restic check
+EOF
+new_case
+printf '1' > "$C/fail_restic-check"
+run_real 'main nightly'
+expect_rc "restic-check rc=1: exit 1" 1
+expect_eq "restic-check rc=1: failed_phase" "$(state 5)" "restic-check"
+expect_eq "restic-check rc=1: snapshot id kept" "$(state 4)" "abcdef0123456789"
+new_case
+printf '124' > "$C/fail_restic-check"
+run_real 'main nightly'
+expect_eq "restic-check rc=124: failed_phase" "$(state 5)" "restic-check"
+expect_eq "restic-check rc=124: snapshot id kept" "$(state 4)" "abcdef0123456789"
+expect_calls_has "restic-check rc=124: restic unlock ran" "restic unlock"
+
+# preflight: unreachable repo
+new_case
+printf '1' > "$C/fail_preflight"
+run_real 'main nightly'
+expect_calls_has "preflight: positive control, restic cat config ran" "restic cat config"
+expect_calls_lacks "preflight failure: restic init never runs" "restic init"
+expect_calls_lacks "preflight failure: no dump started" "pg_dump"
+expect_text_has "preflight failure text" "$(payload)" "repository unreachable or not initialised"
+expect_text_lacks "preflight failure: masked" "$(payload)" "$PW_SECRET"
+
+# pg_restore --list reads the dump from stdin
+new_case
+run_real 'main nightly'
+expect_calls_has "positive control: pg_restore --list ran for each dump" "docker exec -i platform-data-postgres pg_restore --list"
+
+# unlock only after a timeout, not after a plain failure; positive control above (rc 124 cases)
+new_case
+printf '1' > "$C/fail_restic-backup"
+run_real 'main nightly'
+expect_calls_has "restic backup rc=1: positive control, backup ran" "restic backup"
+expect_calls_lacks "restic backup rc=1: no unlock (not a timeout)" "restic unlock"
+new_case
+printf '124' > "$C/fail_restic-backup"
+run_real 'main nightly'
+expect_calls_has "restic backup timeout triggers restic unlock" "restic unlock"
+expect_out_has "unlock is timed with its own 120s bound" "phase=restic-unlock start timeout=120s"
+
+# restic backup without a summary snapshot id fails the phase
+new_case
+: > "$C/no_summary"
+run_real 'main nightly'
+expect_rc "no summary snapshot id fails" 1
+expect_eq "no summary: failed_phase=restic-backup" "$(state 5)" "restic-backup"
+expect_eq "no summary: state snapshot stays -" "$(state 4)" "-"
+expect_text_has "no summary: reason in the notify" "$(payload)" "no summary snapshot id"
+expect_calls_lacks "no summary: forget not run" "restic forget"
+
+# failure notify text is trimmed to 500 chars of masked detail
+new_case
+printf '1' > "$C/fail_restic-backup"
+: > "$C/long_err"
+run_real 'main nightly'
+big="$(printf 'E%.0s' $(seq 1 501))"
+expect_text_lacks "failure detail trimmed to 500 chars" "$(payload)" "$big"
+expect_text_has "failure detail still present (positive control)" "$(payload)" "EEEEEEEEEE"
+expect_text_has "failure notify carries the rc" "$(payload)" "rc=1"
+
+# 13e. Staging: kept on an early failure, wiped on a late one, stale content removed on the next run
+new_case
+printf '1' > "$C/fail_restic-backup"
+run_real 'main nightly'
+expect_present "failed restic-backup keeps the dumps" "$C/root/staging/postgres/app_one.dump"
+expect_present "failed restic-backup keeps globals" "$C/root/staging/postgres/globals.sql"
+new_case
+printf '124' > "$C/fail_restic-backup"
+run_real 'main nightly'
+expect_present "timed-out restic-backup keeps the dumps" "$C/root/staging/postgres/app_two.dump"
+new_case
+printf '1' > "$C/fail_pg-db_app_two"
+run_real 'main nightly'
+expect_present "earlier-phase failure keeps what was staged" "$C/root/staging/postgres/globals.sql"
+for key in restic-forget restic-check; do
+  new_case
+  printf '1' > "$C/fail_$key"
+  run_real 'main nightly'
+  expect_text_has "$key failure: the dumps were staged at backup time (positive control)" "$(staged)" "postgres/app_one.dump"
+  expect_absent "$key failure: staging wiped (the snapshot exists)" "$C/root/staging"
+done
+new_case
+mkdir -p "$C/root/staging/postgres"
+printf 'old' > "$C/root/staging/postgres/stale.dump"
+printf 'old' > "$C/root/staging/stale.txt"
+chmod 755 "$C/root/staging"
+run_real 'main nightly'
+expect_rc "run over a kept staging dir" 0
+expect_text_lacks "stale files from a failed run are gone" "$(staged)" "stale"
+expect_text_has "positive control: this run's dumps were staged" "$(staged)" "postgres/app_one.dump"
+expect_eq "staging recreated root 0700 even when it existed with 0755" "$(tr '\n' ' ' < "$C/staging-mode")" "700 700 "
+
+# 13f. Redis wait logic
+new_case
+rm -f "$C/bgsave_sets"
+run_real 'main nightly'
+expect_rc "LASTSAVE never changing fails" 1
+expect_eq "LASTSAVE never changes: failed_phase=redis" "$(state 5)" "redis"
+expect_out_has "LASTSAVE never changes: TIMED OUT at the bound" "phase=redis TIMED OUT"
+expect_out_has "LASTSAVE never changes: bounded by 120s" "phase=redis start timeout=120s"
+expect_calls_has "LASTSAVE never changes: positive control, BGSAVE was issued" "BGSAVE"
+expect_calls_lacks "LASTSAVE never changes: no docker cp" "docker cp"
+expect_calls_lacks "LASTSAVE never changes: no restic backup" "restic backup"
+
+new_case
+printf '1 ok\n' > "$C/info_seq"
+run_real 'main nightly'
+expect_rc "LASTSAVE changed but in_progress:1 keeps waiting, then times out" 1
+expect_eq "in_progress:1: failed_phase=redis" "$(state 5)" "redis"
+expect_calls_lacks "in_progress:1: no docker cp while a save is running" "docker cp"
+if [ "$(wc -l < "$C/polls")" -ge 5 ]; then _pass; else _fail "in_progress:1: it kept polling"; fi
+
+new_case
+printf '0 err\n' > "$C/info_seq"
+run_real 'main nightly'
+expect_rc "status err with in_progress:0 fails" 1
+expect_eq "status err: failed_phase=redis" "$(state 5)" "redis"
+expect_out_lacks "status err: failed at once, not at the bound" "TIMED OUT"
+expect_absent "status err: no poll pause before failing" "$C/polls"
+expect_calls_lacks "status err: no docker cp" "docker cp"
+expect_text_has "status err: reason in the notify" "$(payload)" "BGSAVE failed"
+
+new_case
+printf '1 err\n0 ok\n' > "$C/info_seq"
+run_real 'main nightly'
+expect_rc "a stale err with in_progress:1 does not fail the night" 0
+expect_calls_has "stale err then ok: copied after the save finished" "docker cp platform-data-redis:/data/dump.rdb"
+expect_eq "stale err then ok: exactly one pause" "$(wc -l < "$C/polls" | tr -d ' ')" "1"
+
+new_case
+run_real 'main nightly'
+expect_rc "positive control: LASTSAVE changed, in_progress:0, status ok" 0
+expect_calls_has "positive control: dump.rdb copied" "docker cp platform-data-redis:/data/dump.rdb"
+expect_absent "positive control: no pause needed" "$C/polls"
+
+new_case
+printf 'ERR Background save already in progress\n' > "$C/bgsave_reply"
+printf '1' > "$C/bgsave_rc"
+run_real 'main nightly'
+expect_rc "BGSAVE already in progress (redis-cli rc 1) is waited for" 0
+expect_calls_has "already in progress: copied after the wait" "docker cp platform-data-redis:/data/dump.rdb"
+new_case
+printf 'ERR something else\n' > "$C/bgsave_reply"
+run_real 'main nightly'
+expect_rc "an unrecognised BGSAVE reply is refused" 1
+expect_text_has "refusal reason in the notify" "$(payload)" "BGSAVE refused"
+expect_calls_lacks "refused BGSAVE: no docker cp" "docker cp"
+
+# restic exit 3 (snapshot made, files unreadable): the run fails but names the snapshot; last summary wins
+new_case
+: > "$C/backup_rc3"
+run_real 'main nightly'
+expect_rc "restic backup rc=3 fails the run" 1
+expect_eq "rc=3: failed_phase=restic-backup" "$(state 5)" "restic-backup"
+expect_eq "rc=3: the snapshot id is still recorded" "$(state 4)" "abcdef0123456789"
+expect_calls_lacks "rc=3: forget not run" "restic forget"
+expect_present "rc=3: staging kept" "$C/root/staging/postgres/globals.sql"
+
+# 13g. Deadline on real phases
+new_case
+export PLATFORM_BACKUP_DEADLINE_SECS=100
+printf '1100' > "$C/adv_after_cp"
+run_real 'main nightly'
+expect_rc "deadline reached before restic-backup" 1
+expect_eq "deadline: failed_phase=restic-backup" "$(state 5)" "restic-backup"
+expect_out_has "deadline exceeded text" "deadline exceeded"
+expect_calls_has "positive control: the redis copy before it ran" "docker cp"
+expect_calls_lacks "deadline: restic backup never started" "restic backup"
+expect_calls_lacks "deadline: no forget either" "restic forget"
+new_case
+export PLATFORM_BACKUP_DEADLINE_SECS=100
+printf '1099' > "$C/adv_after_backup"
+: > "$C/forget_slow"
+run_real 'main nightly'
+expect_rc "clamped forget fails the run" 1
+expect_eq "clamped forget: failed_phase=restic-forget" "$(state 5)" "restic-forget"
+expect_out_has "forget clamped to the 1s left" "phase=restic-forget start timeout=1s"
+expect_out_has "clamped forget is a TIMED OUT" "phase=restic-forget TIMED OUT after 1s"
+expect_calls_has "clamped forget timeout runs restic unlock" "restic unlock"
+expect_eq "clamped forget: snapshot id kept" "$(state 4)" "abcdef0123456789"
+new_case
+export PLATFORM_BACKUP_DEADLINE_SECS=100
+: > "$C/forget_jump"
+run_real 'main nightly'
+expect_eq "deadline exhausted during forget: failed_phase" "$(state 5)" "restic-forget"
+expect_out_has "unlock keeps its own 120s bound with no deadline left" "phase=restic-unlock start timeout=120s"
+expect_calls_has "unlock still called with the deadline exhausted" "restic unlock"
+new_case
+run_real 'main nightly'
+expect_rc "positive control: time remaining" 0
+expect_out_has "forget runs unclamped with time remaining" "phase=restic-forget start timeout=1800s"
+
+# 13h. Volume inventory
+new_case
+hex="$(printf 'a%.0s' $(seq 1 64))"
+printf 'platform-data-postgres\nplatform-data-redis\nmyapp_data\n%s\n' "$hex" > "$C/volumes"
+run_real 'main nightly'
+expect_rc "an unknown volume is only a warning" 0
+expect_eq "unknown volume: state ok" "$(state 3)" "ok"
+expect_text_has "unknown volume: not backed up warning names it" "$(payload)" "not backed up: myapp_data"
+expect_text_lacks "anonymous 64-hex volume is not reported" "$(payload)" "$hex"
+expect_text_lacks "the data volumes are not reported" "$(payload)" "platform-data-postgres"
+new_case
+printf '1' > "$C/fail_volumes"
+run_real 'main nightly'
+expect_rc "a failing volume listing is only a warning" 0
+expect_text_has "volume listing failure is warned" "$(payload)" "volume inventory failed"
 
 t_finish
