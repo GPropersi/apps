@@ -265,7 +265,7 @@ new_case() {
   RDPW="$C/etc/redis.pw"
   S="$C/snap"
   mkdir -p "$R" "$C/logs" "$SR" "$LD" "$C/etc" "$S$R/staging/postgres" "$S$R/staging/redis" "$S$SR/app-one" "$S$SR/my-app" "$S$C/etc"
-  OVS=("CASE_DIR=$C" "CALL_LOG=$CALL_LOG" "LOADER=$LOADER" "PLATFORM_RESTORE_ALLOW_NONROOT=1"
+  OVS=("CASE_DIR=$C" "CALL_LOG=$CALL_LOG" "LOADER=$LOADER" "PLATFORM_BACKUP_TESTING=1" "PLATFORM_RESTORE_ALLOW_NONROOT=1"
     "PLATFORM_BACKUP_ENV_FILE=$C/backup.env" "PLATFORM_BACKUP_ENV_OWNER=$(id -u):$(id -g)" "PLATFORM_BACKUP_ROOT=$R"
     "PLATFORM_BACKUP_STATE_DIR=$C/status" "PLATFORM_BACKUP_LOG_DIR=$C/logs" "PLATFORM_BACKUP_LOCK=$C/lock"
     "PLATFORM_BACKUP_SECRETS_ROOT=$SR" "PLATFORM_BACKUP_LOCK_DIR=$LD" "PLATFORM_BACKUP_PG_ADMIN_FILE=$PGPW" "PLATFORM_BACKUP_REDIS_ADMIN_FILE=$RDPW"
@@ -963,6 +963,16 @@ new_case
 ov_set "PLATFORM_RESTORE_CHOWN=a b"
 rs list
 expect_rc "an unparsable chown override exits 2" 2
+# without PLATFORM_BACKUP_TESTING=1 every test override is ignored (fail closed): the non-root bypass no longer works
+if [ "$(id -u)" -ne 0 ]; then
+  new_case
+  rc=0
+  out="$(env -i PATH="$PATH" HOME="$C" PLATFORM_RESTORE_ALLOW_NONROOT=1 PLATFORM_RESTORE_CHOWN=chown PLATFORM_BACKUP_ENV_FILE="$C/backup.env" bash "$SCRIPT" list 2>&1 < /dev/null)" || rc=$?
+  expect_rc "without the marker PLATFORM_RESTORE_ALLOW_NONROOT is ignored (exit 2, must run as root)" 2
+  expect_out_has "...the refusal says root is required" "must run as root"
+  expect_out_has "...and the ignored overrides are named" "ignoring test overrides without PLATFORM_BACKUP_TESTING=1"
+  expect_out_has "...including the chown override" "PLATFORM_RESTORE_CHOWN"
+fi
 new_case
 ov_set "PLATFORM_BACKUP_ENV_OWNER=bad"
 rs list

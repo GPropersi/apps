@@ -193,6 +193,7 @@ new_case() {
   mkdir -p "$C"
   t_reset_calls
   export C CASE_DIR="$C" CLK="$C/clock" HHMM="$C/hhmm" WINF="$C/window.env"
+  export PLATFORM_BACKUP_TESTING=1
   export PLATFORM_BACKUP_ENV_FILE="$C/backup.env"
   OWNER_NOW="$(id -u):$(id -g)"
   export PLATFORM_BACKUP_ENV_OWNER="$OWNER_NOW"
@@ -204,6 +205,9 @@ new_case() {
   export PLATFORM_BACKUP_PG_ADMIN_FILE="$C/pg.pw"
   export PLATFORM_BACKUP_REDIS_ADMIN_FILE="$C/redis.pw"
   unset PLATFORM_BACKUP_DEADLINE_SECS PLATFORM_BACKUP_PG_CONTAINER PLATFORM_BACKUP_REDIS_CONTAINER
+  # the sentinel that lets prepare_staging wipe this (non-production) backup root
+  mkdir -p "$C/root"
+  : > "$C/root/.platform-backup-root"
   export ADV_TO=1000 HHMM_TO=04:00
   printf '1000' > "$CLK"
   printf '04:00' > "$HHMM"
@@ -615,6 +619,39 @@ export PLATFORM_BACKUP_LOCK=""
 run_case 'main nightly'
 expect_rc "empty path override exits 2" 2
 
+# test overrides are honoured only with PLATFORM_BACKUP_TESTING=1 (fail closed)
+new_case
+unset PLATFORM_BACKUP_TESTING
+export PLATFORM_BACKUP_ENV_FILE="relative/backup.env"
+run_case 'load_overrides; echo "ENV_FILE=$ENV_FILE ROOT=$BACKUP_ROOT LOCK=$LOCK_FILE"'
+expect_out_has "without the marker the overrides are ignored (production env file)" "ENV_FILE=/etc/platform/backup.env"
+expect_out_has "...and the production backup root applies" "ROOT=/var/lib/platform/backup"
+expect_out_has "...and the production lock applies" "LOCK=/run/platform-backup.lock"
+expect_out_has "the ignored overrides are named in a warning" "ignoring test overrides without PLATFORM_BACKUP_TESTING=1"
+new_case
+export PLATFORM_BACKUP_TESTING=0
+run_case 'load_overrides; echo "ROOT=$BACKUP_ROOT"'
+expect_out_has "a marker other than 1 does not enable the overrides" "ROOT=/var/lib/platform/backup"
+new_case
+run_case 'load_overrides; echo "ROOT=$BACKUP_ROOT"'
+expect_out_has "positive control: with the marker the overrides apply" "ROOT=$C/root"
+
+# prepare_staging refuses to rm -rf a non-production root without the sentinel
+new_case
+rm -f "$C/root/.platform-backup-root"
+mkdir -p "$C/root/staging"
+: > "$C/root/staging/keep-me"
+run_case 'load_overrides; r=0; prepare_staging || r=$?; echo "PREP_RC=$r"'
+expect_out_has "no sentinel: prepare_staging fails" "PREP_RC=1"
+expect_out_has "...naming the sentinel" ".platform-backup-root"
+if [ -f "$C/root/staging/keep-me" ]; then _pass; else _fail "no sentinel: staging was not wiped"; fi
+new_case
+mkdir -p "$C/root/staging"
+: > "$C/root/staging/gone"
+run_case 'load_overrides; r=0; prepare_staging || r=$?; echo "PREP_RC=$r"'
+expect_out_has "positive control: with the sentinel prepare_staging succeeds" "PREP_RC=0"
+if [ -f "$C/root/staging/gone" ]; then _fail "with the sentinel the old staging is wiped"; else _pass; fi
+
 # ---------------------------------------------------------------------------------------------------------------
 # 10. Signals
 new_case
@@ -814,7 +851,7 @@ for bad in 'Bad-Name' '../etc' 'a' '1abc' 'has space' 'UPPER'; do
   expect_calls_lacks "name '$bad': no pg_dumpall" "pg_dumpall"
   expect_calls_lacks "name '$bad': no pg_dump at all" "pg_dump -U"
   expect_calls_lacks "name '$bad': no restic backup" "restic backup"
-  expect_eq "name '$bad': no file written anywhere under staging" "$(find "$C/root" -type f | wc -l | tr -d ' ')" "0"
+  expect_eq "name '$bad': no file written anywhere under staging" "$(find "$C/root" -type f ! -name .platform-backup-root | wc -l | tr -d ' ')" "0"
   expect_absent "name '$bad': no file named after it in staging" "$C/root/staging/etc.dump"
 done
 new_case

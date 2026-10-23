@@ -209,6 +209,9 @@ payload_backup() {
 # see read_backup_env). The systemd unit has no EnvironmentFile=, so nothing depends on the caller's environment.
 #
 # Test overrides (all optional, each read once at startup, default = production value, an unparsable value exits 2).
+# They are honoured ONLY when PLATFORM_BACKUP_TESTING=1; otherwise every PLATFORM_BACKUP_* / PLATFORM_RESTORE_* variable
+# is ignored (unset, named in a warning) and the production values apply. A BACKUP_ROOT other than the production one
+# must hold a .platform-backup-root sentinel file before staging/ is wiped.
 # restore.sh reads the same names except PLATFORM_BACKUP_DEADLINE_SECS:
 #   PLATFORM_BACKUP_ENV_FILE            /etc/platform/backup.env
 #   PLATFORM_BACKUP_ENV_OWNER           0:0   (numeric uid:gid the env file must have; mode 0600 and no-symlink never relax)
@@ -375,7 +378,24 @@ ov_name() { # <target-var> <OVERRIDE_NAME> <default>: a container name
   printf -v "$1" '%s' "$v"
 }
 
+# gate_test_overrides: fail closed. The PLATFORM_BACKUP_* / PLATFORM_RESTORE_* overrides are test hooks (a different chown,
+# data root, env file, ...); they are honoured only with PLATFORM_BACKUP_TESTING=1 and are otherwise unset (named in a
+# warning, never their values), so a caller environment that leaks through sudo -E / env_keep cannot redirect a root run.
+gate_test_overrides() {
+  local v dropped=""
+  if [ "${PLATFORM_BACKUP_TESTING:-}" = "1" ]; then return 0; fi
+  for v in $(compgen -v PLATFORM_); do
+    case "$v" in
+      PLATFORM_BACKUP_* | PLATFORM_RESTORE_*) unset "$v"; dropped="$dropped $v" ;;
+      *) ;;
+    esac
+  done
+  if [ -n "$dropped" ]; then echo "WARN: ignoring test overrides without PLATFORM_BACKUP_TESTING=1:$dropped" >&2; fi
+  return 0
+}
+
 load_overrides() {
+  gate_test_overrides
   ov_path ENV_FILE PLATFORM_BACKUP_ENV_FILE /etc/platform/backup.env
   ov_path BACKUP_ROOT PLATFORM_BACKUP_ROOT /var/lib/platform/backup
   ov_path STATE_DIR PLATFORM_BACKUP_STATE_DIR /var/lib/platform/backup-status
@@ -740,6 +760,11 @@ phase_lock() {
 # prepare_staging: wipe and recreate staging/ (root 0700). Runs under the lock, before pg-list.
 prepare_staging() {
   if [ "$BACKUP_ROOT" = "/" ]; then log "FATAL: PLATFORM_BACKUP_ROOT must not be /"; return 1; fi
+  # Fail closed: a recursive delete only under the production root or a root that carries the sentinel file.
+  if [ "$BACKUP_ROOT" != "/var/lib/platform/backup" ] && { [ ! -f "$BACKUP_ROOT/.platform-backup-root" ] || [ -L "$BACKUP_ROOT/.platform-backup-root" ]; }; then
+    log "FATAL: refusing to wipe $BACKUP_ROOT/staging: $BACKUP_ROOT is not /var/lib/platform/backup and has no .platform-backup-root sentinel file"
+    return 1
+  fi
   STAGING="$BACKUP_ROOT/staging"
   rm -rf -- "$STAGING" || return 1
   (umask 077 && mkdir -p -- "$STAGING/postgres" "$STAGING/redis") || return 1
@@ -1025,6 +1050,8 @@ payload_restore() {
 # Credentials: /etc/platform/backup.env is read by this script itself with the same literal KEY=VALUE reader as
 # backup.sh (never sourced), so it works under `sudo -n` with a stripped environment.
 #
+# Test overrides are honoured ONLY when PLATFORM_BACKUP_TESTING=1; otherwise every PLATFORM_BACKUP_* / PLATFORM_RESTORE_*
+# variable is ignored (unset, named in a warning) and the production values apply.
 # Shared overrides (the same names and meaning as backup.sh, all optional, each read once at startup, default = the
 # production value, an unparsable value exits 2). A restore needs the same values the backup ran with:
 #   PLATFORM_BACKUP_ENV_FILE PLATFORM_BACKUP_ENV_OWNER PLATFORM_BACKUP_ROOT
@@ -1158,7 +1185,25 @@ ov_name() { # <target-var> <OVERRIDE_NAME> <default>: a container name
   printf -v "$1" '%s' "$v"
 }
 
+# gate_test_overrides: fail closed (same function as backup.sh). The PLATFORM_BACKUP_* / PLATFORM_RESTORE_* overrides are
+# test hooks (a different chown, data root, env file, ...); they are honoured only with PLATFORM_BACKUP_TESTING=1 and are
+# otherwise unset (named in a warning, never their values), so a caller environment that leaks through sudo -E / env_keep
+# cannot redirect a root run.
+gate_test_overrides() {
+  local v dropped=""
+  if [ "${PLATFORM_BACKUP_TESTING:-}" = "1" ]; then return 0; fi
+  for v in $(compgen -v PLATFORM_); do
+    case "$v" in
+      PLATFORM_BACKUP_* | PLATFORM_RESTORE_*) unset "$v"; dropped="$dropped $v" ;;
+      *) ;;
+    esac
+  done
+  if [ -n "$dropped" ]; then echo "WARN: ignoring test overrides without PLATFORM_BACKUP_TESTING=1:$dropped" >&2; fi
+  return 0
+}
+
 load_overrides() {
+  gate_test_overrides
   ov_path ENV_FILE PLATFORM_BACKUP_ENV_FILE /etc/platform/backup.env
   ov_path BACKUP_ROOT PLATFORM_BACKUP_ROOT /var/lib/platform/backup
   ov_path LOG_DIR PLATFORM_BACKUP_LOG_DIR /var/log/platform-backup

@@ -43,8 +43,9 @@ a quote is refused with exit 2. A missing key exits 2 and the message names ever
 called for an `env` failure (it may be the missing key). Secret values are replaced with `***` in every log line,
 error text and Discord message.
 
-Test overrides (`PLATFORM_BACKUP_*`, each defaults to the production path) are documented in the header of
-`backup.sh`.
+Test overrides (`PLATFORM_BACKUP_*` and `PLATFORM_RESTORE_*`, each defaults to the production path) are documented in
+the header of `backup.sh` and are honoured only with `PLATFORM_BACKUP_TESTING=1`; without it they are ignored and
+named in a warning. A non-production backup root must hold a `.platform-backup-root` file before `staging/` is wiped.
 
 ## `last-run.tsv` (for the status page)
 
