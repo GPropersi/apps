@@ -67,8 +67,6 @@ readonly DB_RE='^[a-z][a-z0-9_]{1,30}$'
 readonly SNAP_RE='^(latest|[0-9a-f]{8,64})$'
 readonly SECRETS_GID=64323
 readonly ADMIN_GID=64322
-readonly COMPOSE_PROJECT=platform-data
-readonly LOADER_NAME=platform-restore-redis-loader
 # Bounded polls (each one pause of POLL_PAUSE seconds): 60 x 2s = 120s per wait.
 readonly POLL_MAX=60
 readonly POLL_PAUSE=2
@@ -86,6 +84,9 @@ LOG_FILE=""
 TIMED_LAST_FILE="/dev/null"
 TIMED_PID=""
 LOADER_UP=0
+# The one-shot loader's name is derived from the Redis container (set in load_overrides), never a shared constant, so a
+# restore aimed at one stack can never stop, replace or remove the loader of another.
+LOADER_NAME=""
 STEP=""
 SNAP_ID=""
 SNAP_TIME=""
@@ -180,7 +181,12 @@ load_overrides() {
   fi
   ov_path COMPOSE_FILE PLATFORM_RESTORE_COMPOSE /opt/platform/data/compose.yaml
   ov_path INSTALL_DATA PLATFORM_RESTORE_INSTALL_DATA /opt/platform/data/install-data.sh
-  DC=(docker compose -p "$COMPOSE_PROJECT" -f "$COMPOSE_FILE")
+  LOADER_NAME="$REDIS_CONTAINER-restore-loader"
+  # No `-p`: the project is the compose file's own `name:` (platform-data for the installed stack). A hard-coded project
+  # silently selected no container when the file under test carries another name (the live test caught `compose stop`
+  # doing nothing while the loader mounted a running Redis's volume). load_env removes COMPOSE_PROJECT_NAME; an inherited
+  # COMPOSE_FILE is ignored by compose because -f is given.
+  DC=(docker compose -f "$COMPOSE_FILE")
 }
 
 # ---- literal env reader (BYTE-IDENTICAL in every script that carries a copy: backup.sh, restore.sh, install-backup.sh) ----
@@ -405,7 +411,7 @@ check_dirs() {
 
 load_env() {
   local k missing=""
-  unset "${SCRUB_ENV[@]}" DOCKER_HOST DOCKER_CONTEXT DOCKER_CONFIG
+  unset "${SCRUB_ENV[@]}" DOCKER_HOST DOCKER_CONTEXT DOCKER_CONFIG COMPOSE_PROJECT_NAME COMPOSE_PROFILES
   while IFS= read -r k; do
     case "$k" in RESTIC_* | AWS_* | RCLONE_*) unset "$k" ;; esac
   done < <(compgen -e)
@@ -761,6 +767,9 @@ redis_load() {
   local f="$WORK/out" image="$REDIS_IMAGE" mount="$REDIS_MOUNT" i inprog sched status line stage="$RDIR$BACKUP_ROOT/staging/redis"
   [ -n "$image" ] && [ -n "$mount" ] || fail redis-load "the Redis image and mount were not inspected first"
   step_io redis-stop 120 - - "${DC[@]}" stop redis
+  # `compose stop` exits 0 when it selected no container, so prove the real Redis is down before its /data is replaced.
+  step_io redis-stop-check 60 - "$f" docker inspect --format '{{.State.Running}}' "$REDIS_CONTAINER"
+  [ "$(tr -d '\r\n' < "$f")" = false ] || fail redis-stop-check "the Redis container $REDIS_CONTAINER is still running after compose stop"
   # shellcheck disable=SC2016 # the body is a literal for the container's sh
   step_io redis-replace-files 120 - - docker run --rm --read-only --network none --user 0:0 --cap-drop ALL --cap-add CHOWN \
     --cap-add DAC_OVERRIDE --cap-add FOWNER --security-opt no-new-privileges:true -v "$mount:/data" -v "$stage:/restore:ro" \

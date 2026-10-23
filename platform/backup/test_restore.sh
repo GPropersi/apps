@@ -28,7 +28,7 @@ AWS_SECRET='sk+/=testsecretmarker0002'
 HOOK_SECRET='https://discord.example.test/api/webhooks/111/tokenmarker'
 SID="$(printf 'ab%.0s' {1..32})"
 SID2="$(printf 'cd%.0s' {1..32})"
-LOADER=platform-restore-redis-loader
+LOADER=platform-data-redis-restore-loader
 
 # ---- stubs ----
 
@@ -107,6 +107,10 @@ case "$1" in
     case "$all" in
       *Config.Image*) [ -f "$CASE_DIR/image_${*: -1}" ] || { echo "Error: No such container: ${*: -1}" >&2; exit 1; }; cat "$CASE_DIR/image_${*: -1}" ;;
       *Mounts*) [ -f "$CASE_DIR/mount_${*: -1}" ] || { echo "Error: No such container: ${*: -1}" >&2; exit 1; }; cat "$CASE_DIR/mount_${*: -1}" ;;
+      *State.Running*)
+        # After `compose stop` the real Redis is down unless a case plants running_<name> (the stop selected no container).
+        if [ -f "$CASE_DIR/running_${*: -1}" ]; then echo true; else echo false; fi
+        ;;
       *State.Status*)
         name="${*: -1}"
         if [ -f "$CASE_DIR/health_$name" ]; then cat "$CASE_DIR/health_$name"; else echo "running|healthy"; fi
@@ -801,14 +805,26 @@ expect_rc "a failing Redis stop exits nonzero" 1
 expect_out_has "...naming the step" "redis-stop"
 expect_calls_lacks "the loader is not started when the old Redis did not stop" "docker run"
 
+# compose stop exits 0 but selected no container (wrong project): the real Redis is still running, so nothing may touch /data.
+new_case
+printf 'x' > "$C/running_platform-data-redis"
+rs full --confirm-destroy
+expect_rc "a Redis that is still running after compose stop fails the restore" 1
+expect_out_has "...naming the step" "redis-stop-check"
+expect_calls_lacks "no file replace or loader runs against a still-running Redis" "docker run"
+
 # ---- 8. loader image and mount come from docker inspect ----
 
 new_case
-ov_set "PLATFORM_BACKUP_REDIS_CONTAINER=other-redis"
+ov_set "PLATFORM_BACKUP_REDIS_CONTAINER=other-redis" "LOADER=other-redis-restore-loader"
 printf 'registry.test/redis:other@sha256:%s\n' "$(printf '12%.0s' {1..32})" > "$C/image_other-redis"
 printf 'volume|vol-other|/var/lib/docker/volumes/o/_data\n' > "$C/mount_other-redis"
 rs full --confirm-destroy
 expect_rc "full with a different Redis container succeeds" 0
+expect_calls_has "the loader name is derived from the Redis container" "docker run -d --name other-redis-restore-loader"
+expect_calls_lacks "the shared default loader name is never used for another stack" "platform-data-redis-restore-loader"
+expect_calls_lacks "compose is never given a hard-coded project name" "docker compose -p"
+expect_calls_has "the stop of the named Redis is verified" "docker inspect --format {{.State.Running}} other-redis"
 expect_calls_has "the image is inspected from the named container" "docker inspect --format {{.Config.Image}} other-redis"
 expect_calls_has "the mount is inspected from the named container" "{{end}}{{end}} other-redis"
 expect_calls_lacks "the default container is never inspected for image or mounts" "{{.Config.Image}} platform-data-redis"

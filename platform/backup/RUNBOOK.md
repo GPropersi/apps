@@ -109,10 +109,12 @@ In this order:
 
 - `restore: missing directory ...`: run `install-backup restore-only`; the restore never creates the state dirs.
 - Exit 2 means a refusal or bad input and nothing was changed; exit 1 names the step that failed.
-- A one-shot Redis loader left running after a failed run (`platform-restore-redis-loader`): `docker rm -f` it before
-  retrying. The real Redis is left stopped after a failed load: check the log
-  (`/var/log/platform-backup/<date>.log`), fix the cause, then wipe the stack again (section 5, step 3) and re-run from section 4 step 4: `full` refuses a stack that
-  already holds data, which a half-finished restore does.
+- A one-shot Redis loader left running after a failed run (`platform-data-redis-restore-loader`, named after the
+  Redis container): `docker rm -f` it before retrying. The real Redis is left stopped after a failed load: check the
+  log (`/var/log/platform-backup/<date>.log`), fix the cause, then wipe the stack again (section 5, step 3) and re-run
+  from section 4 step 4: `full` refuses a stack that already holds data, which a half-finished restore does.
+- `restore: step 'redis-stop-check' failed`: compose stop selected no running Redis container (check the compose
+  file `name:` and `PLATFORM_BACKUP_REDIS_CONTAINER`). Nothing was changed.
 - `restore: step 'app-pg-restore' failed` (single-app restore): the new database `<db>_restore` was already created and is
   now half-restored. Drop it before retrying (`sudo docker exec -i platform-data-postgres psql -U postgres -c 'DROP
   DATABASE "<db>_restore"'`), because `app` refuses an `--into` name that already exists.
