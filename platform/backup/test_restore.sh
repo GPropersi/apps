@@ -1040,6 +1040,37 @@ expect_eq "REDIS_ADMIN_SNIPPET matches backup.sh" "$(snippet "$SCRIPT")" "$(snip
 expect_eq "REDIS_ADMIN_SNIPPET matches new-db.sh" "$(snippet "$SCRIPT")" "$(snippet "$NEWDB_SCRIPT")"
 if grep -qF -- "$(snippet "$SCRIPT" | sed "s/^readonly REDIS_ADMIN_SNIPPET=//")" "$INSTALL_DATA_SCRIPT"; then _pass; else _fail "REDIS_ADMIN_SNIPPET matches install-data.sh"; fi
 
+# The helpers backup.sh and restore.sh carry as standalone copies (the payloads are installed on their own, no shared
+# library): each must stay textually identical, like the env reader above.
+extract_fn() { sed -n "/^$2() {/,/^}/p" "$1"; }
+extract_scrub() { sed -n '/^SCRUB_ENV=(/,/)$/p' "$1"; }
+for fn in mask_text ov_path ov_name timed_io; do
+  if [ -n "$(extract_fn "$SCRIPT" "$fn")" ]; then _pass; else _fail "$fn is defined in restore.sh (drift check positive control)"; fi
+  expect_eq "$fn in restore.sh is textually identical to backup.sh's" "$(extract_fn "$SCRIPT" "$fn")" "$(extract_fn "$BACKUP_SCRIPT" "$fn")"
+done
+if [ -n "$(extract_scrub "$SCRIPT")" ]; then _pass; else _fail "SCRUB_ENV is defined in restore.sh (drift check positive control)"; fi
+expect_eq "SCRUB_ENV in restore.sh is textually identical to backup.sh's" "$(extract_scrub "$SCRIPT")" "$(extract_scrub "$BACKUP_SCRIPT")"
+mutated="$(extract_fn "$SCRIPT" mask_text | sed 's/\*\*\*/###/')"
+if [ "$mutated" = "$(extract_fn "$BACKUP_SCRIPT" mask_text)" ]; then _fail "mutation positive control: a changed mask_text must make the comparison fail"; else _pass; fi
+# log and timed/_timed_run differ on purpose (restore.sh prefixes "restore" and has no deadline clamp or run lock fd; it
+# closes the app lock fd and reads stdin from /dev/null): the lines that carry the shared behaviour must still match,
+# compared with all whitespace removed.
+squash() { tr -d ' \t\n'; }
+LOG_FRAGS=('$(mask_text"$*")"' "printf'%s\\n'\"\$line\"" "if[-n\"\$LOG_FILE\"];thenprintf'%s\\n'\"\$line\">>\"\$LOG_FILE\"2>/dev/null||true;fi")
+TIMED_FRAGS=('line="$(mask_text"$line")"' 'log"$label:$line"' "printf'%s\\n'\"\$line\">>\"\$TIMED_LAST_FILE\"2>/dev/null" 'timeout-sTERM-k30"$secs"'
+  'exec9>&-' 'log"phase=$labelstarttimeout=${secs}s"' 'log"phase=$labelTIMEDOUTafter${secs}s"'
+  'log"phase=$labelendrc=$rcdur=$(($(now_epoch)-t0))s"' 'exit"${PIPESTATUS[0]}"')
+log_body() { extract_fn "$1" log | squash; }
+timed_body() { extract_fn "$1" "$2" | squash; }
+for frag in "${LOG_FRAGS[@]}"; do
+  case "$(log_body "$SCRIPT")" in *"$frag"*) _pass ;; *) _fail "restore.sh log() keeps the shared fragment $frag" ;; esac
+  case "$(log_body "$BACKUP_SCRIPT")" in *"$frag"*) _pass ;; *) _fail "backup.sh log() keeps the shared fragment $frag" ;; esac
+done
+for frag in "${TIMED_FRAGS[@]}"; do
+  case "$(timed_body "$SCRIPT" timed)" in *"$frag"*) _pass ;; *) _fail "restore.sh timed() keeps the shared fragment $frag" ;; esac
+  case "$(timed_body "$BACKUP_SCRIPT" _timed_run)" in *"$frag"*) _pass ;; *) _fail "backup.sh _timed_run() keeps the shared fragment $frag" ;; esac
+done
+
 # ---- 11. usage ----
 
 new_case
