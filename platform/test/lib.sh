@@ -16,7 +16,7 @@
 # and fail there. Re-exec once with the default dispositions so the result does not depend on the launcher.
 if [ -z "${PLATFORM_TEST_SIGRESET:-}" ] && [ -f "$0" ]; then
   export PLATFORM_TEST_SIGRESET=1
-  exec env --default-signal=INT,HUP,QUIT bash "$0" "$@"
+  exec /usr/bin/env --default-signal=INT,HUP,QUIT "$BASH" "$0" "$@"
 fi
 
 passed=0

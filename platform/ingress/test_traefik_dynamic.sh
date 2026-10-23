@@ -32,6 +32,9 @@
 #   positive control failed         -> the dummy backend or Host header is wrong, so the deny results prove nothing
 # shellcheck disable=SC1091,SC2015
 set -uo pipefail
+# The dirs and files bind-mounted into the non-root containers must be world-readable whatever umask the launcher has
+# (a detached gate job can run with 077, which made the file provider fail with "permission denied" and every route 404).
+umask 022
 
 here="$(cd "$(dirname "$0")" && pwd)"
 # shellcheck source=../test/lib.sh
