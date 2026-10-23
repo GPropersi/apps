@@ -376,7 +376,9 @@ expect_no_exclude "full: no restic restore carries --exclude"
 new_case
 rs full --confirm-destroy
 expect_rc "full (latest) succeeds" 0
-expect_calls_has "full latest is host-filtered" "restic restore latest --host platform --target"
+expect_calls_has "full latest resolves host-filtered" "restic snapshots --json latest --host platform"
+expect_calls_has "full latest restores the resolved id, not the selector" "restic restore $SID --target"
+expect_calls_lacks "full latest does not re-resolve at restore time" "restic restore latest"
 expect_out_has "full logs the resolved id also for latest" "resolved id=$SID"
 expect_out_has "full logs the snapshot time" "time=2026-10-22T03:35:00Z"
 n_snap="$(grep -n 'snapshot selector=' <<< "$out" | head -n 1 | cut -d: -f1)"
@@ -990,7 +992,6 @@ expect_no_mut "...(no mutating call)"
 for d in \
   '  ov_path ENV_FILE PLATFORM_BACKUP_ENV_FILE /etc/platform/backup.env' \
   '  ov_path BACKUP_ROOT PLATFORM_BACKUP_ROOT /var/lib/platform/backup' \
-  '  ov_path STATE_DIR PLATFORM_BACKUP_STATE_DIR /var/lib/platform/backup-status' \
   '  ov_path LOG_DIR PLATFORM_BACKUP_LOG_DIR /var/log/platform-backup' \
   '  ov_path LOCK_FILE PLATFORM_BACKUP_LOCK /run/platform-backup.lock' \
   '  ov_path SECRETS_ROOT PLATFORM_BACKUP_SECRETS_ROOT /var/lib/platform/secrets' \

@@ -711,7 +711,7 @@ phase_env() {
     log "FATAL: missing required env var(s): $missing"
     die_phase env 2 "missing required env var(s): $missing"
   fi
-  export "${ENV_KEYS[@]}"
+  export RESTIC_REPOSITORY RESTIC_PASSWORD AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_DEFAULT_REGION
   # restic --json status lines are logged one per line: ask for about one per minute.
   export RESTIC_PROGRESS_FPS=0.0166
   NOTIFY_ENABLED=1
@@ -1027,7 +1027,7 @@ payload_restore() {
 #
 # Shared overrides (the same names and meaning as backup.sh, all optional, each read once at startup, default = the
 # production value, an unparsable value exits 2). A restore needs the same values the backup ran with:
-#   PLATFORM_BACKUP_ENV_FILE PLATFORM_BACKUP_ENV_OWNER PLATFORM_BACKUP_ROOT PLATFORM_BACKUP_STATE_DIR
+#   PLATFORM_BACKUP_ENV_FILE PLATFORM_BACKUP_ENV_OWNER PLATFORM_BACKUP_ROOT
 #   PLATFORM_BACKUP_LOG_DIR PLATFORM_BACKUP_LOCK PLATFORM_BACKUP_SECRETS_ROOT PLATFORM_BACKUP_PG_ADMIN_FILE
 #   PLATFORM_BACKUP_REDIS_ADMIN_FILE PLATFORM_BACKUP_PG_CONTAINER PLATFORM_BACKUP_REDIS_CONTAINER
 # (PLATFORM_BACKUP_DEADLINE_SECS is not read here.) Restore-only test overrides:
@@ -1160,8 +1160,6 @@ ov_name() { # <target-var> <OVERRIDE_NAME> <default>: a container name
 load_overrides() {
   ov_path ENV_FILE PLATFORM_BACKUP_ENV_FILE /etc/platform/backup.env
   ov_path BACKUP_ROOT PLATFORM_BACKUP_ROOT /var/lib/platform/backup
-  # Read for parity with backup.sh (validated), not used by a restore.
-  ov_path STATE_DIR PLATFORM_BACKUP_STATE_DIR /var/lib/platform/backup-status
   ov_path LOG_DIR PLATFORM_BACKUP_LOG_DIR /var/log/platform-backup
   ov_path LOCK_FILE PLATFORM_BACKUP_LOCK /run/platform-backup.lock
   ov_path SECRETS_ROOT PLATFORM_BACKUP_SECRETS_ROOT /var/lib/platform/secrets
@@ -1492,7 +1490,7 @@ restic_restore() {
   local step="$1" p rc=0
   shift
   local -a sel inc=()
-  mapfile -d '' -t sel < <(snap_args)
+  if [ -n "$SNAP_ID" ]; then sel=("$SNAP_ID"); else mapfile -d '' -t sel < <(snap_args); fi
   for p in "$@"; do inc+=(--include "$p"); done
   STEP="$step"
   timed "$step" 1800 restic restore "${sel[@]}" --target "$RDIR" "${inc[@]}" || rc=$?

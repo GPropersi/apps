@@ -87,15 +87,20 @@ and run it there directly.
    `Persistent=true` catch-up run can fire when `install` enables the timer; it is flagged as outside the window.
    `install-data.sh` is not placed on the host, so the final `install-data verify` that `restore.sh full` would run is
    skipped and logged; run `make host-data HOST=<alias> ARGS="verify"` after a full restore instead.
+   `install` (and `restore-only`) downloads the pinned `restic` release on the host, so the host needs outbound
+   network access at install time; without it, place the binary by hand (download the pinned release elsewhere and
+   copy it to the path `install-backup.sh` names, then re-run; the sha256 check still applies).
+   `ARGS` for `host-restore` is re-parsed by the remote shell as root, so its words must be plain tokens (no spaces
+   or shell metacharacters).
 
 `HOST` is required for every `host-*` target, with no default alias; each exits 2 with a usage message when it
 is unset. For the five installers, `status` (the default) reports every check without failing and `verify`
 exits 1 on any failure; the egress check has no mode and always exits 1 on a failure. `--probe` needs the LAN
 default gateway to fall inside a deny range (otherwise it exits 2 rather than pass vacuously).
 
-`install-deploy-user.sh`, `install-claude-access.sh`, `install-ingress.sh`, `install-data.sh` and `install-backup.sh` intentionally duplicate shared
-scaffolding, because each is streamed standalone over `ssh bash -s` and cannot source a common file. A fix to one
-must be mirrored in the others.
+`install-deploy-user.sh`, `install-claude-access.sh`, `install-ingress.sh`, `install-data.sh` and
+`install-backup.sh` intentionally duplicate shared scaffolding, because each is streamed standalone over
+`ssh bash -s` and cannot source a common file. A fix to one must be mirrored in the others.
 
 ## Streaming invocation
 

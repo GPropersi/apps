@@ -512,7 +512,7 @@ phase_env() {
     log "FATAL: missing required env var(s): $missing"
     die_phase env 2 "missing required env var(s): $missing"
   fi
-  export "${ENV_KEYS[@]}"
+  export RESTIC_REPOSITORY RESTIC_PASSWORD AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_DEFAULT_REGION
   # restic --json status lines are logged one per line: ask for about one per minute.
   export RESTIC_PROGRESS_FPS=0.0166
   NOTIFY_ENABLED=1

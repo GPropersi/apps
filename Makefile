@@ -49,6 +49,7 @@ host-backup: ## LIVE: nightly backup installer (HOST=<alias> ARGS="install | res
 
 host-restore: ## LIVE: restore.sh as root over ssh (HOST=<alias> ARGS="list | app APP --into DB | secrets APP | host-files | full --confirm-destroy")
 	@[ -n "$$HOST" ] || { echo 'usage: make host-restore HOST=<ssh-alias> ARGS="list | app APP --into DB | secrets APP | host-files | full --confirm-destroy"' >&2; exit 2; }
+	@# ARGS words must be plain tokens (no spaces or shell metacharacters): the remote shell re-parses them as root.
 	@ssh -o BatchMode=yes -- "$$HOST" sudo -n /opt/platform/backup/restore.sh $$ARGS
 
 app-ls: ## List the registered apps (apps/*/app.yaml), registry only and offline; ignores HOST

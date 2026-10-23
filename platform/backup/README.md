@@ -2,12 +2,25 @@
 
 Nightly backup of the shared data layer (Postgres, Redis, the secrets root and the two admin password files) to a
 restic repository in a Cloudflare R2 bucket. `backup.sh` runs as root from a systemd oneshot on the app host (or by
-hand: `backup.sh nightly|manual`). Plan: `backups-r2` (Steps 1 to 5 build the runner, the phases, `restore.sh`, the
-unit and timer, and the installer).
+hand: `backup.sh nightly|manual`). Tracked in issue #13.
 
-This directory so far holds the **run framework** (`backup.sh`): the `env` and `lock` phases, logging, the Discord
-notify, the last-run state file, the backup window and the total deadline. Real phases are added to `PHASES` by the
-next step. Tests: `test_backup.sh` (offline, stubs for `restic`, `docker` and `curl`).
+What is here:
+
+- **`backup.sh`**: the run framework (logging, Discord notify, last-run state file, backup window, total deadline) and
+  the phases, in order: `env`, `lock`, `preflight`, `pg-list`, `pg-globals`, `pg-db:<db>` (one dump per database),
+  `redis` (BGSAVE and copy), `restic-backup`, `restic-forget`, `restic-check`, `volumes` (warn-only inventory of
+  Docker volumes nothing backs up).
+- **Snapshots**: one restic snapshot per run, host `platform`, tags `platform` and the run mode (`nightly` or
+  `manual`), holding the Postgres dumps and globals, the Redis files, the secrets root and the two admin password
+  files. Retention: `forget --prune` keeps 7 daily, 4 weekly and 6 monthly snapshots.
+- **`restore.sh`**: run as root, modes `list`, `app APP --into DB`, `secrets APP`, `host-files` and
+  `full --confirm-destroy`; steps and refusals are in [`RUNBOOK.md`](RUNBOOK.md).
+- **Units**: `platform-backup.service` (oneshot) and the timer source `platform-backup-timer.timer`, installed as
+  `platform-backup.timer`, firing at 03:35 inside the window. `window.env` holds the window.
+- **Installer**: `../host/install-backup.sh` (`make host-backup`), which embeds all of the above.
+- **Tests**: `test_backup.sh` and `test_restore.sh` (offline, stubs for `restic`, `docker` and `curl`) and
+  `test_backup_live.sh` (with `test_backup_live_skip.sh`), the live restic and R2 round trip, which skips without
+  its credentials.
 
 ## Credentials: `/etc/platform/backup.env`
 
