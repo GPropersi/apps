@@ -70,6 +70,7 @@ case "$1" in
   forget) key=restic-forget ;;
   check) key=restic-check ;;
   unlock) key=restic-unlock ;;
+  snapshots) if [ -f "$CASE_DIR/backup_ran" ]; then key=restic-snapshots-after; else key=restic-snapshots-before; fi ;;
   *) key=other ;;
 esac
 if [ -f "$CASE_DIR/fail_$key" ]; then
@@ -81,6 +82,7 @@ case "$1" in
   backup)
     find "$PLATFORM_BACKUP_ROOT/staging" -type f 2> /dev/null | sed "s#^$PLATFORM_BACKUP_ROOT/staging/##" | sort > "$CASE_DIR/staging-at-backup"
     stat -c %a "$PLATFORM_BACKUP_ROOT" "$PLATFORM_BACKUP_ROOT/staging" > "$CASE_DIR/staging-mode" 2> /dev/null
+    : > "$CASE_DIR/backup_ran"
     if [ -f "$CASE_DIR/adv_after_backup" ]; then cp "$CASE_DIR/adv_after_backup" "$CLK"; fi
     if [ ! -f "$CASE_DIR/no_summary" ]; then
       echo '{"message_type":"status","percent_done":0.5}'
@@ -88,6 +90,17 @@ case "$1" in
       echo '{"message_type":"status","percent_done":1}'
     fi
     if [ -f "$CASE_DIR/backup_rc3" ]; then exit 3; fi
+    ;;
+  snapshots)
+    # two older snapshots before the backup; the new one (abcdef0123456789) joins them afterwards. A case may replace either
+    # listing with the file snaps_before / snaps_after.
+    if [ -f "$CASE_DIR/backup_ran" ]; then f="$CASE_DIR/snaps_after"; else f="$CASE_DIR/snaps_before"; fi
+    if [ -f "$f" ]; then cat "$f"
+    elif [ -f "$CASE_DIR/backup_ran" ]; then
+      echo '[{"id":"1111111111111111","short_id":"11111111"},{"id":"2222222222222222","short_id":"22222222"},{"id":"abcdef0123456789","short_id":"abcdef01"}]'
+    else
+      echo '[{"id":"1111111111111111","short_id":"11111111"},{"id":"2222222222222222","short_id":"22222222"}]'
+    fi
     ;;
   forget)
     if [ -f "$CASE_DIR/forget_slow" ]; then sleep 5; fi
@@ -635,6 +648,38 @@ expect_out_has "a marker other than 1 does not enable the overrides" "ROOT=/var/
 new_case
 run_case 'load_overrides; echo "ROOT=$BACKUP_ROOT"'
 expect_out_has "positive control: with the marker the overrides apply" "ROOT=$C/root"
+
+# forget --prune guard: it runs only when the new snapshot is listed and the count grew
+new_case
+run_real 'main nightly'
+expect_rc "forget guard: positive control, the run succeeds" 0
+expect_calls_has "forget guard: the snapshots are listed before the backup" "restic snapshots --json --host platform --tag platform"
+expect_calls_has "forget guard: forget runs when the new snapshot is listed" "restic forget --prune"
+expect_out_has "forget guard: the pass is logged" "forget guard: new snapshot abcdef0123456789 is listed (listed=3 before=2)"
+new_case
+printf '[{"id":"1111111111111111","short_id":"11111111"},{"id":"2222222222222222","short_id":"22222222"}]\n' > "$C/snaps_after"
+run_real 'main nightly'
+expect_rc "forget guard: the new snapshot is missing from the listing, the run fails" 1
+expect_calls_lacks "forget guard: forget --prune is skipped when the new snapshot is missing" "restic forget"
+expect_out_has "forget guard: the reason is logged" "forget skipped: the snapshot just created (abcdef0123456789) is not in the repository listing"
+expect_eq "forget guard: failed_phase is restic-forget" "$(state 5)" "restic-forget"
+new_case
+printf '[{"id":"2222222222222222","short_id":"22222222"},{"id":"abcdef0123456789","short_id":"abcdef01"}]\n' > "$C/snaps_after"
+run_real 'main nightly'
+expect_rc "forget guard: fewer snapshots than expected, the run fails" 1
+expect_calls_lacks "forget guard: forget --prune is skipped when the count shrank" "restic forget"
+expect_out_has "forget guard: the count reason is logged" "forget skipped: 2 snapshots listed, expected at least 3 (before the backup: 2)"
+new_case
+printf '1' > "$C/fail_restic-snapshots-after"
+run_real 'main nightly'
+expect_rc "forget guard: an unlistable repository fails the run" 1
+expect_calls_lacks "forget guard: forget --prune is skipped when the listing fails" "restic forget"
+new_case
+printf '1' > "$C/fail_restic-snapshots-before"
+run_real 'main nightly'
+expect_rc "forget guard: an unknown prior count still lets a verified new snapshot through" 0
+expect_out_has "forget guard: the unknown prior count is logged" "cannot count the snapshots before the backup"
+expect_calls_has "forget guard: forget runs with an unknown prior count" "restic forget --prune"
 
 # prepare_staging refuses to rm -rf a non-production root without the sentinel
 new_case

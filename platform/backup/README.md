@@ -12,7 +12,8 @@ What is here:
   Docker volumes nothing backs up).
 - **Snapshots**: one restic snapshot per run, host `platform`, tags `platform` and the run mode (`nightly` or
   `manual`), holding the Postgres dumps and globals, the Redis files, the secrets root and the two admin password
-  files. Retention: `forget --prune` keeps 7 daily, 4 weekly and 6 monthly snapshots.
+  files. Retention: `forget --prune` keeps 7 daily, 4 weekly and 6 monthly snapshots; it is skipped (and the run
+  fails, naming the reason) unless the repository lists the snapshot just created and at least one more than before.
 - **`restore.sh`**: run as root, modes `list`, `app APP --into DB`, `secrets APP`, `host-files` and
   `full --confirm-destroy`; steps and refusals are in [`RUNBOOK.md`](RUNBOOK.md).
 - **Units**: `platform-backup.service` (oneshot) and the timer source `platform-backup-timer.timer`, installed as

@@ -286,6 +286,7 @@ FAIL_PHASE=""
 FAIL_MSG=""
 FAIL_DETAIL=""
 SNAPSHOT_ID=""
+PRE_SNAP_COUNT=""
 NOTIFY_ENABLED=0
 WARNINGS=()
 WINDOW_OK=0
@@ -914,7 +915,14 @@ phase_redis() {
 }
 
 phase_restic_backup() {
-  local rc=0 line sid="" sum_re='"message_type":"summary"' id_re='"snapshot_id":"([0-9a-f]{8,64})"'
+  local rc=0 line sid="" sum_re='"message_type":"summary"' id_re='"snapshot_id":"([0-9a-f]{8,64})"' pre="$WORK/snapshots-before"
+  # The snapshot count before this backup is the reference the forget guard compares against (unknown on a failed listing).
+  PRE_SNAP_COUNT=""
+  if timed_io restic-snapshots-pre 120 - "$pre" restic snapshots --json --host platform --tag platform; then
+    PRE_SNAP_COUNT="$(count_snapshots "$(< "$pre")")"
+  else
+    log "WARN: cannot count the snapshots before the backup; the forget guard checks only that the new snapshot is listed"
+  fi
   restic_timed restic-backup 3600 backup --json --host platform --tag platform --tag "$RUN_MODE" \
     --exclude '.*.lock' --exclude '.tmp.*' "$STAGING" "$SECRETS_ROOT" "$PG_ADMIN_FILE" "$REDIS_ADMIN_FILE" || rc=$?
   if [ "$rc" -ne 0 ] && [ "$rc" -ne 3 ]; then return "$rc"; fi
@@ -935,7 +943,40 @@ phase_restic_backup() {
   return 0
 }
 
+# count_snapshots <restic snapshots --json body>: the number of snapshots listed (one "short_id" key each).
+count_snapshots() {
+  local s="$1" n=0 key='"short_id":"'
+  while [[ "$s" == *"$key"* ]]; do
+    n=$((n + 1))
+    s="${s#*"$key"}"
+  done
+  printf '%s' "$n"
+}
+
+# phase_restic_forget: `forget --prune` deletes history, so it runs only when the repository provably holds the snapshot
+# this run just created and at least one more snapshot than before the backup (guards a bad clock, a tag/host mismatch or
+# a truncated listing from aging out everything). Otherwise it is skipped, the reason is logged and the run fails.
 phase_restic_forget() {
+  local f="$WORK/snapshots-after" rc=0 body n
+  timed_io restic-snapshots 120 - "$f" restic snapshots --json --host platform --tag platform || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    PHASE_MSG="forget skipped: cannot list the snapshots to verify the new one"
+    log "WARN: $PHASE_MSG (rc=$rc)"
+    return "$rc"
+  fi
+  body="$(< "$f")"
+  n="$(count_snapshots "$body")"
+  if [ -z "$SNAPSHOT_ID" ] || { [[ "$body" != *"\"id\":\"$SNAPSHOT_ID"* ]] && [[ "$body" != *"\"short_id\":\"$SNAPSHOT_ID\""* ]]; }; then
+    PHASE_MSG="forget skipped: the snapshot just created (${SNAPSHOT_ID:-none}) is not in the repository listing"
+    log "WARN: $PHASE_MSG (listed=$n)"
+    return 1
+  fi
+  if [ -n "$PRE_SNAP_COUNT" ] && [ "$n" -lt "$((PRE_SNAP_COUNT + 1))" ]; then
+    PHASE_MSG="forget skipped: $n snapshots listed, expected at least $((PRE_SNAP_COUNT + 1)) (before the backup: $PRE_SNAP_COUNT)"
+    log "WARN: $PHASE_MSG"
+    return 1
+  fi
+  log "forget guard: new snapshot $SNAPSHOT_ID is listed (listed=$n before=${PRE_SNAP_COUNT:-unknown})"
   restic_timed restic-forget 1800 forget --prune --host platform --tag platform --group-by host \
     --keep-daily 7 --keep-weekly 4 --keep-monthly 6
 }
