@@ -1161,4 +1161,36 @@ run_real 'main nightly'
 expect_rc "a failing volume listing is only a warning" 0
 expect_text_has "volume listing failure is warned" "$(payload)" "volume inventory failed"
 
+# ---------------------------------------------------------------------------------------------------------------
+# 15. Drift between the backup defaults and the data stack (compose.yaml, install-data.sh): a rename on either side must
+# fail here, not on the first night the backup cannot find its container or file.
+COMPOSE="$here/../data/compose.yaml"
+INSTALL_DATA="$here/../host/install-data.sh"
+RESTORE_SCRIPT="$here/restore.sh"
+compose_names="$(sed -n 's/^    container_name: //p' "$COMPOSE" | tr '\n' ' ')"
+default_of() { sed -n "s/^  ov_name $2 PLATFORM_BACKUP_[A-Z_]* \(.*\)\$/\1/p" "$1"; }
+default_path_of() { sed -n "s/^  ov_path $2 PLATFORM_BACKUP_[A-Z_]* \(.*\)\$/\1/p" "$1"; }
+for script in "$SCRIPT" "$RESTORE_SCRIPT"; do
+  b="$(basename "$script")"
+  pgc="$(default_of "$script" PG_CONTAINER)"
+  rdc="$(default_of "$script" REDIS_CONTAINER)"
+  if [ -n "$pgc" ]; then _pass; else _fail "$b: the Postgres container default was read (drift check positive control)"; fi
+  if [ -n "$rdc" ]; then _pass; else _fail "$b: the Redis container default was read (drift check positive control)"; fi
+  expect_text_has "$b: the Postgres container default is a container_name in compose.yaml" "$compose_names" "$pgc "
+  expect_text_has "$b: the Redis container default is a container_name in compose.yaml" "$compose_names" "$rdc "
+  for pair in "PG_ADMIN_FILE /etc/platform/postgres-admin.password" "REDIS_ADMIN_FILE /etc/platform/redis-admin.password"; do
+    var="${pair%% *}"
+    want="${pair#* }"
+    expect_eq "$b: $var default is the admin file compose.yaml mounts" "$(default_path_of "$script" "$var")" "$want"
+    if grep -qF -- "- $want:$want:ro" "$COMPOSE"; then _pass; else _fail "compose.yaml mounts $want at the same path (drift check positive control)"; fi
+  done
+  expect_eq "$b: the secrets root default is install-data's" "$(default_path_of "$script" SECRETS_ROOT)" "/var/lib/platform/secrets"
+done
+expect_eq "backup.sh and restore.sh agree on the in-container Redis admin file" "$(grep -m1 '^REDIS_CTR_ADMIN_FILE=' "$SCRIPT")" "$(grep -m1 '^REDIS_CTR_ADMIN_FILE=' "$RESTORE_SCRIPT")"
+expect_eq "the in-container Redis admin file is the path compose.yaml mounts" "$(sed -n 's/^REDIS_CTR_ADMIN_FILE=//p' "$SCRIPT")" "/etc/platform/redis-admin.password"
+if grep -qF -- 'VAR_DIR="${INSTALL_DATA_VAR_DIR:-$ROOT/var/lib/platform}"' "$INSTALL_DATA" && grep -qF -- 'SECRETS_DIR="${INSTALL_DATA_SECRETS_ROOT:-$VAR_DIR/secrets}"' "$INSTALL_DATA"; then _pass; else _fail "install-data.sh creates the secrets root at /var/lib/platform/secrets"; fi
+for pair in "PG:platform-data-postgres" "REDIS:platform-data-redis"; do
+  if grep -qF -- "${pair%%:*}=\"\${INSTALL_DATA_${pair%%:*}_CONTAINER:-${pair#*:}}\"" "$INSTALL_DATA"; then _pass; else _fail "install-data.sh's ${pair%%:*} container default is ${pair#*:}"; fi
+done
+
 t_finish
