@@ -415,7 +415,7 @@ payload_new_db() {
 #   1. Validates the name (APP_RE, the installed reserved-names list, the Postgres identifier rule) before any docker
 #      call or file write. A missing or unreadable list fails closed.
 #   2. Takes the per-app lock <lock dir>/<app>.lock (flock, bounded wait); the lock dir is root-owned and sticky
-#      (made by install-data.sh), shared with restore.sh, which takes the same lock as root.
+#      (made by install-data.sh), shared with the restore script, which takes the same lock as root.
 #   3. Checks both containers are healthy.
 #   4. Read-only preflight: classifies the Postgres role/database and the Redis user against their two secret files. An
 #      object present with its secret file absent exits 1 before anything is written (no silent password reset).

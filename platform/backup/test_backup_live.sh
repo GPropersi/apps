@@ -148,7 +148,7 @@ verify() {
 # The shared PLATFORM_BACKUP_* overrides: the same list for backup.sh and restore.sh (a restore resolves its in-snapshot
 # paths from the values the backup ran with).
 shared_ov() {
-  printf '%s\0' "PLATFORM_BACKUP_TESTING=1" "PLATFORM_BACKUP_LOCK_DIR=$locks" "PLATFORM_BACKUP_ENV_FILE=$envf""PLATFORM_BACKUP_ENV_OWNER=$test_uid:$test_gid" "PLATFORM_BACKUP_ROOT=$broot" \
+  printf '%s\0' "PLATFORM_BACKUP_TESTING=1" "PLATFORM_BACKUP_LOCK_DIR=$locks" "PLATFORM_BACKUP_ENV_FILE=$envf" "PLATFORM_BACKUP_ENV_OWNER=$test_uid:$test_gid" "PLATFORM_BACKUP_ROOT=$broot" \
     "PLATFORM_BACKUP_STATE_DIR=$bstate" "PLATFORM_BACKUP_LOG_DIR=$blog" "PLATFORM_BACKUP_LOCK=$block" \
     "PLATFORM_BACKUP_SECRETS_ROOT=$secrets" "PLATFORM_BACKUP_PG_ADMIN_FILE=$pg_admin_file" \
     "PLATFORM_BACKUP_REDIS_ADMIN_FILE=$redis_admin_file" "PLATFORM_BACKUP_PG_CONTAINER=$PGC" "PLATFORM_BACKUP_REDIS_CONTAINER=$RDC"
@@ -186,6 +186,7 @@ chmod +x "$STUB_BIN/getent"
 
 {
   printf '#!/usr/bin/env bash\n'
+  printf 'if [ "${1:-}" = -h ]; then shift; fi\n'
   printf 'printf "%%s\\n" "$*" >> %q\n' "$chown_log"
   printf 'exit 0\n'
 } > "$STUB_BIN/chown-stub"
