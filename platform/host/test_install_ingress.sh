@@ -578,7 +578,7 @@ expect_out_has "a starting container is named" "$SP is starting"
 gid_mismatch() { # script path: prints MISMATCH lines when the two numbers differ
   local file="$1" const compose_gid
   const="$(sed -n 's/^readonly TOKEN_GID=\([0-9][0-9]*\)$/\1/p' "$file")"
-  compose_gid="$(awk '/^payload_compose\(\)/ { on = 1 } on && /^  cloudflared:/ { cf = 1 } on && cf && /group_add:/ { ga = 1; next } on && cf && ga && /^ *- "[0-9]+"$/ { gsub(/[^0-9]/, ""); print; exit }' "$file")"
+  compose_gid="$(awk '/^payload_compose_yaml\(\)/ { on = 1 } on && /^  cloudflared:/ { cf = 1 } on && cf && /group_add:/ { ga = 1; next } on && cf && ga && /^ *- "[0-9]+"$/ { gsub(/[^0-9]/, ""); print; exit }' "$file")"
   if [ -z "$const" ] || [ -z "$compose_gid" ]; then echo "MISMATCH: cannot read the gid constant ($const) or the compose group_add ($compose_gid)"; return 0; fi
   [ "$const" = "$compose_gid" ] || echo "MISMATCH: TOKEN_GID=$const but compose group_add=$compose_gid"
 }

@@ -16,8 +16,7 @@ What is here:
   fails, naming the reason) unless the repository lists the snapshot just created and at least one more than before.
 - **`restore.sh`**: run as root, modes `list`, `app APP --into DB`, `secrets APP`, `host-files` and
   `full --confirm-destroy`; steps and refusals are in [`RUNBOOK.md`](RUNBOOK.md).
-- **Units**: `platform-backup.service` (oneshot) and the timer source `platform-backup-timer.timer`, installed as
-  `platform-backup.timer`, firing at 03:35 inside the window. `window.env` holds the window.
+- **Units**: `platform-backup.service` (oneshot) and `platform-backup.timer`, firing at 03:35 inside the window. `window.env` holds the window.
 - **Installer**: `../host/install-backup.sh` (`make host-backup`), which embeds all of the above.
 - **Tests**: `test_backup.sh` and `test_restore.sh` (offline, stubs for `restic`, `docker` and `curl`) and
   `test_backup_live.sh` (with `test_backup_live_skip.sh`), the live restic and R2 round trip, which skips without

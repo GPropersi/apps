@@ -450,7 +450,7 @@ for pair in "backup.sh:backup.sh" "restore.sh:restore.sh" "window.env:window.env
   if cmp -s "$(OPT)/${pair%%:*}" "$src/${pair##*:}"; then _pass; else _fail "installed ${pair%%:*} equals the tracked source"; fi
 done
 if cmp -s "$(UNITS)/platform-backup.service" "$src/platform-backup.service"; then _pass; else _fail "installed service unit equals the tracked source"; fi
-if cmp -s "$(UNITS)/platform-backup.timer" "$src/platform-backup-timer.timer"; then _pass; else _fail "installed timer equals platform-backup-timer.timer"; fi
+if cmp -s "$(UNITS)/platform-backup.timer" "$src/platform-backup.timer"; then _pass; else _fail "installed timer equals platform-backup.timer"; fi
 expect_calls_has "daemon-reload ran" "systemctl daemon-reload"
 expect_calls_has "the timer was enabled" "systemctl enable --now platform-backup.timer"
 expect_calls_lacks "the service is never started" "systemctl start"
@@ -673,7 +673,7 @@ if grep -qE '^readonly RESTIC_FILE="restic_0\.18\.1_linux_arm64\.bz2"$' "$script
 
 # the tracked service unit
 unit="$src/platform-backup.service"
-timer="$src/platform-backup-timer.timer"
+timer="$src/platform-backup.timer"
 for want in "Type=oneshot" "User=root" "Wants=network-online.target" "After=network-online.target time-sync.target docker.service" "Requires=docker.service" "TimeoutStartSec=4500" "MemoryHigh=384M" "MemoryMax=512M" "Nice=10" "IOSchedulingClass=idle" "ExecStart=/opt/platform/backup/backup.sh nightly"; do
   if grep -qxF "$want" "$unit"; then _pass; else _fail "the service unit contains $want"; fi
 done
@@ -751,7 +751,7 @@ if deadline_ok 4441; then _pass; else _fail "one second above the worst case pas
 if [ "$tmo" -gt "$dl" ]; then _pass; else _fail "TimeoutStartSec exceeds the default deadline"; fi
 
 # the make targets and docs are covered by test_make_targets.sh; here, only that the installer embeds all five payloads
-for p in platform/backup/backup.sh platform/backup/restore.sh platform/backup/window.env platform/backup/platform-backup.service platform/backup/platform-backup-timer.timer; do
+for p in platform/backup/backup.sh platform/backup/restore.sh platform/backup/window.env platform/backup/platform-backup.service platform/backup/platform-backup.timer; do
   if grep -qxF "# BEGIN-PAYLOAD $p" "$script"; then _pass; else _fail "install-backup.sh embeds $p"; fi
 done
 

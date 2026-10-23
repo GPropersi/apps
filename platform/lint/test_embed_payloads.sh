@@ -63,7 +63,7 @@ expect_rc "check passes after regenerate" 0
 expect_out_has "check reports OK with installer and region counts" "embed-payloads: OK (2 installer(s), 3 payload(s))"
 
 # --- the embedded bytes are exactly the sources, surrounding text is preserved ---
-sed -n '/^payload_one() {/,/^}/p' "$R/platform/host/install-alpha.sh" | sed '1,2d' | sed '$d' | sed '$d' > "$T_TMP/extracted"
+sed -n '/^payload_one_sh() {/,/^}/p' "$R/platform/host/install-alpha.sh" | sed '1,2d' | sed '$d' | sed '$d' > "$T_TMP/extracted"
 if cmp -s "$T_TMP/extracted" "$R/platform/host/one.sh"; then _pass; else _fail "embedded payload one equals its source byte for byte"; fi
 expect_eq "text before the first region is kept" "$(sed -n '1,2p' "$R/platform/host/install-alpha.sh")" "$(printf '#!/usr/bin/env bash\necho before')"
 expect_eq "text between regions is kept" "$(grep -c '^echo middle$' "$R/platform/host/install-alpha.sh")" "1"
@@ -178,7 +178,7 @@ expect_out_has "outside-marker message names the file" "installer-gamma.sh"
 new_root; c_src_end_marker; chk
 expect_out_has "marker-in-source message" "payload marker"
 new_root; c_dup_name; chk
-expect_out_has "duplicate function message" "payload_one"
+expect_out_has "duplicate function message" "payload_one_sh"
 
 # no installer at all is an error, not a pass
 new_root
@@ -221,7 +221,7 @@ if [[ "$out" =~ ([0-9]+)\ payload\(s\) ]] && [ "${BASH_REMATCH[1]}" -ge 2 ]; the
   # the backup installer's payload sources (explicit list: a new payload source must be added here)
   mkdir -p "$real/platform/backup"
   cp "$repo_root/platform/backup/backup.sh" "$repo_root/platform/backup/restore.sh" "$repo_root/platform/backup/window.env" "$real/platform/backup/"
-  cp "$repo_root/platform/backup/platform-backup.service" "$repo_root/platform/backup/platform-backup-timer.timer" "$real/platform/backup/"
+  cp "$repo_root/platform/backup/platform-backup.service" "$repo_root/platform/backup/platform-backup.timer" "$real/platform/backup/"
   echo '# drift' >> "$real/platform/host/platform.sh"
   run_cmd "$tool" --check --root "$real"
   expect_rc "a drifted dispatcher source fails the check" 1
