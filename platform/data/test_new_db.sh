@@ -24,6 +24,7 @@ REAL_CHMOD="$(command -v chmod)"
 t_init
 STATE="$T_TMP/state"
 SECRETS="$T_TMP/secrets"
+LOCKS="$T_TMP/locks"
 RESERVED="$T_TMP/reserved-names.txt"
 LOGGER_LOG="$T_TMP/logger.log"
 export STATE LOGGER_LOG
@@ -160,14 +161,16 @@ EOF
 # ---- harness ----
 
 fresh() {
-  rm -rf "$STATE" "$SECRETS" "$RESERVED"
-  mkdir -p "$STATE" "$SECRETS"
+  rm -rf "$STATE" "$SECRETS" "$LOCKS" "$RESERVED"
+  mkdir -p "$STATE" "$SECRETS" "$LOCKS"
   "$REAL_CHMOD" 2710 "$SECRETS"
+  "$REAL_CHMOD" 1777 "$LOCKS"
   cp "$RESERVED_SRC" "$RESERVED"
   : > "$STATE/stdin.log"
   : > "$LOGGER_LOG"
   t_reset_calls
   export NEW_DB_SECRETS_ROOT="$SECRETS"
+  export NEW_DB_LOCK_DIR="$LOCKS"
   export NEW_DB_RESERVED_NAMES="$RESERVED"
   export NEW_DB_PG_CONTAINER="$PGC"
   export NEW_DB_REDIS_CONTAINER="$RDC"
@@ -332,7 +335,7 @@ expect_eq "no temp file is left in the app directory" "$(count_named "$SECRETS/m
 expect_calls_lacks "no chgrp is ever issued" "chgrp"
 expect_calls_lacks "no chown is ever issued" "chown"
 expect_calls_lacks "no chmod is ever issued by new-db" "chmod"
-expect_eq "the lock file is writable by its owner" "$(/usr/bin/stat -c '%a' "$SECRETS/.myapp.lock")" "600"
+expect_eq "the lock file is writable by its owner" "$(/usr/bin/stat -c '%a' "$LOCKS/myapp.lock")" "600"
 log="$(cat "$STATE/stdin.log")"
 for want in \
   'CREATE ROLE "myapp" LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS CONNECTION LIMIT 3 PASSWORD' \
@@ -700,12 +703,12 @@ expect_eq "no temp file after concurrent calls" "$(find "$SECRETS" -name '.tmp*'
 
 # a lock held by another process: a shortened wait exits 1 naming the lock phase, nothing is written
 fresh
-: > "$SECRETS/.myapp.lock"
-"$REAL_CHMOD" 600 "$SECRETS/.myapp.lock"
-( exec 9>>"$SECRETS/.myapp.lock"; flock 9; exec sleep 20 ) &
+: > "$LOCKS/myapp.lock"
+"$REAL_CHMOD" 600 "$LOCKS/myapp.lock"
+( exec 9>>"$LOCKS/myapp.lock"; flock 9; exec sleep 20 ) &
 holder=$!
 # wait until the holder really holds the lock (bounded), instead of a fixed sleep
-for _ in $(seq 1 100); do flock -n "$SECRETS"/.[mo]*.lock true || break; sleep 0.1; done
+for _ in $(seq 1 100); do flock -n "$LOCKS"/[mo]*.lock true || break; sleep 0.1; done
 NEW_DB_LOCK_WAIT=1 nd myapp
 expect_rc "a held lock times out" 1
 expect_out_has "the lock phase is named" "phase 'lock' failed"
@@ -719,11 +722,11 @@ expect_rc "after the holder exits the lock is free" 0
 
 # a different app is not blocked by another app's lock
 fresh
-: > "$SECRETS/.other.lock"
-( exec 9>>"$SECRETS/.other.lock"; flock 9; exec sleep 20 ) &
+: > "$LOCKS/other.lock"
+( exec 9>>"$LOCKS/other.lock"; flock 9; exec sleep 20 ) &
 holder=$!
 # wait until the holder really holds the lock (bounded), instead of a fixed sleep
-for _ in $(seq 1 100); do flock -n "$SECRETS"/.[mo]*.lock true || break; sleep 0.1; done
+for _ in $(seq 1 100); do flock -n "$LOCKS"/[mo]*.lock true || break; sleep 0.1; done
 NEW_DB_LOCK_WAIT=1 nd myapp
 expect_rc "another app's lock does not block this app" 0
 kill "$holder" 2>/dev/null
@@ -731,9 +734,20 @@ wait "$holder" 2>/dev/null || true
 
 # a symlinked lock path is refused
 fresh
-ln -s "$T_TMP/lockelsewhere" "$SECRETS/.myapp.lock"
+ln -s "$T_TMP/lockelsewhere" "$LOCKS/myapp.lock"
 nd myapp
 expect_rc "a symlinked lock path is refused" 1
 if [ -e "$T_TMP/lockelsewhere" ]; then _fail "nothing is created through a symlinked lock"; else _pass; fi
+
+# the lock lives in the lock dir, never in the deploy-owned secrets root; a missing lock dir is refused
+fresh
+nd myapp
+expect_rc "a normal run succeeds (positive control for the lock location)" 0
+if compgen -G "$SECRETS/.*.lock" > /dev/null; then _fail "no lock file is created in the secrets root"; else _pass; fi
+fresh
+rm -rf "$LOCKS"
+nd myapp
+expect_rc "a missing lock directory is refused" 1
+expect_out_has "the refusal names the lock directory" "lock directory"
 
 t_finish

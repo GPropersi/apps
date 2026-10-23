@@ -66,6 +66,7 @@ RDC="$rid-redis"
 gen="$T_TMP/compose.live.yaml"
 payload="$T_TMP/payload"
 secrets="$T_TMP/secrets"
+locks="$T_TMP/locks"
 pg_admin_file="$T_TMP/postgres-admin.password"
 redis_admin_file="$T_TMP/redis-admin.password"
 broot="$T_TMP/backup-root"
@@ -134,12 +135,12 @@ pg_as() {
 
 newdb() {
   NEW_DB_PG_CONTAINER="$PGC" NEW_DB_REDIS_CONTAINER="$RDC" NEW_DB_RESERVED_NAMES="$here/../registry/reserved-names.txt" \
-    NEW_DB_SECRETS_ROOT="$secrets" NEW_DB_LOCK_WAIT=10 NEW_DB_EXEC_TIMEOUT=60 bash "$here/../data/new-db.sh" "$1" 2>&1
+    NEW_DB_SECRETS_ROOT="$secrets" NEW_DB_LOCK_DIR="$locks" NEW_DB_LOCK_WAIT=10 NEW_DB_EXEC_TIMEOUT=60 bash "$here/../data/new-db.sh" "$1" 2>&1
 }
 
 verify() {
   env INSTALL_DATA_SUDO= INSTALL_DATA_PG_CONTAINER="$PGC" INSTALL_DATA_REDIS_CONTAINER="$RDC" INSTALL_DATA_NETWORK="$net" \
-    INSTALL_DATA_DIR="$payload" INSTALL_DATA_VAR_DIR="$T_TMP/var" INSTALL_DATA_SECRETS_ROOT="$secrets" \
+    INSTALL_DATA_DIR="$payload" INSTALL_DATA_VAR_DIR="$T_TMP/var" INSTALL_DATA_SECRETS_ROOT="$secrets" INSTALL_DATA_LOCK_DIR="$locks" \
     INSTALL_DATA_PG_ADMIN_FILE="$pg_admin_file" INSTALL_DATA_REDIS_ADMIN_FILE="$redis_admin_file" \
     bash "$here/../host/install-data.sh" verify 2>&1
 }
@@ -147,7 +148,7 @@ verify() {
 # The shared PLATFORM_BACKUP_* overrides: the same list for backup.sh and restore.sh (a restore resolves its in-snapshot
 # paths from the values the backup ran with).
 shared_ov() {
-  printf '%s\0' "PLATFORM_BACKUP_ENV_FILE=$envf" "PLATFORM_BACKUP_ENV_OWNER=$test_uid:$test_gid" "PLATFORM_BACKUP_ROOT=$broot" \
+  printf '%s\0' "PLATFORM_BACKUP_TESTING=1" "PLATFORM_BACKUP_LOCK_DIR=$locks" "PLATFORM_BACKUP_ENV_FILE=$envf""PLATFORM_BACKUP_ENV_OWNER=$test_uid:$test_gid" "PLATFORM_BACKUP_ROOT=$broot" \
     "PLATFORM_BACKUP_STATE_DIR=$bstate" "PLATFORM_BACKUP_LOG_DIR=$blog" "PLATFORM_BACKUP_LOCK=$block" \
     "PLATFORM_BACKUP_SECRETS_ROOT=$secrets" "PLATFORM_BACKUP_PG_ADMIN_FILE=$pg_admin_file" \
     "PLATFORM_BACKUP_REDIS_ADMIN_FILE=$redis_admin_file" "PLATFORM_BACKUP_PG_CONTAINER=$PGC" "PLATFORM_BACKUP_REDIS_CONTAINER=$RDC"
@@ -243,8 +244,11 @@ done
 
 # ---- generate the isolated compose file (same mapping as test_data_live.sh) ----
 
-mkdir -p "$payload" "$secrets" "$T_TMP/var"
+mkdir -p "$payload" "$secrets" "$locks" "$T_TMP/var"
 chmod 2710 "$secrets"
+chmod 1777 "$locks"
+mkdir -p "$broot"
+: > "$broot/.platform-backup-root"
 cp "$here/../data/pg_hba.conf" "$payload/pg_hba.conf"
 cp "$here/../data/redis-entrypoint.sh" "$payload/redis-entrypoint.sh"
 chmod 0644 "$payload/pg_hba.conf"
@@ -339,11 +343,11 @@ expect_eq "B seeds a Redis string" "$(redis_as "$app_b" "$rpb" set "$app_b:k1" v
 # ---- 2. the same invocations without the overrides are refused (exit 2) ----
 
 rc=0
-env -i PATH="$PATH" HOME="$HOME" PLATFORM_BACKUP_ENV_FILE="$envf" PLATFORM_BACKUP_ROOT="$broot" PLATFORM_BACKUP_STATE_DIR="$bstate" \
+env -i PATH="$PATH" HOME="$HOME" PLATFORM_BACKUP_TESTING=1 PLATFORM_BACKUP_ENV_FILE="$envf" PLATFORM_BACKUP_ROOT="$broot" PLATFORM_BACKUP_STATE_DIR="$bstate" \
   PLATFORM_BACKUP_LOG_DIR="$blog" PLATFORM_BACKUP_LOCK="$block" timeout 60 bash "$here/backup.sh" manual > "$T_TMP/refuse-backup.txt" 2>&1 || rc=$?
 expect_eq "backup.sh without PLATFORM_BACKUP_ENV_OWNER exits 2 (non-root-owned env file refused)" "$rc" 2
 rc=0
-env -i PATH="$PATH" HOME="$HOME" PLATFORM_BACKUP_ENV_FILE="$envf" PLATFORM_BACKUP_ENV_OWNER="$test_uid:$test_gid" PLATFORM_BACKUP_ROOT="$broot" \
+env -i PATH="$PATH" HOME="$HOME" PLATFORM_BACKUP_TESTING=1 PLATFORM_BACKUP_ENV_FILE="$envf" PLATFORM_BACKUP_ENV_OWNER="$test_uid:$test_gid" PLATFORM_BACKUP_ROOT="$broot" \
   PLATFORM_BACKUP_LOG_DIR="$blog" timeout 60 bash "$here/restore.sh" list > "$T_TMP/refuse-restore.txt" 2>&1 || rc=$?
 expect_eq "restore.sh without PLATFORM_RESTORE_ALLOW_NONROOT exits 2 (must run as root)" "$rc" 2
 

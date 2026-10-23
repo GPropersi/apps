@@ -22,7 +22,8 @@
 # Shared overrides (the same names and meaning as backup.sh, all optional, each read once at startup, default = the
 # production value, an unparsable value exits 2). A restore needs the same values the backup ran with:
 #   PLATFORM_BACKUP_ENV_FILE PLATFORM_BACKUP_ENV_OWNER PLATFORM_BACKUP_ROOT
-#   PLATFORM_BACKUP_LOG_DIR PLATFORM_BACKUP_LOCK PLATFORM_BACKUP_SECRETS_ROOT PLATFORM_BACKUP_PG_ADMIN_FILE
+#   PLATFORM_BACKUP_LOG_DIR PLATFORM_BACKUP_LOCK PLATFORM_BACKUP_SECRETS_ROOT PLATFORM_BACKUP_LOCK_DIR
+#   PLATFORM_BACKUP_PG_ADMIN_FILE
 #   PLATFORM_BACKUP_REDIS_ADMIN_FILE PLATFORM_BACKUP_PG_CONTAINER PLATFORM_BACKUP_REDIS_CONTAINER
 # (PLATFORM_BACKUP_DEADLINE_SECS is not read here.) Restore-only test overrides:
 #   PLATFORM_RESTORE_ALLOW_NONROOT   unset: require EUID 0. Only the value 1 bypasses that check (it does not relax the
@@ -157,6 +158,7 @@ load_overrides() {
   ov_path LOG_DIR PLATFORM_BACKUP_LOG_DIR /var/log/platform-backup
   ov_path LOCK_FILE PLATFORM_BACKUP_LOCK /run/platform-backup.lock
   ov_path SECRETS_ROOT PLATFORM_BACKUP_SECRETS_ROOT /var/lib/platform/secrets
+  ov_path LOCK_DIR PLATFORM_BACKUP_LOCK_DIR /var/lib/platform/locks
   ov_path PG_ADMIN_FILE PLATFORM_BACKUP_PG_ADMIN_FILE /etc/platform/postgres-admin.password
   ov_path REDIS_ADMIN_FILE PLATFORM_BACKUP_REDIS_ADMIN_FILE /etc/platform/redis-admin.password
   ov_name PG_CONTAINER PLATFORM_BACKUP_PG_CONTAINER platform-data-postgres
@@ -535,43 +537,44 @@ check_secrets_src() {
   if [ -n "$(find "$src" ! -type f ! -type d -print -quit)" ]; then fail "secrets:$app" "the restored tree holds a symlink or special file" 2; fi
 }
 
-# place_secrets <app>: moves the restored <secrets root>/<app> tree into place, then sets the owner to the CURRENT deploy
-# uid and gid 64323, modes 2750 (dir) / 0440 (file), and verifies each with stat. The secrets root itself is untouched.
+# place_secrets <app>: sets the owner of the restored <secrets root>/<app> tree to the CURRENT deploy uid and gid 64323,
+# modes 2750 (dir) / 0440 (file), and verifies each with stat, all INSIDE the root-only restore dir (0700, so the deploy
+# user cannot swap a symlink in under a path-based chown). The mv -T into the deploy-owned secrets root is the LAST step:
+# no root chown/chmod follows a path the deploy user can reach. The secrets root itself is untouched.
 place_secrets() {
   local app="$1" src dst uid p st want
   src="$RDIR$SECRETS_ROOT/$app"
   dst="$SECRETS_ROOT/$app"
   check_secrets_src "$app"
   uid="$(deploy_uid)"
-  # Re-checked right before the move (mv -T onto an empty directory would succeed silently).
-  if [ -e "$dst" ] || [ -L "$dst" ]; then refuse "$dst already exists; nothing more was changed"; fi
-  mv -T -- "$src" "$dst" || fail "secrets:$app" "cannot move the restored directory into $SECRETS_ROOT"
   while IFS= read -r -d '' p; do
-    "$CHOWN" "$uid:$SECRETS_GID" -- "$p" || fail "secrets:$app" "chown failed"
+    "$CHOWN" -h "$uid:$SECRETS_GID" -- "$p" || fail "secrets:$app" "chown failed"
     if [ -d "$p" ]; then chmod 2750 -- "$p" || fail "secrets:$app" "chmod failed"; else chmod 0440 -- "$p" || fail "secrets:$app" "chmod failed"; fi
-  done < <(find "$dst" -print0)
+  done < <(find "$src" -print0)
   while IFS= read -r -d '' p; do
     if [ -d "$p" ]; then want="$uid:$SECRETS_GID 2750"; else want="$uid:$SECRETS_GID 440"; fi
     st="$(stat -c '%u:%g %a' -- "$p")" || fail "secrets:$app" "cannot stat a restored path"
     if [ "$st" != "$want" ]; then fail "secrets:$app" "a restored path has owner/mode '$st', want '$want'"; fi
-  done < <(find "$dst" -print0)
+  done < <(find "$src" -print0)
+  # Re-checked right before the move (mv -T onto an empty directory would succeed silently).
+  if [ -e "$dst" ] || [ -L "$dst" ]; then refuse "$dst already exists; nothing more was changed"; fi
+  mv -T -- "$src" "$dst" || fail "secrets:$app" "cannot move the restored directory into $SECRETS_ROOT"
   log "secrets: restored $dst owner=$uid:$SECRETS_GID"
 }
 
-# take_app_lock <app>: flock -n on <secrets root>/.<app>.lock, the lock new-db.sh uses. A lock file this script has to
-# create (or finds root-owned) is chowned to the current deploy uid (0600), so a root-owned lock never blocks new-db.
+# take_app_lock <app>: flock -n on <lock dir>/<app>.lock, the lock new-db.sh uses. The lock dir is root-owned (never the
+# deploy-owned secrets root), so root never creates, chowns or chmods a path the deploy user controls.
 take_app_lock() {
-  local app="$1" lock uid
-  [ -d "$SECRETS_ROOT" ] && [ ! -L "$SECRETS_ROOT" ] || refuse "the secrets root $SECRETS_ROOT is missing or not a directory"
-  lock="$SECRETS_ROOT/.$app.lock"
+  local app="$1" lock
+  [ -d "$LOCK_DIR" ] && [ ! -L "$LOCK_DIR" ] || refuse "the lock dir $LOCK_DIR is missing or not a directory (run install-data install first)"
+  lock="$LOCK_DIR/$app.lock"
   [ ! -L "$lock" ] || refuse "the lock path $lock is a symlink"
-  uid="$(deploy_uid)"
-  if [ ! -e "$lock" ]; then
-    (umask 077 && : >> "$lock") || fail "app-lock" "cannot create $lock"
-  fi
-  "$CHOWN" "$uid" -- "$lock" || fail "app-lock" "cannot chown $lock to the deploy uid"
-  chmod 0600 -- "$lock" || fail "app-lock" "cannot chmod $lock"
-  exec {APPLOCKFD}>> "$lock" || fail "app-lock" "cannot open $lock"
+  # The lock dir is sticky (the deploy user creates its own lock files there), so root never opens one with O_CREAT: a
+  # missing lock is created with noclobber (O_EXCL, which never follows a symlink; mode 0666 so the deploy user can still
+  # open it for append) and the lock is then taken on a READ-ONLY descriptor (flock needs no write access).
+  if [ ! -e "$lock" ]; then (umask 0111 && set -o noclobber && : > "$lock") 2> /dev/null || true; fi
+  [ -f "$lock" ] && [ ! -L "$lock" ] || refuse "the lock path $lock is not a regular file"
+  exec {APPLOCKFD}< "$lock" || fail "app-lock" "cannot open $lock"
   if ! flock -n "$APPLOCKFD"; then
     log "state app-lock-held app=$app"
     echo "restore: another operation holds the lock for '$app'" >&2

@@ -208,6 +208,7 @@ cat > "$STUB_BIN/chown" <<'EOF'
 printf 'chown' >> "$CALL_LOG"
 for a in "$@"; do printf ' %s' "$a" >> "$CALL_LOG"; done
 printf '\n' >> "$CALL_LOG"
+if [ "$1" = -h ]; then shift; fi
 owner="$1"
 shift
 if [ "$1" = -- ]; then shift; fi
@@ -259,14 +260,15 @@ new_case() {
   export C CASE_DIR="$C" LOADER
   R="$C/root"
   SR="$C/secrets"
+  LD="$C/locks"
   PGPW="$C/etc/pg.pw"
   RDPW="$C/etc/redis.pw"
   S="$C/snap"
-  mkdir -p "$R" "$C/logs" "$SR" "$C/etc" "$S$R/staging/postgres" "$S$R/staging/redis" "$S$SR/app-one" "$S$SR/my-app" "$S$C/etc"
+  mkdir -p "$R" "$C/logs" "$SR" "$LD" "$C/etc" "$S$R/staging/postgres" "$S$R/staging/redis" "$S$SR/app-one" "$S$SR/my-app" "$S$C/etc"
   OVS=("CASE_DIR=$C" "CALL_LOG=$CALL_LOG" "LOADER=$LOADER" "PLATFORM_RESTORE_ALLOW_NONROOT=1"
     "PLATFORM_BACKUP_ENV_FILE=$C/backup.env" "PLATFORM_BACKUP_ENV_OWNER=$(id -u):$(id -g)" "PLATFORM_BACKUP_ROOT=$R"
     "PLATFORM_BACKUP_STATE_DIR=$C/status" "PLATFORM_BACKUP_LOG_DIR=$C/logs" "PLATFORM_BACKUP_LOCK=$C/lock"
-    "PLATFORM_BACKUP_SECRETS_ROOT=$SR" "PLATFORM_BACKUP_PG_ADMIN_FILE=$PGPW" "PLATFORM_BACKUP_REDIS_ADMIN_FILE=$RDPW"
+    "PLATFORM_BACKUP_SECRETS_ROOT=$SR" "PLATFORM_BACKUP_LOCK_DIR=$LD" "PLATFORM_BACKUP_PG_ADMIN_FILE=$PGPW" "PLATFORM_BACKUP_REDIS_ADMIN_FILE=$RDPW"
     "PLATFORM_RESTORE_COMPOSE=$C/compose.yaml" "PLATFORM_RESTORE_INSTALL_DATA=$C/install-data.sh")
   : > "$C/compose.yaml"
   mkenv
@@ -407,9 +409,10 @@ expect_calls_has "the dump reaches pg_restore on stdin" "PGRESTORE-STDIN DUMP-my
 expect_out_has "prints the row count per table" "public.items: 3"
 expect_order "CREATE DATABASE comes before pg_restore" "$(line_of 'CREATE DATABASE')" "$(line_of 'pg_restore')"
 if [ -e "$R/restore" ] && [ -n "$(ls -A "$R/restore")" ]; then _fail "the restore dir is removed on exit"; else _pass; fi
-expect_calls_has "the app lock file is chowned to the current deploy uid" "chown 1234 -- $SR/.my-app.lock"
-expect_eq "the app lock is owned by the deploy uid (stat)" "$(stat -c %u "$SR/.my-app.lock")" "1234"
-expect_eq "the app lock is mode 0600" "$(/usr/bin/stat -c %a "$SR/.my-app.lock")" "600"
+if [ -f "$LD/my-app.lock" ]; then _pass; else _fail "the app lock lives in the lock dir, not the secrets root"; fi
+if compgen -G "$SR/.*.lock" > /dev/null; then _fail "no lock file is created in the deploy-owned secrets root"; else _pass; fi
+expect_calls_lacks "the app lock is never chowned (root creates it with O_EXCL in the root-owned lock dir)" "my-app.lock"
+expect_eq "the app lock is mode 0666 (the deploy user can still open it for append)" "$(/usr/bin/stat -c %a "$LD/my-app.lock")" "666"
 
 new_case
 printf '1|1\n' > "$C/app_check"
@@ -445,8 +448,8 @@ rs app app-one --into app_one_r --bogus
 expect_rc "an unknown flag is a usage error" 2
 
 new_case
-: > "$SR/.my-app.lock"
-exec 7>> "$SR/.my-app.lock"
+: > "$LD/my-app.lock"
+exec 7>> "$LD/my-app.lock"
 flock -n 7
 rs app my-app --into my_app_r
 exec 7>&-
@@ -491,11 +494,12 @@ if compgen -G "$R/.restore-work.*" > /dev/null; then _fail "the work dir is remo
 new_case
 rs secrets my-app
 expect_rc "secrets restores an absent app dir" 0
-expect_calls_has "chown to the current deploy uid and gid 64323 (dir)" "chown 1234:64323 -- $SR/my-app"
-expect_calls_has "chown (file)" "chown 1234:64323 -- $SR/my-app/db-password"
-expect_eq "the dir owner is recorded as deploy:64323 (stat)" "$(stat -c '%u:%g %a' "$SR/my-app")" "1234:64323 2750"
-expect_eq "the file owner is recorded as deploy:64323 mode 440 (stat)" "$(stat -c '%u:%g %a' "$SR/my-app/db-password")" "1234:64323 440"
-expect_eq "the other file is mode 440 too" "$(stat -c '%u:%g %a' "$SR/my-app/redis-password")" "1234:64323 440"
+if grep -qE -- "^chown -h 1234:64323 -- $R/restore/[^/]+$SR/my-app\$" "$CALL_LOG"; then _pass; else _fail "chown -h to the current deploy uid and gid 64323 (dir), inside the root-only restore dir"; fi
+if grep -qE -- "^chown -h 1234:64323 -- $R/restore/[^/]+$SR/my-app/db-password\$" "$CALL_LOG"; then _pass; else _fail "chown -h (file), inside the root-only restore dir"; fi
+if grep -E -- "^chown " "$CALL_LOG" | grep -qvE -- " -- $R/restore/"; then _fail "no chown touches a path outside the root-only restore dir (the mv into the secrets root is the last step)"; else _pass; fi
+expect_eq "the dir mode is 2750" "$(/usr/bin/stat -c %a "$SR/my-app")" "2750"
+expect_eq "the file mode is 440" "$(/usr/bin/stat -c %a "$SR/my-app/db-password")" "440"
+expect_eq "the other file is mode 440 too" "$(/usr/bin/stat -c %a "$SR/my-app/redis-password")" "440"
 expect_eq "restored content" "$(cat "$SR/my-app/db-password")" "my-db"
 new_case
 mkdir -p "$SR/my-app"
@@ -654,7 +658,7 @@ expect_calls_has "restores the postgres staging dir (override layout)" "--includ
 expect_calls_has "restores the redis staging dir" "--include $R/staging/redis"
 expect_calls_has "restores the secrets root" "--include $SR"
 expect_calls_has "restores both admin files" "--include $PGPW --include $RDPW"
-expect_order "secrets are placed before the globals load" "$(line_of 'chown 1234:64323')" "$(line_of 'PSQL-GLOBALS')"
+expect_order "secrets are placed before the globals load" "$(line_of 'chown -h 1234:64323')" "$(line_of 'PSQL-GLOBALS')"
 expect_order "globals load before any pg_restore" "$(line_of 'PSQL-GLOBALS')" "$(line_of 'pg_restore')"
 if [ -f "$C/globals-seen" ] && grep -q 'CREATE ROLE app_one' "$C/globals-seen"; then _pass; else _fail "the globals reach psql (positive control)"; fi
 if grep -qF 'CREATE ROLE postgres;' "$C/globals-seen"; then _fail "CREATE ROLE postgres is not emitted"; else _pass; fi
@@ -663,10 +667,11 @@ expect_calls_has "app_one dump restored" "PGRESTORE-STDIN DUMP-app_one"
 expect_calls_has "my_app dump restored" "PGRESTORE-STDIN DUMP-my_app"
 expect_eq "the secrets root mode is unchanged" "$(/usr/bin/stat -c '%a' "$SR")" "$before_mode"
 if grep -qE -- " -- $SR\$" "$CALL_LOG"; then _fail "the secrets root itself is never chowned"; else _pass; fi
-expect_eq "restored app secret owner/mode" "$(stat -c '%u:%g %a' "$SR/app-one/db-password")" "1234:64323 440"
+expect_eq "restored app secret mode" "$(/usr/bin/stat -c '%a' "$SR/app-one/db-password")" "440"
+if grep -qE -- "^chown -h 1234:64323 -- $R/restore/[^/]+$SR/app-one/db-password\$" "$CALL_LOG"; then _pass; else _fail "restored app secret owner set inside the restore dir"; fi
 expect_no_exclude "full success: no restic restore carries --exclude"
 # full takes no per-app lock files (the glob must match nothing; a stray lock would be a behaviour change to look at)
-if compgen -G "$SR/.*.lock" > /dev/null; then _fail "full creates no per-app lock file"; else _pass; fi
+if compgen -G "$LD/*.lock" > /dev/null; then _fail "full creates no per-app lock file"; else _pass; fi
 # Redis ordering
 l_stop="$(line_of 'stop redis')"
 l_replace="$(line_of 'docker run --rm')"
@@ -879,7 +884,7 @@ for sub in "list" "app my-app --into my_app_r" "secrets nodata" "host-files" "fu
   # HOOK=[] is deliberate: DISCORD_WEBHOOK is read (and masked) but never exported to children.
   want="REPO=[s3:https://acct.example.test/bucket] PW=[$PW_SECRET] AK=[TESTKEYIDMARKER0001] SK=[$AWS_SECRET] REG=[auto] HOOK=[]"
   expect_eq "empty caller environment: '$sub' reads the keys from the env file; DISCORD_WEBHOOK is not exported" "$(cat "$C/restic-env")" "$want"
-  rm -rf "$SR/my-app" "$SR/.my-app.lock"
+  rm -rf "$SR/my-app" "$LD/my-app.lock"
 done
 new_case
 grep -v '^DISCORD_WEBHOOK=' "$C/backup.env" > "$C/backup.env.new"

@@ -9,7 +9,8 @@
 # What it does, in this order (each phase refuses before changing anything):
 #   1. Validates the name (APP_RE, the installed reserved-names list, the Postgres identifier rule) before any docker
 #      call or file write. A missing or unreadable list fails closed.
-#   2. Takes the per-app lock <secrets root>/.<app>.lock (flock, bounded wait).
+#   2. Takes the per-app lock <lock dir>/<app>.lock (flock, bounded wait); the lock dir is root-owned and sticky
+#      (made by install-data.sh), shared with restore.sh, which takes the same lock as root.
 #   3. Checks both containers are healthy.
 #   4. Read-only preflight: classifies the Postgres role/database and the Redis user against their two secret files. An
 #      object present with its secret file absent exits 1 before anything is written (no silent password reset).
@@ -33,7 +34,7 @@
 # Env overrides (tests only; the dispatcher runs this script with a scrubbed environment):
 # NEW_DB_PG_CONTAINER / NEW_DB_REDIS_CONTAINER (default platform-data-postgres / platform-data-redis),
 # NEW_DB_RESERVED_NAMES (default /opt/platform/data/reserved-names.txt), NEW_DB_SECRETS_ROOT
-# (default /var/lib/platform/secrets), NEW_DB_REDIS_CTR_ADMIN_FILE (the admin file as the Redis container sees it),
+# (default /var/lib/platform/secrets), NEW_DB_LOCK_DIR (default /var/lib/platform/locks), NEW_DB_REDIS_CTR_ADMIN_FILE (the admin file as the Redis container sees it),
 # NEW_DB_LOCK_WAIT (seconds, default 30), NEW_DB_EXEC_TIMEOUT (seconds per docker call, default 30).
 set -euo pipefail
 
@@ -51,6 +52,7 @@ PG="${NEW_DB_PG_CONTAINER:-platform-data-postgres}"
 REDIS="${NEW_DB_REDIS_CONTAINER:-platform-data-redis}"
 RESERVED_FILE="${NEW_DB_RESERVED_NAMES:-/opt/platform/data/reserved-names.txt}"
 SECRETS_ROOT="${NEW_DB_SECRETS_ROOT:-/var/lib/platform/secrets}"
+LOCK_DIR="${NEW_DB_LOCK_DIR:-/var/lib/platform/locks}"
 REDIS_CTR_ADMIN_FILE="${NEW_DB_REDIS_CTR_ADMIN_FILE:-/etc/platform/redis-admin.password}"
 LOCK_WAIT="${NEW_DB_LOCK_WAIT:-30}"
 EXEC_TIMEOUT="${NEW_DB_EXEC_TIMEOUT:-30}"
@@ -178,7 +180,8 @@ validate_name() {
 take_lock() {
   local lock old
   [ -d "$SECRETS_ROOT" ] && [ ! -L "$SECRETS_ROOT" ] || die "the secrets root $SECRETS_ROOT is missing or not a directory: run \`make host-data HOST=<alias> ARGS=install\`" 1
-  lock="$SECRETS_ROOT/.$APP.lock"
+  [ -d "$LOCK_DIR" ] && [ ! -L "$LOCK_DIR" ] || die "the lock directory $LOCK_DIR is missing or not a directory: run \`make host-data HOST=<alias> ARGS=install\`" 1
+  lock="$LOCK_DIR/$APP.lock"
   [ ! -L "$lock" ] || die "the lock path $lock is a symlink" 1
   # Created under umask 077 and opened for append: the owner can always reopen it for the next run.
   old="$(umask)"
