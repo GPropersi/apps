@@ -32,6 +32,9 @@
 #   positive control failed         -> the dummy backend or Host header is wrong, so the deny results prove nothing
 # shellcheck disable=SC1091,SC2015
 set -uo pipefail
+# The dirs and files bind-mounted into the non-root containers must be world-readable whatever umask the launcher has
+# (a detached gate job can run with 077, which made the file provider fail with "permission denied" and every route 404).
+umask 022
 
 here="$(cd "$(dirname "$0")" && pwd)"
 # shellcheck source=../test/lib.sh
@@ -182,7 +185,11 @@ start_traefik() {
     sleep 0.5
   done
   echo "positive control did not reach the backend: Traefik not routing, check the provider network"
-  docker logs "$tname" 2>&1 | tail -n 20
+  # The 404 access-log lines would fill the tail and hide the provider error, so drop them and add the socket-proxy's log.
+  echo "-- traefik (access-log lines dropped):"
+  docker logs "$tname" 2>&1 | grep -v '"RequestAddr"' | tail -n 20
+  echo "-- socket-proxy:"
+  docker logs "$sname" 2>&1 | tail -n 10
   return 1
 }
 

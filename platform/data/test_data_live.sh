@@ -76,6 +76,7 @@ LSC="$rid-ls"
 gen="$T_TMP/compose.live.yaml"
 payload="$T_TMP/payload"
 secrets="$T_TMP/secrets"
+locks="$T_TMP/locks"
 pg_admin_file="$T_TMP/postgres-admin.password"
 redis_admin_file="$T_TMP/redis-admin.password"
 captures="${PDLIVE_CAPTURE:-}"
@@ -154,12 +155,12 @@ pg_as() {
 
 newdb() {
   NEW_DB_PG_CONTAINER="$PGC" NEW_DB_REDIS_CONTAINER="$RDC" NEW_DB_RESERVED_NAMES="$here/../registry/reserved-names.txt" \
-    NEW_DB_SECRETS_ROOT="$secrets" NEW_DB_LOCK_WAIT=10 NEW_DB_EXEC_TIMEOUT=60 bash "$here/new-db.sh" "$1" 2>&1
+    NEW_DB_SECRETS_ROOT="$secrets" NEW_DB_LOCK_DIR="$locks" NEW_DB_LOCK_WAIT=10 NEW_DB_EXEC_TIMEOUT=60 bash "$here/new-db.sh" "$1" 2>&1
 }
 
 verify() {
   env INSTALL_DATA_SUDO= INSTALL_DATA_PG_CONTAINER="$PGC" INSTALL_DATA_REDIS_CONTAINER="$RDC" INSTALL_DATA_NETWORK="$net" \
-    INSTALL_DATA_DIR="$payload" INSTALL_DATA_VAR_DIR="$T_TMP/var" INSTALL_DATA_SECRETS_ROOT="$secrets" \
+    INSTALL_DATA_DIR="$payload" INSTALL_DATA_VAR_DIR="$T_TMP/var" INSTALL_DATA_SECRETS_ROOT="$secrets" INSTALL_DATA_LOCK_DIR="$locks" \
     INSTALL_DATA_PG_ADMIN_FILE="$pg_admin_file" INSTALL_DATA_REDIS_ADMIN_FILE="$redis_admin_file" \
     bash "$here/../host/install-data.sh" verify 2>&1
 }
@@ -184,7 +185,8 @@ done
 
 # ---- generate the compose file under test and prove how it differs ----
 
-mkdir -p "$payload" "$secrets" "$T_TMP/var"
+mkdir -p "$payload" "$secrets" "$locks" "$T_TMP/var"
+chmod 1777 "$locks"
 chmod 2710 "$secrets"
 cp "$here/pg_hba.conf" "$payload/pg_hba.conf"
 cp "$here/redis-entrypoint.sh" "$payload/redis-entrypoint.sh"

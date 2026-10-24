@@ -6,7 +6,7 @@
 # in any platform/host/install-*.sh (adding an installer or a payload needs no change here):
 #
 #   # BEGIN-PAYLOAD <repo-relative source path>
-#   payload_<name>() {
+#   payload_<basename incl. extension, non-alphanumerics as _>() {
 #     cat <<'PLATFORM_PAYLOAD_EOF'
 #   <the source file, byte for byte>
 #   PLATFORM_PAYLOAD_EOF
@@ -57,7 +57,6 @@ render() {
   [ -f "$src" ] || die "payload source not found: $src"
   [ ! -s "$src" ] || [ -z "$(tail -c1 "$src")" ] || die "payload source must end with a newline: $src"
   name="$(basename "$src")"
-  name="${name%.*}"
   name="${name//[!A-Za-z0-9]/_}"
   FN="payload_${name}"
   REGION="# BEGIN-PAYLOAD $src"$'\n'"${FN}() {"$'\n'"  cat <<'$DELIM'"$'\n'

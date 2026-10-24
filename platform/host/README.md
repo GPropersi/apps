@@ -14,12 +14,14 @@ the host; Claude never runs the live-host targets (they are denied in a worktree
 | `install-claude-access.sh` | Creates the `claude` user, its key and the `Match User claude` sshd drop-in; prints one sudoers line for you to install. |
 | `install-ingress.sh` | Installs the ingress stack (Traefik, cloudflared, socket proxy, down page) under `/opt/platform/ingress` and starts it. Never creates the tunnel token or its group (`64321`); checks both fail-closed and prints how to create them. `install`, `status`, `verify`, and `verify --live [--hold]` (disposable containers prove routing and the down-page fallbacks; `--hold` also waits for one real login through the tunnel). Run it with `make host-ingress HOST=<alias> ARGS="..."`. |
 | `install-data.sh` | Installs the shared data stack (one Postgres, one Redis) under `/opt/platform/data` and starts it on the `platform` network. Never creates the two admin password files or their groups (`64322` admin secrets, `64323` app secrets); checks them, the `deploy` user and the network fail-closed and prints how to create them. Creates `/var/lib/platform` (`root:root 0755`) and the secrets root `/var/lib/platform/secrets` (`deploy:64323 2710`, setgid, so `platform new-db` as `deploy` needs no `chgrp`). `install`, `status`, `verify` (published ports, labels, networks, secrets in Env/Cmd/Healthcheck, Redis ACL users, eviction, AOF, Postgres logging and PUBLIC `CONNECT`, installed modes; a `WARN:` at about 80% of Redis `maxmemory` never fails it). Run it with `make host-data HOST=<alias> ARGS="..."`. Stack details: [`../data/README.md`](../data/README.md). |
+| `install-backup.sh` | Installs the nightly backup to R2: the pinned `restic` (sha256-checked), `/opt/platform/backup/` (`backup.sh`, `restore.sh`, `window.env`), the work directories and `platform-backup.service` plus `platform-backup.timer` (03:35 inside the 03:30-05:00 window). Never writes `/etc/platform/backup.env`; refuses unless it is `root:root 0600` with all six keys as literal values. `install`, `restore-only` (restic and `restore.sh` only, for a rebuilt host), `status`, `verify` (payload bytes, restic version and hash, timer enabled and inside the window, last run not `failed` or older than 36h), `run-now` (`backup.sh manual` under `systemd-run` with the nightly's limits) and `init-repo` (one explicit `restic init`). Run it with `make host-backup HOST=<alias> ARGS="..."`; restore with `make host-restore HOST=<alias> ARGS="list"` (runs `restore.sh` as root over ssh). Details: [`../backup/README.md`](../backup/README.md), [`../backup/RUNBOOK.md`](../backup/RUNBOOK.md). |
 | `verify-ingress.sh` | Client-side, fail-closed public check: a random unused name under your domain must show the Cloudflare Access login wall (open, unreachable and unconfirmed each fail distinctly). Runs on your machine, makes no ssh call, is not embedded. Run it with `make host-verify-ingress HOST=<alias> ARGS="--domain <domain>"` (or `PLATFORM_DOMAIN` in the environment; there is no default domain). `--expect-open HOST` marks a deliberately public name; `--probe-jobs APP-HOST` only prints manual `/_jobs` commands. |
 | `verify-egress.sh` | Read-only check that the host firewall closes container-to-LAN egress. |
 
 The installers embed their payloads (dispatcher, wrapper, helper, for the ingress installer compose.yaml,
 dynamic.yml and the down page's index page, and for the data installer compose.yaml, pg_hba.conf,
-redis-entrypoint.sh, reserved-names.txt and new-db.sh) because the host has no checkout: edit the
+redis-entrypoint.sh, reserved-names.txt and new-db.sh, and for the backup installer backup.sh, restore.sh,
+window.env, the service unit and the timer unit) because the host has no checkout: edit the
 source file, run `make embed`, and `make lint` fails if an embedded copy differs from its source.
 
 ## Identities
@@ -78,14 +80,27 @@ and run it there directly.
    `platform new-db` also needs the helper from step 7: re-run `make host-data HOST=<alias> ARGS="install"` once so
    `/opt/platform/data/new-db.sh` is installed (`verify` checks its owner, mode and bytes).
 
+9. Nightly backup to R2: needs step 7 done first. Create `/etc/platform/backup.env` yourself (`root:root`, mode `0600`,
+   six literal `KEY=VALUE` lines, no quotes; see [`../backup/RUNBOOK.md`](../backup/RUNBOOK.md)); the installer never
+   writes it. Then `make host-backup HOST=<alias> ARGS="install"`, once `ARGS="init-repo"` (creates the restic
+   repository; never automatic), `ARGS="run-now"` (one manual backup) and `ARGS="verify"` (exit 0). A
+   `Persistent=true` catch-up run can fire when `install` enables the timer; it is flagged as outside the window.
+   `install-data.sh` is not placed on the host, so the final `install-data verify` that `restore.sh full` would run is
+   skipped and logged; run `make host-data HOST=<alias> ARGS="verify"` after a full restore instead.
+   `install` (and `restore-only`) downloads the pinned `restic` release on the host, so the host needs outbound
+   network access at install time; without it, place the binary by hand (download the pinned release elsewhere and
+   copy it to the path `install-backup.sh` names, then re-run; the sha256 check still applies).
+   `ARGS` for `host-restore` is re-parsed by the remote shell as root, so its words must be plain tokens (no spaces
+   or shell metacharacters).
+
 `HOST` is required for every `host-*` target, with no default alias; each exits 2 with a usage message when it
-is unset. For the four installers, `status` (the default) reports every check without failing and `verify`
+is unset. For the five installers, `status` (the default) reports every check without failing and `verify`
 exits 1 on any failure; the egress check has no mode and always exits 1 on a failure. `--probe` needs the LAN
 default gateway to fall inside a deny range (otherwise it exits 2 rather than pass vacuously).
 
-`install-deploy-user.sh`, `install-claude-access.sh`, `install-ingress.sh` and `install-data.sh` intentionally duplicate shared
-scaffolding, because each is streamed standalone over `ssh bash -s` and cannot source a common file. A fix to one
-must be mirrored in the others.
+`install-deploy-user.sh`, `install-claude-access.sh`, `install-ingress.sh`, `install-data.sh` and
+`install-backup.sh` intentionally duplicate shared scaffolding, because each is streamed standalone over
+`ssh bash -s` and cannot source a common file. A fix to one must be mirrored in the others.
 
 ## Streaming invocation
 
