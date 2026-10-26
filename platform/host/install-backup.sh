@@ -734,6 +734,9 @@ phase_env() {
     die_phase env 2 "missing required env var(s): $missing"
   fi
   export RESTIC_REPOSITORY RESTIC_PASSWORD AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_DEFAULT_REGION
+  # The unit runs with neither $HOME nor $XDG_CACHE_HOME, so restic would warn on every call and prune without a cache.
+  # A fixed cache inside the root-only state dir (restic creates it 0700); the caller's RESTIC_CACHE_DIR was scrubbed.
+  export RESTIC_CACHE_DIR="$BACKUP_ROOT/restic-cache"
   # restic --json status lines are logged one per line: ask for about one per minute.
   export RESTIC_PROGRESS_FPS=0.0166
   NOTIFY_ENABLED=1

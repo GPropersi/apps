@@ -64,6 +64,7 @@ for a in "$@"; do printf ' %s' "$a" >> "$CALL_LOG"; done
 printf '\n' >> "$CALL_LOG"
 printf '%s' "$RESTIC_PASSWORD" > "$CASE_DIR/restic-saw"
 printf 'RESTIC_PASSWORD_FILE=[%s] AWS_SESSION_TOKEN=[%s] AWS_PROFILE=[%s] RESTIC_CACERT=[%s]\n' "${RESTIC_PASSWORD_FILE-}" "${AWS_SESSION_TOKEN-}" "${AWS_PROFILE-}" "${RESTIC_CACERT-}" > "$CASE_DIR/restic-env"
+printf '%s' "${RESTIC_CACHE_DIR-}" > "$CASE_DIR/restic-cache-dir"
 case "$1" in
   cat) key=preflight ;;
   backup) key=restic-backup ;;
@@ -884,9 +885,10 @@ expect_calls_lacks "manual run has no nightly tag" "--tag nightly"
 # 13b. Caller environment is scrubbed (a hand run without sudo)
 new_case
 rc=0
-out="$(RESTIC_PASSWORD_FILE=/caller/pw AWS_SESSION_TOKEN=calltoken AWS_PROFILE=callprof RESTIC_CACERT=/caller/ca env CASE_BODY='main nightly' bash -c '. "$SCRIPT"; eval "$PRELUDE"; eval "$CASE_BODY"' 2>&1 < /dev/null)" || rc=$?
+out="$(RESTIC_PASSWORD_FILE=/caller/pw AWS_SESSION_TOKEN=calltoken AWS_PROFILE=callprof RESTIC_CACERT=/caller/ca RESTIC_CACHE_DIR=/caller/cache env CASE_BODY='main nightly' bash -c '. "$SCRIPT"; eval "$PRELUDE"; eval "$CASE_BODY"' 2>&1 < /dev/null)" || rc=$?
 expect_rc "run with hostile caller environment ok" 0
 expect_eq "caller RESTIC_PASSWORD_FILE, AWS_SESSION_TOKEN and AWS_PROFILE never reach restic" "$(cat "$C/restic-env")" "RESTIC_PASSWORD_FILE=[] AWS_SESSION_TOKEN=[] AWS_PROFILE=[] RESTIC_CACERT=[]"
+expect_eq "restic gets the fixed cache dir under the backup root, not the caller's" "$(cat "$C/restic-cache-dir")" "$C/root/restic-cache"
 expect_eq "positive control: restic ran with the file's password" "$(cat "$C/restic-saw")" "$PW_SECRET"
 
 # 13c. pg-list: validation, zero databases, failures
