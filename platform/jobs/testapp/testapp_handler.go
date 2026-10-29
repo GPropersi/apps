@@ -9,7 +9,6 @@ import (
 	"log"
 	"net/http"
 	"os"
-	"strconv"
 	"strings"
 	"sync"
 )
@@ -84,6 +83,10 @@ func (h *handler) authorized(r *http.Request) bool {
 
 func (h *handler) reply(w http.ResponseWriter, r *http.Request, job string, status int, why string) {
 	h.logf("call job=%q status=%d run_id=%q why=%q", clip(job), status, clip(r.Header.Get("X-Platform-Run-Id")), why)
+	// The body is a fixed plain-text reason and never echoes a request value; the headers keep a browser from
+	// sniffing it as HTML.
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
 	w.WriteHeader(status)
 	_, _ = io.WriteString(w, why+"\n")
 }
@@ -127,10 +130,10 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	h.done[key] = true
 	h.mu.Unlock()
 	if repeat {
-		h.reply(w, r, job, http.StatusOK, "already done key="+key)
+		h.reply(w, r, job, http.StatusOK, "already done")
 		return
 	}
-	h.reply(w, r, job, http.StatusOK, "ok trigger="+clip(req.Trigger)+" attempt="+strconv.Itoa(req.Attempt))
+	h.reply(w, r, job, http.StatusOK, "ok")
 }
 
 // clip bounds an untrusted value before it is logged (callers print it with %q, which escapes newlines).
