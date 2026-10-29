@@ -24,6 +24,9 @@
 # the Redis admin password is read inside the container from the mounted admin file (one trailing newline stripped,
 # as the entrypoint's hash does) and reaches redis-cli only through REDISCLI_AUTH.
 #
+# Job secret: <job-secrets root>/<app>/jobs-secret (same format, 0440, never rotated) in a separate root
+# (deploy:64324 2710, made by install-data.sh) so the jobs runner can read it without reading any DB password.
+#
 # Logging: a timestamped line per phase start and end (rc and duration) on stderr and through `logger -t platform`;
 # error text from docker is logged with both of the app's passwords masked. Every docker call runs under `timeout`.
 #
@@ -34,7 +37,7 @@
 # Env overrides (tests only; the dispatcher runs this script with a scrubbed environment):
 # NEW_DB_PG_CONTAINER / NEW_DB_REDIS_CONTAINER (default platform-data-postgres / platform-data-redis),
 # NEW_DB_RESERVED_NAMES (default /opt/platform/data/reserved-names.txt), NEW_DB_SECRETS_ROOT
-# (default /var/lib/platform/secrets), NEW_DB_LOCK_DIR (default /var/lib/platform/locks), NEW_DB_REDIS_CTR_ADMIN_FILE (the admin file as the Redis container sees it),
+# (default /var/lib/platform/secrets), NEW_DB_JOB_SECRETS_ROOT (default /var/lib/platform/job-secrets), NEW_DB_LOCK_DIR (default /var/lib/platform/locks), NEW_DB_REDIS_CTR_ADMIN_FILE (the admin file as the Redis container sees it),
 # NEW_DB_LOCK_WAIT (seconds, default 30), NEW_DB_EXEC_TIMEOUT (seconds per docker call, default 30).
 set -euo pipefail
 
@@ -52,6 +55,7 @@ PG="${NEW_DB_PG_CONTAINER:-platform-data-postgres}"
 REDIS="${NEW_DB_REDIS_CONTAINER:-platform-data-redis}"
 RESERVED_FILE="${NEW_DB_RESERVED_NAMES:-/opt/platform/data/reserved-names.txt}"
 SECRETS_ROOT="${NEW_DB_SECRETS_ROOT:-/var/lib/platform/secrets}"
+JOB_SECRETS_ROOT="${NEW_DB_JOB_SECRETS_ROOT:-/var/lib/platform/job-secrets}"
 LOCK_DIR="${NEW_DB_LOCK_DIR:-/var/lib/platform/locks}"
 REDIS_CTR_ADMIN_FILE="${NEW_DB_REDIS_CTR_ADMIN_FILE:-/etc/platform/redis-admin.password}"
 LOCK_WAIT="${NEW_DB_LOCK_WAIT:-30}"
@@ -67,7 +71,9 @@ APP=""
 PGROLE=""
 DB_PW=""
 REDIS_PW=""
+JOB_PW=""
 APPDIR=""
+JOBDIR=""
 ERRF=""
 LOCKFD=""
 PHASE_OUT=""
@@ -79,7 +85,7 @@ err() { printf '%s\n' "$1" >&2; }
 # mask <text>: the text with both of the app's passwords (when known) replaced.
 mask() {
   local s="$1" p
-  for p in "$DB_PW" "$REDIS_PW"; do
+  for p in "$DB_PW" "$REDIS_PW" "$JOB_PW"; do
     [ -z "$p" ] || s="${s//"$p"/***}"
   done
   printf '%s' "$s"
@@ -180,6 +186,7 @@ validate_name() {
 take_lock() {
   local lock old
   [ -d "$SECRETS_ROOT" ] && [ ! -L "$SECRETS_ROOT" ] || die "the secrets root $SECRETS_ROOT is missing or not a directory: run \`make host-data HOST=<alias> ARGS=install\`" 1
+  [ -d "$JOB_SECRETS_ROOT" ] && [ ! -L "$JOB_SECRETS_ROOT" ] || die "the job-secrets root $JOB_SECRETS_ROOT is missing or not a directory: run \`make host-data HOST=<alias> ARGS=install\`" 1
   [ -d "$LOCK_DIR" ] && [ ! -L "$LOCK_DIR" ] || die "the lock directory $LOCK_DIR is missing or not a directory: run \`make host-data HOST=<alias> ARGS=install\`" 1
   lock="$LOCK_DIR/$APP.lock"
   [ ! -L "$lock" ] || die "the lock path $lock is a symlink" 1
@@ -218,6 +225,7 @@ PG_DBS=0
 RD_PRESENT=0
 S_DB=0
 S_RD=0
+S_JOB=0
 
 # secret_state <path>: 0 absent, 1 a valid regular file; anything else refuses (fail closed).
 secret_state() {
@@ -234,6 +242,8 @@ preflight() {
   local out problems=0
   [ ! -L "$APPDIR" ] || die "the app secrets path $APPDIR is a symlink" 1
   [ ! -e "$APPDIR" ] || [ -d "$APPDIR" ] || die "the app secrets path $APPDIR is not a directory" 1
+  [ ! -L "$JOBDIR" ] || die "the app job-secrets path $JOBDIR is a symlink" 1
+  [ ! -e "$JOBDIR" ] || [ -d "$JOBDIR" ] || die "the app job-secrets path $JOBDIR is not a directory" 1
 
   pg_phase "preflight-postgres" postgres "SELECT (SELECT count(*) FROM pg_roles WHERE rolname = '$PGROLE') || '|' || (SELECT count(*) FROM pg_database WHERE datname = '$PGROLE');"
   out="$PHASE_OUT"
@@ -257,7 +267,8 @@ preflight() {
 
   if secret_state "$APPDIR/db-password"; then S_DB=1; fi
   if secret_state "$APPDIR/redis-password"; then S_RD=1; fi
-  log "state postgres_role=$PG_ROLES postgres_db=$PG_DBS db_password_file=$S_DB redis_user=$RD_PRESENT redis_password_file=$S_RD"
+  if secret_state "$JOBDIR/jobs-secret"; then S_JOB=1; fi
+  log "state postgres_role=$PG_ROLES postgres_db=$PG_DBS db_password_file=$S_DB redis_user=$RD_PRESENT redis_password_file=$S_RD jobs_secret_file=$S_JOB"
 
   if [ "$((PG_ROLES + PG_DBS))" -gt 0 ] && [ "$S_DB" -eq 0 ]; then
     err "new-db: the Postgres role or database '$PGROLE' exists but $APPDIR/db-password is missing."
@@ -289,13 +300,13 @@ gen_password() {
 # write_secret <path> <value>: temp file in the same directory (umask 227 gives 0440), then an atomic rename.
 write_secret() {
   local dest="$1" value="$2" tmp
-  tmp="$APPDIR/.tmp.${dest##*/}.$$"
+  tmp="${dest%/*}/.tmp.${dest##*/}.$$"
   TMPFILES+=("$tmp")
   (
     umask 227
     set -C
     printf '%s' "$value" >"$tmp"
-  ) || die "cannot write the temp secret file in $APPDIR" 1
+  ) || die "cannot write the temp secret file in ${dest%/*}" 1
   mv -f -- "$tmp" "$dest" || die "cannot move the secret file into place at $dest" 1
 }
 
@@ -308,6 +319,31 @@ ensure_appdir() {
     info "changed: $APPDIR/"
   else
     info "already: $APPDIR/"
+  fi
+}
+
+ensure_jobdir() {
+  if [ ! -d "$JOBDIR" ]; then
+    (
+      umask 027
+      mkdir -- "$JOBDIR"
+    ) || die "cannot create $JOBDIR" 1
+    info "changed: $JOBDIR/"
+  else
+    info "already: $JOBDIR/"
+  fi
+}
+
+# apply_jobs: the per-app job secret in its own root (group 64324), never rotated.
+apply_jobs() {
+  ensure_jobdir
+  if [ "$S_JOB" -eq 1 ]; then
+    JOB_PW="$(<"$JOBDIR/jobs-secret")"
+    info "already: $JOBDIR/jobs-secret"
+  else
+    JOB_PW="$(gen_password)"
+    write_secret "$JOBDIR/jobs-secret" "$JOB_PW"
+    info "changed: $JOBDIR/jobs-secret"
   fi
 }
 
@@ -370,6 +406,7 @@ main() {
 
   validate_name
   APPDIR="$SECRETS_ROOT/$APP"
+  JOBDIR="$JOB_SECRETS_ROOT/$APP"
   log "start"
   take_lock
   ERRF="$(mktemp)"
@@ -378,6 +415,7 @@ main() {
   ensure_appdir
   apply_postgres
   apply_redis
+  apply_jobs
   log "end rc=0"
   info "new-db: done $APP"
 }

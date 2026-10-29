@@ -218,7 +218,10 @@ PGPW='fixture-postgres-admin-password-0001'
 RPW='fixture-redis-admin-password-0002'
 PGC=platform-data-postgres
 RDC=platform-data-redis
-ACL_BASE=$'user admin on sanitize-payload #fixturehash ~* &* +@all\nuser default off sanitize-payload resetchannels -@all\nuser health on nopass sanitize-payload resetchannels -@all +ping'
+# ACL_RUNNER is the runner user as Redis renders RUNNER_ACL_RULE (on and resetpass/resetkeys folded into the hash and
+# sanitize-payload tokens); a healthy host has it, so ACL_BASE carries it and only the absent-user case removes it.
+ACL_RUNNER='user runner on sanitize-payload #fixturehash ~*:jobs:* resetchannels -@all +@list +@sortedset +@string +@keyspace +@transaction +@connection -@dangerous -@scripting -@pubsub -scan -randomkey -dbsize'
+ACL_BASE=$'user admin on sanitize-payload #fixturehash ~* &* +@all\nuser default off sanitize-payload resetchannels -@all\nuser health on nopass sanitize-payload resetchannels -@all +ping\n'"$ACL_RUNNER"
 # ACL_BASE and ACL_APP have the shape captured from the live run (Redis 8.10.2, `ACL LIST` after new-db).
 ACL_APP='user app1 on sanitize-payload #fixturehash ~app1:* resetchannels -@all +@read +@write +@keyspace +@string +@hash +@list +@set +@sortedset +@stream +@connection -@dangerous -@scripting -@pubsub -scan -randomkey -dbsize'
 
@@ -252,7 +255,7 @@ fresh() {
   export INSTALL_DATA_SOCKET="$DSOCK"
   export INSTALL_DATA_HEALTH_TIMEOUT=2
   export INSTALL_DATA_POLL=0.1
-  unset INSTALL_DATA_PG_CONTAINER INSTALL_DATA_REDIS_CONTAINER INSTALL_DATA_DIR INSTALL_DATA_VAR_DIR INSTALL_DATA_SECRETS_ROOT
+  unset INSTALL_DATA_PG_CONTAINER INSTALL_DATA_REDIS_CONTAINER INSTALL_DATA_DIR INSTALL_DATA_VAR_DIR INSTALL_DATA_SECRETS_ROOT INSTALL_DATA_JOB_SECRETS_ROOT
   unset INSTALL_DATA_PG_ADMIN_FILE INSTALL_DATA_REDIS_ADMIN_FILE INSTALL_DATA_OVERCOMMIT_FILE INSTALL_DATA_SYSCTL_FILE INSTALL_DATA_REDIS_CTR_ADMIN_FILE
 }
 
@@ -260,6 +263,7 @@ ins() { run_cmd "$script" "$@"; }
 
 D() { printf '%s' "$R/opt/platform/data"; }
 SECRETS() { printf '%s' "$R/var/lib/platform/secrets"; }
+JOBSEC() { printf '%s' "$R/var/lib/platform/job-secrets"; }
 # nosetgid <mode> <dir>: chmod keeps a directory's setgid bit on a numeric mode, so it is cleared explicitly.
 nosetgid() { chmod "$1" "$2"; chmod g-s "$2"; }
 setowner() { echo "$2" > "$STATE/owner/${1//\//_}"; }
@@ -335,7 +339,7 @@ precondition_case() { # label, setup function, expected message
   expect_no_mutating_docker "precondition: $1 runs no mutating docker command"
   if [ -e "$(D)" ]; then _fail "precondition: $1 wrote nothing" "the install directory exists"; else _pass; fi
   case "$2" in
-    c_secrets_symlink | c_secrets_file | c_var_symlink) ;; # these pre-create the state directory themselves
+    c_secrets_symlink | c_secrets_file | c_var_symlink | c_jobs_symlink) ;; # these pre-create the state directory themselves
     *) if [ -e "$R/var/lib/platform" ] || [ -L "$R/var/lib/platform" ]; then _fail "precondition: $1 created no state directory" "$R/var/lib/platform exists"; else _pass; fi ;;
   esac
   no_leaks "precondition: $1"
@@ -357,6 +361,10 @@ c_rd_two_newlines() { printf 'line-one\n\n' > "$R/etc/platform/redis-admin.passw
 c_pg_symlink() { mv "$R/etc/platform/postgres-admin.password" "$R/etc/platform/real-pg"; ln -s real-pg "$R/etc/platform/postgres-admin.password"; }
 c_admin_group_absent() { touch "$STATE/group_absent_64322"; }
 c_secrets_group_absent() { touch "$STATE/group_absent_64323"; }
+c_jobs_group_absent() { touch "$STATE/group_absent_64324"; }
+c_jobs_group_members() { echo "deploy" > "$STATE/group_members_64324"; }
+c_jobs_group_docker() { echo 64324 > "$STATE/docker_gid"; }
+c_jobs_symlink() { mkdir -p "$R/var/lib/platform" "$R/elsewhere"; ln -s "$R/elsewhere" "$R/var/lib/platform/job-secrets"; }
 c_admin_group_members() { echo "claude" > "$STATE/group_members_64322"; }
 c_secrets_group_members() { echo "deploy" > "$STATE/group_members_64323"; }
 c_group_dup() { touch "$STATE/group_dup"; }
@@ -396,6 +404,11 @@ precondition_case "app-secrets group is the Docker socket's group" c_secrets_gro
 precondition_case "secrets root as a symlink" c_secrets_symlink "secrets root is a symlink"
 precondition_case "secrets root as a file" c_secrets_file "secrets root is not a directory"
 precondition_case "state directory as a symlink" c_var_symlink "platform state directory is a symlink"
+precondition_case "missing job-secrets group" c_jobs_group_absent "no group with gid 64324"
+precondition_case "job-secrets group with members" c_jobs_group_members "group (gid 64324) has members"
+precondition_case "job-secrets group is the Docker socket's group" c_jobs_group_docker "group (gid 64324) is the Docker socket's group"
+precondition_case "job-secrets root as a symlink" c_jobs_symlink "job-secrets root is a symlink"
+precondition_case "job-secrets group instructions" c_jobs_group_absent "groupadd --gid 64324"
 
 # the symlink target is untouched and nothing was created through it
 fresh
@@ -454,6 +467,8 @@ expect_eq "the install directory is mode 755" "$(/usr/bin/stat -c '%a' "$(D)")" 
 expect_eq "the state directory is mode 755" "$(/usr/bin/stat -c '%a' "$R/var/lib/platform")" "755"
 expect_eq "the secrets root is mode 2710 (setgid)" "$(/usr/bin/stat -c '%a' "$(SECRETS)")" "2710"
 expect_eq "the secrets root is owned by deploy and group 64323" "$(cat "$STATE/owner/${R//\//_}_var_lib_platform_secrets")" "1001:64323"
+expect_eq "the job-secrets root is mode 2710 (setgid)" "$(/usr/bin/stat -c '%a' "$(JOBSEC)")" "2710"
+expect_eq "the job-secrets root is owned by deploy and group 64324" "$(cat "$STATE/owner/${R//\//_}_var_lib_platform_job-secrets")" "1001:64324"
 expect_calls_has "the state directory is created with explicit owner and mode" "install -d -m 0755 -o root -g root $R/var/lib/platform"
 expect_calls_has "the missing parent of the install directory is created with an explicit mode" "install -d -m 0755 -o root -g root $R/opt/platform"
 expect_calls_has "files are installed with owner and mode in one step" "install -m 644 -o root -g root -- "
@@ -483,6 +498,7 @@ expect_rc "second install" 0
 expect_out_lacks "second install changes nothing" "changed:"
 expect_out_has "second install reports already: for the stack" "already: stack running"
 expect_out_has "second install reports already: for the secrets root" "already: $(SECRETS)/"
+expect_out_has "second install reports already: for the job-secrets root" "already: $(JOBSEC)/"
 expect_out_has "second install reports already: for the entrypoint" "already: $(D)/redis-entrypoint.sh"
 expect_out_has "second install reports already: for new-db.sh" "already: $(D)/new-db.sh"
 expect_out_has "second install reports already: for the sysctl drop-in" "already: $SYSCTL_DROPIN"
@@ -631,6 +647,21 @@ v_root_group() { setowner "$(SECRETS)" "1001:1001"; }
 v_root_mode() { nosetgid 0750 "$(SECRETS)"; }
 v_root_nosetgid() { nosetgid 0710 "$(SECRETS)"; }
 v_root_missing() { rmdir "$(SECRETS)"; }
+run_edit() { printf '%s\n' "$ACL_BASE" | sed "$1" > "$STATE/acl_list"; } # <sed script>: each caller addresses the runner line
+v_run_allkeys() { run_edit '/^user runner /s/~\*:jobs:\*/~*:jobs:* ~*/'; }
+v_run_all() { run_edit '/^user runner /s/$/ +@all/'; }
+v_run_scan() { run_edit '/^user runner /s/$/ +scan/'; }
+v_run_noscripting() { run_edit '/^user runner /s/ -@scripting//'; }
+v_run_channels() { run_edit '/^user runner /s/ resetchannels/ \&* resetchannels/'; }
+v_run_allow_after() { run_edit '/^user runner /s/$/ +get/'; }
+v_run_nopass() { run_edit '/^user runner /s/ #fixturehash//'; }
+v_run_off() { run_edit '/^user runner /s/ on / off /'; }
+v_run_reorder() { run_edit '/^user runner /s/ -@scripting -@pubsub//;/^user runner /s/-@all /-@scripting -@pubsub -@all /'; }
+v_jobs_owner() { setowner "$(JOBSEC)" "1000:64324"; }
+v_jobs_group() { setowner "$(JOBSEC)" "1001:64323"; }
+v_jobs_mode() { nosetgid 0750 "$(JOBSEC)"; }
+v_jobs_missing() { rmdir "$(JOBSEC)"; }
+v_jobs_symlink() { rm -rf "$(JOBSEC)"; mkdir -p "$R/elsewhere"; ln -s "$R/elsewhere" "$(JOBSEC)"; }
 v_parent_mode() { nosetgid 0775 "$R/var/lib/platform"; }
 v_parent_owner() { setowner "$R/var/lib/platform" "1001:0"; }
 v_reserved_missing() { rm -f "$(D)/reserved-names.txt"; }
@@ -673,6 +704,9 @@ v_pg_fail() { touch "$STATE/pg_fail"; }
 v_admin_mode() { chmod 644 "$R/etc/platform/postgres-admin.password"; }
 v_admin_empty() { : > "$R/etc/platform/redis-admin.password"; }
 v_group_members() { echo claude > "$STATE/group_members_64322"; }
+v_jobs_group_members() { echo claude > "$STATE/group_members_64324"; }
+v_jobs_group_absent() { touch "$STATE/group_absent_64324"; }
+v_run_twohash() { run_edit '/^user runner /s/ #fixturehash/ #fixturehash #otherhash/'; }
 v_no_deploy() { printf '%s\n' 'root:x:0:0:root:/root:/bin/bash' > "$STATE/passwd"; }
 v_net_gone() { rm -f "$STATE/network_exists"; }
 v_default_neither() { printf '%s\n' "$ACL_BASE" | sed 's/^user default off.*/user default nopass resetchannels -@all/' > "$STATE/acl_list"; }
@@ -714,6 +748,11 @@ vcase "secrets root wrong group" v_root_group "uid:gid/mode is '1001:1001 2710'"
 vcase "secrets root wrong mode" v_root_mode "uid:gid/mode is '1001:64323 750'"
 vcase "secrets root without setgid" v_root_nosetgid "uid:gid/mode is '1001:64323 710'"
 vcase "secrets root missing" v_root_missing "is missing or not a directory"
+vcase "job-secrets root wrong owner" v_jobs_owner "uid:gid/mode is '1000:64324 2710'"
+vcase "job-secrets root wrong group (the DB secrets group)" v_jobs_group "uid:gid/mode is '1001:64323 2710', want '1001:64324 2710'"
+vcase "job-secrets root wrong mode" v_jobs_mode "uid:gid/mode is '1001:64324 750'"
+vcase "job-secrets root missing" v_jobs_missing "job-secrets is missing or not a directory"
+vcase "job-secrets root replaced by a symlink after install" v_jobs_symlink "job-secrets root is a symlink"
 vcase "state directory wrong mode" v_parent_mode "uid:gid/mode is '0:0 775'"
 vcase "state directory wrong owner" v_parent_owner "uid:gid/mode is '1001:0 755'"
 vcase "reserved-names.txt missing" v_reserved_missing "reserved-names.txt missing"
@@ -757,6 +796,9 @@ vcase "Postgres queries failing" v_pg_fail "cannot read Postgres log_min_error_s
 vcase "admin file mode changed after install" v_admin_mode "uid:gid/mode is '0:64322 644'"
 vcase "admin file emptied after install" v_admin_empty "Redis admin password file is empty"
 vcase "admin group gained a member after install" v_group_members "group (gid 64322) has members"
+vcase "job-secrets group gained a member after install" v_jobs_group_members "group (gid 64324) has members"
+vcase "job-secrets group gone after install" v_jobs_group_absent "no group with gid 64324"
+vcase "runner user with two password hashes" v_run_twohash "the Redis runner user has 2 password hashes, want exactly 1"
 vcase "deploy user gone after install" v_no_deploy "the deploy user does not exist"
 vcase "network gone after install" v_net_gone "network platform is missing"
 vcase "default Redis user neither on nor off" v_default_neither "the Redis default user is not switched off"
@@ -769,6 +811,15 @@ vcase "app user with alldbs" v_acl_alldbs "Redis user app1 has an unexpected rul
 vcase "app user with an unknown token" v_acl_unknown "Redis user app1 has an unexpected rule 'frobnicate'"
 vcase "app user with a password token" v_acl_pwtoken "Redis user app1 has an unexpected rule '<redacted>'"
 vcase "health user with a hash token" v_acl_health_hash "the Redis health user has an unexpected rule '<redacted>'"
+vcase "runner user with an extra ~* pattern" v_run_allkeys "the Redis runner user has an extra key or channel scope '~*'"
+vcase "runner user with +@all" v_run_all "the Redis runner user has an unexpected rule '+@all'"
+vcase "runner user with +scan" v_run_scan "the Redis runner user has an unexpected rule '+scan'"
+vcase "runner user missing -@scripting" v_run_noscripting "the Redis runner user lacks '-@scripting'"
+vcase "runner user with a channel scope" v_run_channels "the Redis runner user has an extra key or channel scope '&*'"
+vcase "runner user with an allow after the deny rules" v_run_allow_after "the Redis runner user has an unexpected rule '+get'"
+vcase "runner user without a password hash" v_run_nopass "the Redis runner user has 0 password hashes, want exactly 1"
+vcase "runner user switched off" v_run_off "the Redis runner user is not enabled"
+vcase "runner user with the deny rules moved first" v_run_reorder "differs from RUNNER_ACL_RULE in order or repetition"
 vcase "Postgres hba_file is not the installed one" v_hba_file "Postgres hba_file is '/var/lib/postgresql/data/pg_hba.conf'"
 vcase "pg_hba rules with an error or a weak method" v_hba_rules "pg_hba_file_rules has 1 rule(s)"
 vcase "log_statement changed" v_logstmt "Postgres log_statement is 'all', want none"
@@ -799,6 +850,24 @@ expect_out_has "the revoked posture is a PASS" "PASS: PUBLIC has no CONNECT on p
 printf '%s\n%s\n%s\n' "$ACL_BASE" "$ACL_APP" 'user other-app on #fixturehash ~other-app:* resetchannels -@all +@read +@write -@dangerous -scan -randomkey -dbsize' > "$STATE/acl_list"
 ins verify
 expect_rc "verify passes with two provisioned apps" 0
+
+# the runner user: absent is a WARN (never a FAIL, no problem line), the exact rule passes with no WARN
+snap_restore
+printf '%s\n' "$ACL_BASE" | grep -v '^user runner ' > "$STATE/acl_list"
+ins verify
+expect_rc "an absent runner user does not fail verify" 0
+expect_out_has "an absent runner user is a WARN" "WARN: the Redis runner user is not installed yet"
+expect_out_has "an absent runner user leaves the ACL check passing" "PASS: Redis ACL users"
+expect_out_lacks "an absent runner user prints no FAIL" "FAIL:"
+snap_restore
+ins verify
+expect_rc "the exact runner rule passes verify" 0
+expect_out_lacks "the exact runner rule prints no WARN" "WARN:"
+no_leaks "runner rule"
+
+# the runner rule held in install-data.sh is the plan's exact rule (the Step 8 installer must hold the same string)
+want_rule='runner on resetpass ><password> resetkeys ~*:jobs:* resetchannels -@all +@list +@sortedset +@string +@keyspace +@transaction +@connection -@dangerous -@scripting -@pubsub -scan -randomkey -dbsize'
+if grep -qxF "readonly RUNNER_ACL_RULE='$want_rule'" "$script"; then _pass; else _fail "install-data.sh holds the exact RUNNER_ACL_RULE"; fi
 
 # the "no apps yet" pair
 snap_restore

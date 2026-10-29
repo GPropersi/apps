@@ -1,0 +1,76 @@
+# Shared cron grammar fixture. Read by platform/registry/test_validate_app_yaml.sh (bash) and, from Step 5,
+# by the jobs runner's Go parser test. Each data line is: valid|invalid<TAB>"<5 fields>"<TAB><note>
+# Exact reader rules (both readers, no trimming anywhere):
+#   - a blank line is a zero-length line; a whitespace-only line is NOT blank and is malformed
+#   - a comment line starts with # in column 1; an indented # is malformed
+#   - LF line ends only (a CR anywhere in a data line makes the row malformed)
+#   - exactly 2 tab characters per data line; the verdict is exactly valid or invalid
+#   - the cron is wrapped in double quotes (no quote inside); the note is non-empty
+#   - a step is bounded by the field's max minus min (not by the length of the range it follows)
+
+# --- plain and per-field ranges
+valid	"0 7 * * *"	daily at 07:00
+valid	"* * * * *"	every minute
+valid	"0 0 1 1 0"	lower bounds of every field
+valid	"59 23 31 12 7"	upper bounds of every field
+invalid	"60 * * * *"	minute above 59
+invalid	"99 * * * *"	minute far above 59
+invalid	"0 24 * * *"	hour above 23
+invalid	"0 0 0 * *"	day-of-month below 1
+invalid	"0 0 32 * *"	day-of-month above 31
+invalid	"0 0 * 0 *"	month below 1
+invalid	"0 0 * 13 *"	month above 12
+invalid	"0 0 * * 8"	day-of-week above 7
+
+# --- steps
+valid	"*/15 * * * *"	every 15 minutes
+valid	"0-30/10 * * * *"	stepped range
+valid	"*/59 * * * *"	largest step that fits the minute range
+invalid	"*/0 * * * *"	step of zero
+invalid	"*/60 * * * *"	step larger than the minute range
+invalid	"0 */24 * * *"	step larger than the hour range
+valid	"0-5/10 * * * *"	step bound is field max minus min (59), not the range length
+valid	"5-10/6 * * * *"	step larger than the range width but within the field span
+valid	"0 0 * * */7"	step 7 fits the day-of-week span 0-7
+invalid	"0-30/0 * * * *"	step of zero on a range
+invalid	"*/05 * * * *"	leading zero in the step
+invalid	"5/2 * * * *"	step on a bare number
+invalid	"*/ * * * *"	empty step
+
+# --- ranges and lists
+valid	"1,15,30 * * * *"	list
+valid	"0 9-17 * * 1-5"	office hours on weekdays
+valid	"5-5 * * * *"	single-value range
+valid	"0 7 1 1 1"	day-of-month and day-of-week both restricted
+valid	"0 0 * * 0-7"	day-of-week range across both Sunday spellings
+invalid	"0-60 * * * *"	minute range end above 59
+invalid	"0 0-24 * * *"	hour range end above 23
+invalid	"0 0 * * 5-8"	day-of-week range end above 7
+invalid	"*-5 * * * *"	star cannot start a range
+invalid	"5-1 * * * *"	reversed range
+invalid	"1,,2 * * * *"	empty list item
+invalid	",1 * * * *"	leading comma
+invalid	"1, * * * *"	trailing comma
+invalid	"1- * * * *"	range with no end
+invalid	"-5 * * * *"	range with no start
+
+# --- numbers, names and extensions
+invalid	"05 * * * *"	leading zero
+invalid	"0 07 * * *"	leading zero in the hour
+invalid	"0 0 * * mon"	day names are not accepted
+invalid	"0 0 * jan *"	month names are not accepted
+invalid	"@daily"	macro form
+invalid	"0 0 ? * *"	question mark
+invalid	"0 0 L * *"	last-day extension
+invalid	"0 0 * * 1#2"	nth-weekday extension
+
+# --- field count
+invalid	"0 7 * *"	four fields
+invalid	"0 7 * * * *"	six fields
+invalid	"0 9 * * *"	a no-break space (U+00A0) is not a field separator
+
+# --- Vixie rules (documented in the README)
+valid	"0 7 * * 7"	7 is Sunday
+valid	"0 7 * * 0"	0 is Sunday
+valid	"0 7 1 * 1"	day-of-month OR day-of-week: runs on the 1st and on every Monday
+valid	"0 7 * 1 *"	month only

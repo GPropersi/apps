@@ -60,6 +60,26 @@ Each app gets a Redis user limited to its own keys (`~<app>:*`) with dangerous c
 `RANDOMKEY` and `DBSIZE` are denied to app users so the key names of other apps cannot be enumerated. An app whose
 client library scans its own keyspace needs a per-app exception, added later.
 
+## Job secrets
+
+`platform new-db <app>` also writes `/var/lib/platform/job-secrets/<app>/jobs-secret` (40 characters `[A-Za-z0-9]`,
+`0440`, never rotated). It lives in a separate root, `deploy:64324 2710` (setgid, made by `install-data.sh`, which
+also requires the group 64324 to exist with no members), so the jobs runner can read every app's job secret through
+group 64324 without being able to read any DB or Redis password (those stay in group 64323). The same rule as for
+64323 applies: an app mounts only its own `/var/lib/platform/job-secrets/<app>/` directory, never the root or a parent
+of it, and gets group 64324 through `group_add: ["64324"]`.
+
+## Reserved key namespace
+
+`<app>:jobs:*` is reserved for the jobs runner inside each app prefix (queue, processing, delayed and dead keys). The
+runner's Redis user holds the pattern `~*:jobs:*`, which also reaches any `<app>:...:jobs:...` key, because `*` spans
+colons and a glob cannot be narrower. Apps must not use that namespace for other data.
+
+## Value size limit
+
+The shared Redis runs with `--proto-max-bulk-len 1mb`: the server rejects any single value over 1 MB, for all apps and
+clients. This bounds what the jobs runner can be made to read from an app's queue.
+
 ## Provisioning an app
 
 `platform new-db <app>` (over the `deploy` identity) is idempotent, never rotates a password and prints only the
@@ -93,7 +113,11 @@ App environment names:
 ```
 DB_HOST DB_PORT DB_NAME DB_USER DB_PASSWORD_FILE
 REDIS_HOST REDIS_PORT REDIS_USER REDIS_PASSWORD_FILE REDIS_KEY_PREFIX
+JOBS_SECRET_FILE
 ```
+
+`JOBS_SECRET_FILE` is the path of the app's job secret (see "Job secrets"), used to check the bearer token on
+`/_jobs/*`.
 
 Secrets are files, never values. The per-app secrets directory is `/var/lib/platform/secrets/<app>` (files
 `db-password` and `redis-password`), mounted read-only into the app container with `group_add: ["64323"]`.

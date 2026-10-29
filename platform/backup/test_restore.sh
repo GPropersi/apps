@@ -264,11 +264,13 @@ new_case() {
   PGPW="$C/etc/pg.pw"
   RDPW="$C/etc/redis.pw"
   S="$C/snap"
-  mkdir -p "$R" "$C/logs" "$SR" "$LD" "$C/etc" "$S$R/staging/postgres" "$S$R/staging/redis" "$S$SR/app-one" "$S$SR/my-app" "$S$C/etc"
+  JR="$C/job-secrets"
+  JPW="$C/etc/jobs-redis.pw"
+  mkdir -p "$R" "$C/logs" "$SR" "$JR" "$LD" "$C/etc" "$S$R/staging/postgres" "$S$R/staging/redis" "$S$SR/app-one" "$S$SR/my-app" "$S$C/etc" "$S$JR/my-app"
   OVS=("CASE_DIR=$C" "CALL_LOG=$CALL_LOG" "LOADER=$LOADER" "PLATFORM_BACKUP_TESTING=1" "PLATFORM_RESTORE_ALLOW_NONROOT=1"
     "PLATFORM_BACKUP_ENV_FILE=$C/backup.env" "PLATFORM_BACKUP_ENV_OWNER=$(id -u):$(id -g)" "PLATFORM_BACKUP_ROOT=$R"
     "PLATFORM_BACKUP_STATE_DIR=$C/status" "PLATFORM_BACKUP_LOG_DIR=$C/logs" "PLATFORM_BACKUP_LOCK=$C/lock"
-    "PLATFORM_BACKUP_SECRETS_ROOT=$SR" "PLATFORM_BACKUP_LOCK_DIR=$LD" "PLATFORM_BACKUP_PG_ADMIN_FILE=$PGPW" "PLATFORM_BACKUP_REDIS_ADMIN_FILE=$RDPW"
+    "PLATFORM_BACKUP_SECRETS_ROOT=$SR" "PLATFORM_BACKUP_JOB_SECRETS_ROOT=$JR" "PLATFORM_BACKUP_JOBS_REDIS_FILE=$JPW" "PLATFORM_BACKUP_LOCK_DIR=$LD" "PLATFORM_BACKUP_PG_ADMIN_FILE=$PGPW" "PLATFORM_BACKUP_REDIS_ADMIN_FILE=$RDPW"
     "PLATFORM_RESTORE_COMPOSE=$C/compose.yaml" "PLATFORM_RESTORE_INSTALL_DATA=$C/install-data.sh")
   : > "$C/compose.yaml"
   mkenv
@@ -282,6 +284,9 @@ new_case() {
   printf 'my-db' > "$S$SR/my-app/db-password"
   printf 'my-redis' > "$S$SR/my-app/redis-password"
   chmod 0400 "$S$SR/app-one/db-password" "$S$SR/my-app/db-password" "$S$SR/my-app/redis-password"
+  printf 'my-job' > "$S$JR/my-app/jobs-secret"
+  chmod 0400 "$S$JR/my-app/jobs-secret"
+  printf 'jobpass\n' > "$S$JPW"
   printf 'pgpass\n' > "$S$PGPW"
   printf 'redispass\n' > "$S$RDPW"
   # a live host that already has matching admin files and an empty data stack
@@ -501,6 +506,36 @@ expect_eq "the dir mode is 2750" "$(/usr/bin/stat -c %a "$SR/my-app")" "2750"
 expect_eq "the file mode is 440" "$(/usr/bin/stat -c %a "$SR/my-app/db-password")" "440"
 expect_eq "the other file is mode 440 too" "$(/usr/bin/stat -c %a "$SR/my-app/redis-password")" "440"
 expect_eq "restored content" "$(cat "$SR/my-app/db-password")" "my-db"
+if grep -qE -- "^chown -h 1234:64324 -- $R/restore/[^/]+$JR/my-app\$" "$CALL_LOG"; then _pass; else _fail "job-secrets dir chowned to the deploy uid and gid 64324 inside the restore dir"; fi
+if grep -qE -- "^chown -h 1234:64324 -- $R/restore/[^/]+$JR/my-app/jobs-secret\$" "$CALL_LOG"; then _pass; else _fail "job-secrets file chowned to the deploy uid and gid 64324"; fi
+expect_eq "the job-secrets dir mode is 2750" "$(/usr/bin/stat -c %a "$JR/my-app")" "2750"
+expect_eq "the job-secrets file mode is 440" "$(/usr/bin/stat -c %a "$JR/my-app/jobs-secret")" "440"
+expect_eq "restored job secret content" "$(cat "$JR/my-app/jobs-secret")" "my-job"
+new_case
+ln -s /nonexistent "$S$JR/my-app/evil"
+rs secrets my-app
+expect_rc "secrets refuses a symlink in the snapshot's job-secrets tree" 2
+if [ -e "$SR/my-app" ]; then _fail "the main secrets dir is not moved when the job tree is invalid"; else _pass; fi
+new_case
+rm -rf "$S$JR"
+rs full --confirm-destroy
+expect_rc "full succeeds on a snapshot with no job-secrets (pre-job-secrets)" 0
+new_case
+rm -rf "$S$JR/my-app"
+rs secrets my-app
+expect_rc "secrets restores an app the snapshot holds no job-secrets for" 0
+expect_out_has "...and says so" "holds no job-secrets"
+if [ -d "$SR/my-app" ] && [ ! -e "$JR/my-app" ]; then _pass; else _fail "only the secrets dir was restored"; fi
+new_case
+mkdir -p "$JR/my-app"
+rs secrets my-app
+expect_rc "secrets refuses when the job-secrets dir exists" 2
+expect_calls_lacks "no restic restore when the job-secrets dir exists" "restic restore"
+if [ -e "$SR/my-app" ]; then _fail "nothing is restored when the job-secrets dir exists"; else _pass; fi
+new_case
+rmdir "$JR"
+rs secrets my-app
+expect_rc "secrets refuses without the job-secrets root" 2
 new_case
 mkdir -p "$SR/my-app"
 printf 'live' > "$SR/my-app/db-password"
@@ -577,6 +612,52 @@ mkdir -p "$SR/app-one"
 rs full --confirm-destroy
 expect_rc "full refuses when a live secrets dir exists" 2
 expect_no_mut "no mutating call when a live secrets dir exists"
+new_case
+mkdir -p "$JR/my-app"
+rs full --confirm-destroy
+expect_rc "full refuses when a live job-secrets dir exists" 2
+expect_no_mut "no mutating call when a live job-secrets dir exists"
+new_case
+printf 'DIFFERENT\n' > "$JPW"
+rs full --confirm-destroy
+expect_rc "full refuses when the live runner password differs from the snapshot" 2
+expect_no_mut "no mutating call when the runner password differs"
+expect_eq "the differing runner password is untouched" "$(cat "$JPW")" "DIFFERENT"
+new_case
+rmdir "$JR"
+rs full --confirm-destroy
+expect_rc "full refuses without the job-secrets root" 2
+expect_no_mut "no mutating call without the job-secrets root"
+new_case
+rm -f "$S$JPW"
+rs full --confirm-destroy
+expect_rc "full tolerates a snapshot with no runner password (runner never installed)" 0
+if [ -e "$JPW" ]; then _fail "no runner password file is invented"; else _pass; fi
+new_case
+mkdir -p "$S$JR/Bad_Name"
+rs full --confirm-destroy
+expect_rc "full refuses a badly named dir in the snapshot's job-secrets tree" 2
+expect_no_mut "no mutating call when a job-secrets dir name is invalid"
+new_case
+ln -s /nonexistent "$S$JR/my-app/evil"
+rs full --confirm-destroy
+expect_rc "full refuses a symlink in the snapshot's job-secrets tree" 2
+expect_no_mut "no mutating call when the job-secrets tree holds a symlink"
+new_case
+rm -f "$S$JPW"
+ln -s "$PGPW" "$S$JPW"
+rs full --confirm-destroy
+expect_rc "full refuses a symlinked runner password in the snapshot" 2
+expect_no_mut "no mutating call when the snapshot's runner password is a symlink"
+new_case
+ov_set "PLATFORM_BACKUP_JOBS_REDIS_FILE=$C/no-such-dir/jobs-redis.pw"
+rs full --confirm-destroy
+expect_rc "full refuses when the runner password's parent dir is missing" 2
+expect_no_mut "no mutating call when the runner password's parent dir is missing"
+new_case
+printf 'jobpass\n' > "$JPW"
+rs full --confirm-destroy
+expect_rc "full accepts an identical live runner password" 0
 new_case
 rm -f "$PGPW" "$RDPW"
 rs full --confirm-destroy
@@ -669,6 +750,14 @@ expect_eq "the secrets root mode is unchanged" "$(/usr/bin/stat -c '%a' "$SR")" 
 if grep -qE -- " -- $SR\$" "$CALL_LOG"; then _fail "the secrets root itself is never chowned"; else _pass; fi
 expect_eq "restored app secret mode" "$(/usr/bin/stat -c '%a' "$SR/app-one/db-password")" "440"
 if grep -qE -- "^chown -h 1234:64323 -- $R/restore/[^/]+$SR/app-one/db-password\$" "$CALL_LOG"; then _pass; else _fail "restored app secret owner set inside the restore dir"; fi
+expect_calls_has "restores the job-secrets root and the runner password file" "--include $JR --include $JPW"
+expect_eq "restored job secret mode" "$(/usr/bin/stat -c '%a' "$JR/my-app/jobs-secret")" "440"
+expect_eq "restored job secret content" "$(cat "$JR/my-app/jobs-secret")" "my-job"
+if grep -qE -- "^chown -h 1234:64324 -- $R/restore/[^/]+$JR/my-app/jobs-secret\$" "$CALL_LOG"; then _pass; else _fail "restored job secret owner set to 64324 inside the restore dir"; fi
+if grep -qE -- " -- $JR\$" "$CALL_LOG"; then _fail "the job-secrets root itself is never chowned"; else _pass; fi
+expect_eq "the runner password file is restored" "$(cat "$JPW")" "jobpass"
+expect_eq "the runner password file mode is 0640" "$(/usr/bin/stat -c %a "$JPW")" "640"
+expect_calls_has "the runner password file is chowned root:64324" "chown 0:64324 -- $C/etc/.tmp.restore."
 expect_no_exclude "full success: no restic restore carries --exclude"
 # full takes no per-app lock files (the glob must match nothing; a stray lock would be a behaviour change to look at)
 if compgen -G "$LD/*.lock" > /dev/null; then _fail "full creates no per-app lock file"; else _pass; fi

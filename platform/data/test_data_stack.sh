@@ -47,7 +47,7 @@ pg_ranged=" max_connections shared_buffers "
 # Explicit exclusions for the hostname shape (a dotted name whose last label is letters only).
 host_registry="docker.io"
 host_label="platform.app"
-host_files=" README.md lib.sh yaml-subset.sh install-data.sh redis-entrypoint.sh test_data_stack.sh test_redis_entrypoint.sh "
+host_files=" README.md lib.sh yaml-subset.sh install-data.sh install-jobs.sh redis-entrypoint.sh test_data_stack.sh test_redis_entrypoint.sh "
 host_files="$host_files data-live.txt test_traefik_dynamic.sh 127.x State.OOMKilled postgres.public com.docker.compose.project platform.sh test_data_live.sh memory.current memory.stat memory.peak memory.max memory.events pg.log fill.txt up.txt up2.txt up3.txt pull-err compose.reversed postgres-admin.password redis-admin.password "
 host_files="$host_files new-db.sh test_new_db.sh reserved-names.txt logger.log stdin.log APP.lock myapp.lock other.lock docker.real c1.out c2.out State.Status State.Health State.Health.Status users.acl.tmp postgres-admin.password redis-admin.password Config.Env "
 host_exts=" yml yaml env acl conf "
@@ -247,7 +247,7 @@ run_checks() {
   local rflag=""
   while IFS= read -r item; do
     if [ -z "$rflag" ]; then
-      [[ " --maxmemory --maxmemory-policy --appendonly --appendfsync --aclfile " == *" $item "* ]] || r "redis: unexpected command flag '$item'"
+      [[ " --maxmemory --maxmemory-policy --appendonly --appendfsync --aclfile --proto-max-bulk-len " == *" $item "* ]] || r "redis: unexpected command flag '$item'"
       [ -z "${rseen[$item]+x}" ] || r "redis flag $item is given twice (last wins)"
       rseen[$item]=1
       rflag="$item"
@@ -261,6 +261,7 @@ run_checks() {
   [ "$(arg_after "$cf" redis --appendonly)" = yes ] || r "redis appendonly must be yes (AOF)"
   [ "$(arg_after "$cf" redis --appendfsync)" = everysec ] || r "redis appendfsync must be everysec"
   [ "$(arg_after "$cf" redis --aclfile)" = /data/users.acl ] || r "redis aclfile must be /data/users.acl"
+  [ "$(arg_after "$cf" redis --proto-max-bulk-len)" = 1mb ] || r "redis proto-max-bulk-len must be 1mb (no single value over 1 MB, for every client)"
   local mm lim
   mm="$(to_mb "$(arg_after "$cf" redis --maxmemory)")"
   lim="$(to_mb "$(ys_get "$cf" services/redis/mem_limit)")"
@@ -290,7 +291,7 @@ run_checks() {
     r "README.md is missing"
   else
     for k in noeviction 'no per-app quota' 'WARN' 'SCAN' 'RANDOMKEY' 'DBSIZE' connection.env PLATFORM_PG_HOST PLATFORM_PG_PORT PLATFORM_REDIS_HOST PLATFORM_REDIS_PORT \
-      DB_PASSWORD_FILE REDIS_KEY_PREFIX '/var/lib/platform/secrets/<app>' 'group_add: ["64323"]' 'vm.overcommit_memory=1' PgBouncer; do
+      DB_PASSWORD_FILE REDIS_KEY_PREFIX '/var/lib/platform/secrets/<app>' 'group_add: ["64323"]' 'vm.overcommit_memory=1' PgBouncer JOBS_SECRET_FILE '## Job secrets' '## Reserved key namespace' '## Value size limit' '--proto-max-bulk-len 1mb'; do
       grep -qF -- "$k" "$readme" || r "README.md lacks: $k"
     done
   fi
@@ -517,6 +518,9 @@ mutate "redis command -a" "a password flag in command" compose redis 2 after '^ 
 mutate "redis unknown flag appended" "unexpected command flag '--protected-mode'" compose redis 2 after '^      - /data/users.acl' '      - --protected-mode\n      - "no"'
 mutate "redis duplicated eviction policy" "--maxmemory-policy is given twice" compose redis 2 after '^      - /data/users.acl' '      - --maxmemory-policy\n      - allkeys-lru'
 mutate "redis duplicated appendonly" "--appendonly is given twice" compose redis 2 after '^      - /data/users.acl' '      - --appendonly\n      - "no"'
+mutate "proto-max-bulk-len flag removed" "redis proto-max-bulk-len must be 1mb" compose redis 2 delete '^      - --proto-max-bulk-len'
+mutate "proto-max-bulk-len value changed" "redis proto-max-bulk-len must be 1mb" compose redis 2 replace '^      - 1mb' '      - 512mb'
+mutate "redis duplicated proto-max-bulk-len" "--proto-max-bulk-len is given twice" compose redis 2 after '^      - /data/users.acl' '      - --proto-max-bulk-len\n      - 512mb'
 mutate "redis flag without a value" "has no value" compose redis 2 after '^      - /data/users.acl' '      - --save'
 
 # ---- mutation cases: README and payload ----

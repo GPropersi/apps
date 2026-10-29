@@ -160,7 +160,7 @@ case "$1" in
   is-active) if [ -f "$STATE/timer_active" ]; then echo active; exit 0; fi; echo inactive; exit 3 ;;
   enable) touch "$STATE/timer_enabled" "$STATE/timer_active"; exit 0 ;;
   show)
-    if [ -f "$STATE/no_next" ]; then echo "NextElapseUSecRealtime="; else echo "NextElapseUSecRealtime=Sat 2026-10-24 03:35:00 CDT"; fi
+    if [ -f "$STATE/no_next" ]; then echo "NextElapseUSecRealtime="; else echo "NextElapseUSecRealtime=Sat 2026-10-24 03:35:00 PDT"; fi
     exit 0 ;;
   *) exit 0 ;;
 esac
@@ -182,7 +182,7 @@ ENV_BODY=$'RESTIC_REPOSITORY=s3:https://r2.example.test/bucket\nRESTIC_PASSWORD=
 fresh() {
   rm -rf "$T_TMP/root" "$STATE"
   mkdir -p "$STATE/owner" "$T_TMP/root/etc/platform" "$T_TMP/root/etc/systemd/system" "$T_TMP/root/usr/local/bin" \
-    "$T_TMP/root/opt/platform/data" "$T_TMP/root/var/lib/platform/secrets" "$T_TMP/root/var/log/journal"
+    "$T_TMP/root/opt/platform/data" "$T_TMP/root/var/lib/platform/secrets" "$T_TMP/root/var/lib/platform/job-secrets" "$T_TMP/root/var/log/journal"
   t_reset_calls
   R="$T_TMP/root"
   printf '%s' "$ENV_BODY" > "$R/etc/platform/backup.env"
@@ -291,6 +291,9 @@ c_env_cr() { printf 'RESTIC_REPOSITORY=s3:x\r\n' > "$R/etc/platform/backup.env";
 c_env_symlink() { mv "$R/etc/platform/backup.env" "$R/etc/platform/real.env"; ln -s real.env "$R/etc/platform/backup.env"; }
 c_no_stack() { rm -rf "$R/opt/platform/data"; }
 c_no_secrets_root() { rmdir "$R/var/lib/platform/secrets"; }
+c_no_job_secrets_root() { rmdir "$R/var/lib/platform/job-secrets"; }
+c_job_secrets_symlink() { rmdir "$R/var/lib/platform/job-secrets"; mkdir -p "$R/elsewhere"; ln -s "$R/elsewhere" "$R/var/lib/platform/job-secrets"; }
+c_job_secrets_file() { rmdir "$R/var/lib/platform/job-secrets"; : > "$R/var/lib/platform/job-secrets"; }
 c_pg_missing() { rm -f "$R/etc/platform/postgres-admin.password"; }
 c_rd_missing() { rm -f "$R/etc/platform/redis-admin.password"; }
 c_work_symlink() { mkdir -p "$R/elsewhere"; ln -s "$R/elsewhere" "$R/var/lib/platform/backup"; }
@@ -307,6 +310,9 @@ precond_case "a CR" c_env_cr "contains a CR"
 precond_case "a symlinked env file" c_env_symlink "env file is a symlink"
 precond_case "no data stack" c_no_stack "platform-data stack is not installed"
 precond_case "no secrets root" c_no_secrets_root "secrets root"
+precond_case "no job-secrets root" c_no_job_secrets_root "run host-data install first"
+precond_case "a symlinked job-secrets root" c_job_secrets_symlink "job-secrets root"
+precond_case "a job-secrets root that is a file" c_job_secrets_file "job-secrets root"
 precond_case "no postgres admin file" c_pg_missing "postgres-admin.password is missing"
 precond_case "no redis admin file" c_rd_missing "redis-admin.password is missing"
 precond_case "a symlinked work dir" c_work_symlink "is a symlink"
@@ -393,7 +399,7 @@ expect_out_lacks "restore-only second run changes nothing" "changed:"
 expect_calls_lacks "restore-only second run downloads nothing" "curl "
 
 # a following install on a host that now has the data stack and admin files
-mkdir -p "$R/opt/platform/data" "$R/var/lib/platform/secrets" "$R/etc/platform" "$R/etc/systemd/system" "$R/var/log/journal"
+mkdir -p "$R/opt/platform/data" "$R/var/lib/platform/secrets" "$R/var/lib/platform/job-secrets" "$R/etc/platform" "$R/etc/systemd/system" "$R/var/log/journal"
 printf 'services:\n' > "$R/opt/platform/data/compose.yaml"
 printf 'fixture\n' > "$R/etc/platform/postgres-admin.password"
 printf 'fixture\n' > "$R/etc/platform/redis-admin.password"
@@ -515,6 +521,7 @@ m_timer_disabled() { rm -f "$STATE/timer_enabled"; }
 m_timer_inactive() { rm -f "$STATE/timer_active"; }
 m_no_next() { touch "$STATE/no_next"; }
 m_timer_outside() { sed -i 's/03:35:00/03:10:00/' "$(UNITS)/platform-backup.timer"; }
+m_timer_zone() { sed -i 's#03:35:00 .*#03:35:00 America/New_York#' "$(UNITS)/platform-backup.timer"; }
 m_timer_late() { sed -i 's/03:35:00/03:50:00/' "$(UNITS)/platform-backup.timer"; }
 m_last_failed() { printf '%s\t%s\tfailed\t-\trestic-backup\n' "$now_iso" "$now_iso" > "$(STATE_DIR)/last-run.tsv"; }
 m_last_old() { printf '%s\t%s\tok\tsnap1234\t-\n' "$old_iso" "$old_iso" > "$(STATE_DIR)/last-run.tsv"; }
@@ -536,6 +543,7 @@ verify_case "a disabled timer" m_timer_disabled "platform-backup.timer is not en
 verify_case "an inactive timer" m_timer_inactive "platform-backup.timer is not active"
 verify_case "no next run" m_no_next "has no next run scheduled"
 verify_case "a timer outside the window" m_timer_outside "outside the backup window"
+verify_case "a timer zone that differs from the window zone" m_timer_zone "timer timezone 'America/New_York' differs from BACKUP_WINDOW_TZ 'America/Los_Angeles'"
 verify_case "a timer whose backstop leaves the window" m_timer_late "ends after BACKUP_WINDOW_END"
 verify_case "a failed last run" m_last_failed "the last backup run failed (phase restic-backup)"
 verify_case "a last run older than 36h" m_last_old "more than 36h ago"
@@ -547,6 +555,10 @@ verify_case "backup-status with a wrong mode" m_state_mode "backup-status/ has o
 verify_case "last-run.tsv with a wrong mode" m_last_mode "last-run.tsv has owner/mode"
 verify_case "backup.env with a wrong mode" m_env_mode "backup.env: env file mode is not 0600"
 verify_case "a missing backup.env" m_env_missing "backup.env: env file is missing"
+m_no_job_secrets() { rmdir "$R/var/lib/platform/job-secrets"; }
+m_job_secrets_link() { rmdir "$R/var/lib/platform/job-secrets"; mkdir -p "$R/elsewhere"; ln -s "$R/elsewhere" "$R/var/lib/platform/job-secrets"; }
+verify_case "a missing job-secrets root" m_no_job_secrets "job-secrets root"
+verify_case "a symlinked job-secrets root" m_job_secrets_link "job-secrets root"
 verify_case "a work dir with a wrong mode" m_work_mode "var/lib/platform/backup/ has owner/mode"
 
 # an absent journal dir and an absent last-run.tsv are only WARNs
@@ -678,7 +690,7 @@ for want in "Type=oneshot" "User=root" "Wants=network-online.target" "After=netw
   if grep -qxF "$want" "$unit"; then _pass; else _fail "the service unit contains $want"; fi
 done
 if grep -q 'EnvironmentFile' "$unit"; then _fail "the service unit has no EnvironmentFile"; else _pass; fi
-for want in "OnCalendar=*-*-* 03:35:00 America/Chicago" "Persistent=true" "AccuracySec=1min" "Unit=platform-backup.service" "WantedBy=timers.target"; do
+for want in "OnCalendar=*-*-* 03:35:00 America/Los_Angeles" "Persistent=true" "AccuracySec=1min" "Unit=platform-backup.service" "WantedBy=timers.target"; do
   if grep -qxF "$want" "$timer"; then _pass; else _fail "the timer contains $want"; fi
 done
 

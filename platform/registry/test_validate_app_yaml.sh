@@ -165,6 +165,101 @@ sed -e 's/^name: chores/name: cronok/' -e 's#schedule: "0 7 \* \* \*"#schedule: 
 run_cmd "$validator" "$f"
 expect_rc "cron with lists, ranges and steps validates" 0
 
+# ---- the shared cron fixture (the Go parser reads the same table) ----
+
+# cron_row <verdict> <cron> <note>: one table row against the validator, via a scratch copy of the example.
+cron_row() {
+  local verdict="$1" cron="$2" note="$3" d="$cases/cronrow"
+  rm -rf "$d"
+  mkdir -p "$d"
+  sed -e 's/^name: chores/name: cronrow/' -e "s|schedule: \"0 7 \\* \\* \\*\"|schedule: \"$cron\"|" "$example" > "$d/app.yaml"
+  run_cmd "$validator" "$d/app.yaml"
+  if [ "$verdict" = valid ]; then
+    expect_rc "cron table: valid \"$cron\" ($note)" 0
+  else
+    expect_rc "cron table: invalid \"$cron\" ($note)" 1
+    expect_out_has "cron table: invalid \"$cron\" names a schedule problem" "schedule"
+  fi
+}
+
+table="$here/cron-cases.table"
+hint='expected valid|invalid<TAB>"<5 fields>"<TAB><note> (tab separators, quoted cron, # comments and blank lines allowed)'
+tab=$'\t'
+rows=0
+problems=()
+
+# read_cron_table <file> [run]: the table reader. Skips zero-length lines and lines starting with # (no trimming),
+# collects one entry in the global `problems` per malformed row (naming "line N" and the shape hint) and, when
+# there are no data rows, one more. Sets the global `rows`. With a second argument it also runs cron_row on each
+# good row. Returns 1 when `problems` is not empty.
+read_cron_table() {
+  local file="$1" run="${2:-}" line verdict cron note extra tabs lineno=0
+  rows=0
+  problems=()
+  while IFS= read -r line || [ -n "$line" ]; do
+    lineno=$((lineno + 1))
+    case "$line" in '' | '#'*) continue ;; esac
+    IFS="$tab" read -r verdict cron note extra <<< "$line"
+    tabs="${line//[^$tab]/}"
+    if [ "${#tabs}" -ne 2 ] || [[ "$line" == *$'\r'* ]] || [ -n "${extra:-}" ] || { [ "$verdict" != valid ] && [ "$verdict" != invalid ]; } \
+      || ! [[ "$cron" =~ ^\"[^\"]*\"$ ]] || [ -z "$note" ]; then
+      problems+=("cron-cases.table line $lineno is malformed: $hint")
+      continue
+    fi
+    rows=$((rows + 1))
+    if [ -n "$run" ]; then
+      cron="${cron#\"}"
+      cron="${cron%\"}"
+      cron_row "$verdict" "$cron" "$note"
+    fi
+  done < "$file"
+  if [ "$rows" -eq 0 ]; then problems+=("cron-cases.table has no data rows"); fi
+  [ "${#problems[@]}" -eq 0 ]
+}
+
+read_cron_table "$table" run
+for p in "${problems[@]+"${problems[@]}"}"; do _fail "$p"; done
+if [ "$rows" -ge 30 ]; then _pass; else _fail "cron-cases.table has $rows data rows, need at least 30"; fi
+
+# Named-field reasons, and the reserved app name.
+mutate "cron minute 99 names the field" "schedule minute field '99'" 's/schedule: "0 7 \* \* \*"/schedule: "99 * * * *"/'
+mutate "cron step zero names the field" "schedule minute field '*/0' has a step of zero" 's/schedule: "0 7 \* \* \*"/schedule: "*\/0 * * * *"/'
+mutate "cron reversed range names the field" "schedule minute field '5-1' has a reversed range" 's/schedule: "0 7 \* \* \*"/schedule: "5-1 * * * *"/'
+mutate "cron hour 24 names the field" "schedule hour field '24'" 's/schedule: "0 7 \* \* \*"/schedule: "0 24 * * *"/'
+mutate "cron day-of-month 0 names the field" "schedule day-of-month field '0'" 's/schedule: "0 7 \* \* \*"/schedule: "0 0 0 * *"/'
+mutate "reserved name jobs" "name 'jobs' is reserved" 's/^name: chores/name: jobs/' jobs
+
+# The real reader on bad tables (no run mode, so nothing reaches _fail): every case must be reported.
+# bad_table <label> <expected "line N" or text> <content printf-format>
+bad_table() {
+  local label="$1" want="$2" f="$T_TMP/badtable.table"
+  printf '%b' "$3" > "$f"
+  rc=0
+  read_cron_table "$f" || rc=$?
+  out="$(printf '%s\n' "${problems[@]+"${problems[@]}"}")"
+  expect_rc "bad table, $label: rejected" 1
+  expect_out_has "bad table, $label: reports $want" "$want"
+}
+bad_table "comments only" "has no data rows" '# only a comment\n\n'
+bad_table "empty file" "has no data rows" ''
+bad_table "one tab" "line 2" '# c\nvalid\t"0 7 * * *"\n'
+bad_table "three tabs" "line 1" 'valid\t"0 7 * * *"\tnote\textra\n'
+bad_table "unquoted cron" "line 1" 'valid\t0 7 * * *\tnote\n'
+bad_table "verdict maybe" "line 1" 'maybe\t"0 7 * * *"\tnote\n'
+bad_table "empty note" "line 1" 'valid\t"0 7 * * *"\t\n'
+bad_table "whitespace-only line" "line 2" 'valid\t"0 7 * * *"\tnote\n   \n'
+bad_table "indented comment" "line 2" 'valid\t"0 7 * * *"\tnote\n # indented\n'
+bad_table "CRLF line end" "line 1" 'valid\t"0 7 * * *"\tnote\r\n'
+bad_table "hint shape" 'valid|invalid<TAB>"<5 fields>"<TAB><note>' 'valid\t"0 7 * * *"\n'
+bad_table "hint line number" "line 3" '# c\n\nbogus\n'
+# A good table is accepted and counted.
+printf 'valid\t"0 7 * * *"\tnote\n# c\n\ninvalid\t"60 * * * *"\tnote\n' > "$T_TMP/goodtable.table"
+rc=0
+# shellcheck disable=SC2034
+read_cron_table "$T_TMP/goodtable.table" || rc=$?
+expect_rc "good table accepted" 0
+expect_eq "good table row count" "$rows" "2"
+
 # A reserved-names file with no entries fails closed.
 mkdir -p "$T_TMP/emptyreserved" "$T_TMP/emptyreserved-lib"
 emptyreserved="$T_TMP/emptyreserved/platform/registry"

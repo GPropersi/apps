@@ -220,6 +220,8 @@ new_case() {
   export PLATFORM_BACKUP_LOG_DIR="$C/logs"
   export PLATFORM_BACKUP_LOCK="$C/lock"
   export PLATFORM_BACKUP_SECRETS_ROOT="$C/secrets"
+  export PLATFORM_BACKUP_JOB_SECRETS_ROOT="$C/job-secrets"
+  export PLATFORM_BACKUP_JOBS_REDIS_FILE="$C/jobs-redis.pw"
   export PLATFORM_BACKUP_PG_ADMIN_FILE="$C/pg.pw"
   export PLATFORM_BACKUP_REDIS_ADMIN_FILE="$C/redis.pw"
   unset PLATFORM_BACKUP_DEADLINE_SECS PLATFORM_BACKUP_PG_CONTAINER PLATFORM_BACKUP_REDIS_CONTAINER
@@ -229,7 +231,7 @@ new_case() {
   export ADV_TO=1000 HHMM_TO=04:00
   printf '1000' > "$CLK"
   printf '04:00' > "$HHMM"
-  printf 'BACKUP_WINDOW_START=03:30\nBACKUP_WINDOW_END=05:00\nBACKUP_WINDOW_TZ=America/Chicago\n' > "$WINF"
+  printf 'BACKUP_WINDOW_START=03:30\nBACKUP_WINDOW_END=05:00\nBACKUP_WINDOW_TZ=America/Los_Angeles\n' > "$WINF"
   mkenv
   # Fixtures for the real data phases (section 13): two databases, the two data volumes, a Redis that saves at once.
   printf 'app_one\napp_two\n' > "$C/dblist"
@@ -239,6 +241,9 @@ new_case() {
   printf '0 ok\n' > "$C/info_seq"
   mkdir -p "$C/secrets/app_one"
   printf 'x' > "$C/secrets/app_one/db-password"
+  mkdir -p "$C/job-secrets/app_one"
+  printf 'x' > "$C/job-secrets/app_one/jobs-secret"
+  printf 'x' > "$C/jobs-redis.pw"
   printf 'x' > "$C/pg.pw"
   printf 'x' > "$C/redis.pw"
 }
@@ -746,7 +751,11 @@ expect_eq "window.env keys" "$(cut -d= -f1 "$wf" | tr '\n' ' ')" "BACKUP_WINDOW_
 w_start="$(sed -n 's/^BACKUP_WINDOW_START=//p' "$wf")"
 w_end="$(sed -n 's/^BACKUP_WINDOW_END=//p' "$wf")"
 if [[ "$w_start" < "$w_end" ]]; then _pass; else _fail "window.env START < END"; fi
-expect_eq "window.env TZ" "$(sed -n 's/^BACKUP_WINDOW_TZ=//p' "$wf")" "America/Chicago"
+expect_eq "window.env TZ" "$(sed -n 's/^BACKUP_WINDOW_TZ=//p' "$wf")" "America/Los_Angeles"
+# the platform moved to Pacific time: no file under platform/ may still name the old zone
+# (the name is built from pieces so this guard does not match itself)
+old_zone="America/""Chi""cago"
+if grep -rIqF -- "$old_zone" "$here/.."; then _fail "no file under platform/ names $old_zone"; else _pass; fi
 new_case
 out="$(bash -c '. "$SCRIPT"; window_file' 2>&1)"
 expect_eq "window_file defaults to window.env beside backup.sh" "$out" "$here/window.env"
@@ -856,7 +865,7 @@ expect_lt "order: pg_dumpall before the first pg_dump" "$l_all" "$l_d1"
 expect_lt "order: every pg_dump before restic backup" "$l_d2" "$l_rb"
 expect_lt "order: pg_dumpall before restic backup" "$l_all" "$l_rb"
 rl="$(grep -F 'restic backup' "$CALL_LOG")"
-for want in "$C/secrets" "$C/pg.pw" "$C/redis.pw" "$C/root/staging" "--exclude .*.lock" "--exclude .tmp.*" "--host platform" "--tag platform --tag nightly" "--json"; do
+for want in "$C/secrets" "$C/job-secrets" "$C/jobs-redis.pw" "$C/pg.pw" "$C/redis.pw" "$C/root/staging" "--exclude .*.lock" "--exclude .tmp.*" "--host platform" "--tag platform --tag nightly" "--json"; do
   expect_text_has "restic backup argv has: $want" "$rl" "$want"
 done
 expect_calls_has "positive control: manual tag path not used on nightly" "--tag nightly"
@@ -881,6 +890,41 @@ run_real 'main manual'
 expect_rc "manual run ok" 0
 expect_calls_has "manual tag" "--tag platform --tag manual"
 expect_calls_lacks "manual run has no nightly tag" "--tag nightly"
+
+# 13a2. Job secrets and the runner password
+new_case
+run_real 'main nightly'
+expect_rc "runner password present: run ok" 0
+expect_out_has "present runner password is logged" "state jobs_redis_password=present"
+new_case
+rm -f "$C/jobs-redis.pw"
+run_real 'main nightly'
+expect_rc "absent runner password is tolerated: run ok" 0
+expect_out_has "absent runner password is logged" "state jobs_redis_password=absent"
+expect_calls_has "absent runner password: the job-secrets root is still backed up" "$C/job-secrets"
+expect_calls_lacks "absent runner password: not named in the restic argv" "$C/jobs-redis.pw"
+new_case
+rm -rf "$C/job-secrets"
+run_real 'main nightly'
+expect_rc "a missing job-secrets root fails the env phase" 2
+expect_out_has "the missing root is named" "job-secrets root"
+expect_calls_lacks "a missing job-secrets root: no restic call" "restic"
+new_case
+rm -f "$C/jobs-redis.pw"
+ln -s "$C/pg.pw" "$C/jobs-redis.pw"
+run_real 'main nightly'
+expect_rc "a symlinked runner password fails the env phase" 2
+expect_calls_lacks "a symlinked runner password: no restic backup" "restic backup"
+new_case
+rm -f "$C/jobs-redis.pw"
+mkdir "$C/jobs-redis.pw"
+run_real 'main nightly'
+expect_rc "a directory as the runner password fails the env phase" 2
+new_case
+rm -rf "$C/job-secrets"
+printf 'x' > "$C/job-secrets"
+run_real 'main nightly'
+expect_rc "a job-secrets root that is a file fails the env phase" 2
 
 # 13b. Caller environment is scrubbed (a hand run without sudo)
 new_case
@@ -1187,6 +1231,8 @@ for script in "$SCRIPT" "$RESTORE_SCRIPT"; do
     if grep -qF -- "- $want:$want:ro" "$COMPOSE"; then _pass; else _fail "compose.yaml mounts $want at the same path (drift check positive control)"; fi
   done
   expect_eq "$b: the secrets root default is install-data's" "$(default_path_of "$script" SECRETS_ROOT)" "/var/lib/platform/secrets"
+  expect_eq "$b: the job-secrets root default is install-data's" "$(default_path_of "$script" JOB_SECRETS_ROOT)" "/var/lib/platform/job-secrets"
+  expect_eq "$b: the runner password default is the install-jobs path" "$(default_path_of "$script" JOBS_REDIS_FILE)" "/etc/platform/jobs-redis.password"
 done
 expect_eq "backup.sh and restore.sh agree on the in-container Redis admin file" "$(grep -m1 '^REDIS_CTR_ADMIN_FILE=' "$SCRIPT")" "$(grep -m1 '^REDIS_CTR_ADMIN_FILE=' "$RESTORE_SCRIPT")"
 expect_eq "the in-container Redis admin file is the path compose.yaml mounts" "$(sed -n 's/^REDIS_CTR_ADMIN_FILE=//p' "$SCRIPT")" "/etc/platform/redis-admin.password"

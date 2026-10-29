@@ -1,6 +1,6 @@
 # platform/backup
 
-Nightly backup of the shared data layer (Postgres, Redis, the secrets root and the two admin password files) to a
+Nightly backup of the shared data layer (Postgres, Redis, the secrets and job-secrets roots, the two admin password files and the runner password file when present) to a
 restic repository in a Cloudflare R2 bucket. `backup.sh` runs as root from a systemd oneshot on the app host (or by
 hand: `backup.sh nightly|manual`). Tracked in issue #13.
 
@@ -11,7 +11,7 @@ What is here:
   `redis` (BGSAVE and copy), `restic-backup`, `restic-forget`, `restic-check`, `volumes` (warn-only inventory of
   Docker volumes nothing backs up).
 - **Snapshots**: one restic snapshot per run, host `platform`, tags `platform` and the run mode (`nightly` or
-  `manual`), holding the Postgres dumps and globals, the Redis files, the secrets root and the two admin password
+  `manual`), holding the Postgres dumps and globals, the Redis files, the secrets and job-secrets roots, the runner password file (when present) and the two admin password
   files. Retention: `forget --prune` keeps 7 daily, 4 weekly and 6 monthly snapshots; it is skipped (and the run
   fails, naming the reason) unless the repository lists the snapshot just created and at least one more than before.
 - **`restore.sh`**: run as root, modes `list`, `app APP --into DB`, `secrets APP`, `host-files` and
@@ -66,6 +66,15 @@ start_utc<TAB>end_utc<TAB>result<TAB>snapshot<TAB>failed_phase
 starts outside it, or starts inside and ends after `END`, still succeeds and adds a warning to its Discord message
 (`started outside backup window`, `overran backup window`); a `manual` run adds neither. A `Persistent=true` catch-up
 run can start at any hour, so anything that reads the window must tolerate that.
+
+The jobs runner (`platform/jobs/`) is the second consumer. It mounts the directory `/opt/platform/backup` read-only
+and re-reads `window.env` by name on every window decision, because `install-backup.sh` replaces the file by temp
+file plus rename (a new inode; a single-file bind mount would go stale). The runner skips scheduled runs inside the
+window and holds queued items until it ends.
+
+Timezone change: `BACKUP_WINDOW_TZ` and the timer's `OnCalendar` zone moved from US Central time to
+`America/Los_Angeles`. On a host that already has the backup installed, the next `host-backup install` therefore moves
+the nightly run two hours earlier in absolute time (a one-time shift; the local-time window itself is unchanged).
 
 ## Run rules
 

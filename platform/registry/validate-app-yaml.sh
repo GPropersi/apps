@@ -78,16 +78,66 @@ raw_checks() {
 }
 
 # cron_field_ok <field>: a comma list of items; item = "*", a number or a range, with an optional /step.
-CRON_ITEM='(\*|[0-9]+(-[0-9]+)?)(/[0-9]+)?'
+# Strict grammar, the same one the runner's Go parser accepts (shared fixture cron-cases.table): numbers
+# without leading zeros, N-M with N <= M, a /step (>= 1, at most the field's max minus min) only after "*" or a range.
+CRON_NUM='(0|[1-9][0-9]{0,5})'
+CRON_ITEM="(\\*|${CRON_NUM}(-${CRON_NUM})?)(/${CRON_NUM})?"
 CRON_RE="^${CRON_ITEM}(,${CRON_ITEM})*\$"
-cron_field_ok() { [[ "$1" =~ $CRON_RE ]]; }
+CRON_NAMES=(minute hour day-of-month month day-of-week)
+CRON_MIN=(0 0 1 1 0)
+CRON_MAX=(59 23 31 12 7)
+
+# cron_field_problem <index> <field>: prints the reason and returns 1 when the field is not valid.
+cron_field_problem() {
+  local idx="$1" field="$2" lo hi item base step a b
+  lo="${CRON_MIN[$idx]}"
+  hi="${CRON_MAX[$idx]}"
+  [[ "$field" =~ $CRON_RE ]] || { echo "is not a cron field"; return 1; }
+  local -a items
+  IFS=',' read -r -a items <<< "$field"
+  for item in "${items[@]}"; do
+    base="${item%%/*}"
+    step=""
+    [ "$base" = "$item" ] || step="${item#*/}"
+    if [ "$base" = "*" ]; then
+      :
+    elif [[ "$base" == *-* ]]; then
+      a="${base%-*}"
+      b="${base#*-}"
+      if [ "$a" -lt "$lo" ] || [ "$a" -gt "$hi" ] || [ "$b" -lt "$lo" ] || [ "$b" -gt "$hi" ]; then
+        echo "is out of range (must be $lo-$hi)"
+        return 1
+      fi
+      if [ "$a" -gt "$b" ]; then echo "has a reversed range '$base'"; return 1; fi
+    else
+      if [ -n "$step" ]; then echo "has a step '/$step' on a single number"; return 1; fi
+      if [ "$base" -lt "$lo" ] || [ "$base" -gt "$hi" ]; then
+        echo "is out of range (must be $lo-$hi)"
+        return 1
+      fi
+    fi
+    if [ -n "$step" ]; then
+      if [ "$step" -lt 1 ]; then echo "has a step of zero"; return 1; fi
+      if [ "$step" -gt $((hi - lo)) ]; then echo "has a step '/$step' larger than the range $lo-$hi"; return 1; fi
+    fi
+  done
+  return 0
+}
 
 check_schedule() {
-  local where="$1" sched="$2" f
+  local where="$1" sched="$2" i reason
   local -a fields
   read -r -a fields <<< "$sched"
-  for f in "${fields[@]}"; do
-    cron_field_ok "$f" || { err "$where schedule field '$f' is not a cron field"; return; }
+  for i in "${!fields[@]}"; do
+    # A sixth or later field has no name or range; only its shape is checked before the count error below.
+    if [ "$i" -ge 5 ]; then
+      [[ "${fields[$i]}" =~ $CRON_RE ]] || { err "$where schedule field '${fields[$i]}' is not a cron field"; return; }
+      continue
+    fi
+    if ! reason="$(cron_field_problem "$i" "${fields[$i]}")"; then
+      err "$where schedule ${CRON_NAMES[$i]} field '${fields[$i]}' $reason"
+      return
+    fi
   done
   [ "${#fields[@]}" -eq 5 ] || err "$where schedule must have exactly 5 fields"
 }
