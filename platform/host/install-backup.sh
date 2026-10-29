@@ -75,6 +75,7 @@ STATE_DIR="${INSTALL_BACKUP_STATE_DIR:-$VAR_DIR/backup-status}"
 LOG_DIR="${INSTALL_BACKUP_LOG_DIR:-$ROOT/var/log/platform-backup}"
 ENV_FILE="${INSTALL_BACKUP_ENV_FILE:-$ROOT/etc/platform/backup.env}"
 SECRETS_DIR="${INSTALL_BACKUP_SECRETS_ROOT:-$VAR_DIR/secrets}"
+JOB_SECRETS_DIR="${INSTALL_BACKUP_JOB_SECRETS_ROOT:-$VAR_DIR/job-secrets}"
 PG_ADMIN_FILE="${INSTALL_BACKUP_PG_ADMIN_FILE:-$ROOT/etc/platform/postgres-admin.password}"
 REDIS_ADMIN_FILE="${INSTALL_BACKUP_REDIS_ADMIN_FILE:-$ROOT/etc/platform/redis-admin.password}"
 DATA_DIR="${INSTALL_BACKUP_DATA_DIR:-$ROOT/opt/platform/data}"
@@ -219,6 +220,8 @@ payload_backup_sh() {
 #   PLATFORM_BACKUP_LOG_DIR             /var/log/platform-backup
 #   PLATFORM_BACKUP_LOCK                /run/platform-backup.lock
 #   PLATFORM_BACKUP_SECRETS_ROOT        /var/lib/platform/secrets
+#   PLATFORM_BACKUP_JOB_SECRETS_ROOT    /var/lib/platform/job-secrets   (must exist; a missing root fails the env phase)
+#   PLATFORM_BACKUP_JOBS_REDIS_FILE     /etc/platform/jobs-redis.password   (optional: absent until the runner is installed)
 #   PLATFORM_BACKUP_PG_ADMIN_FILE       /etc/platform/postgres-admin.password
 #   PLATFORM_BACKUP_REDIS_ADMIN_FILE    /etc/platform/redis-admin.password
 #   PLATFORM_BACKUP_PG_CONTAINER        platform-data-postgres
@@ -404,6 +407,8 @@ load_overrides() {
   ov_path LOG_DIR PLATFORM_BACKUP_LOG_DIR /var/log/platform-backup
   ov_path LOCK_FILE PLATFORM_BACKUP_LOCK /run/platform-backup.lock
   ov_path SECRETS_ROOT PLATFORM_BACKUP_SECRETS_ROOT /var/lib/platform/secrets
+  ov_path JOB_SECRETS_ROOT PLATFORM_BACKUP_JOB_SECRETS_ROOT /var/lib/platform/job-secrets
+  ov_path JOBS_REDIS_FILE PLATFORM_BACKUP_JOBS_REDIS_FILE /etc/platform/jobs-redis.password
   ov_path PG_ADMIN_FILE PLATFORM_BACKUP_PG_ADMIN_FILE /etc/platform/postgres-admin.password
   ov_path REDIS_ADMIN_FILE PLATFORM_BACKUP_REDIS_ADMIN_FILE /etc/platform/redis-admin.password
   ov_name PG_CONTAINER PLATFORM_BACKUP_PG_CONTAINER platform-data-postgres
@@ -734,6 +739,22 @@ phase_env() {
     die_phase env 2 "missing required env var(s): $missing"
   fi
   export RESTIC_REPOSITORY RESTIC_PASSWORD AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_DEFAULT_REGION
+  # The job-secrets root is created by install-data (before the first backup that carries this check): fail closed on a
+  # missing or non-directory root rather than let restic silently skip it. The runner password file is optional.
+  if [ ! -d "$JOB_SECRETS_ROOT" ] || [ -L "$JOB_SECRETS_ROOT" ]; then
+    log "FATAL: the job-secrets root $JOB_SECRETS_ROOT is missing or not a directory (run host-data install)"
+    die_phase env 2 "the job-secrets root is missing or not a directory"
+  fi
+  JOBS_REDIS_PRESENT=0
+  if [ -L "$JOBS_REDIS_FILE" ] || { [ -e "$JOBS_REDIS_FILE" ] && [ ! -f "$JOBS_REDIS_FILE" ]; }; then
+    log "FATAL: $JOBS_REDIS_FILE is a symlink or not a regular file"
+    die_phase env 2 "the runner password path is a symlink or not a regular file"
+  elif [ -f "$JOBS_REDIS_FILE" ]; then
+    JOBS_REDIS_PRESENT=1
+    log "state jobs_redis_password=present"
+  else
+    log "state jobs_redis_password=absent"
+  fi
   # The unit runs with neither $HOME nor $XDG_CACHE_HOME, so restic would warn on every call and prune without a cache.
   # A fixed cache inside the root-only state dir (restic creates it 0700); the caller's RESTIC_CACHE_DIR was scrubbed.
   export RESTIC_CACHE_DIR="$BACKUP_ROOT/restic-cache"
@@ -933,6 +954,9 @@ phase_redis() {
 
 phase_restic_backup() {
   local rc=0 line sid="" sum_re='"message_type":"summary"' id_re='"snapshot_id":"([0-9a-f]{8,64})"' pre="$WORK/snapshots-before"
+  local -a extra=()
+  # The runner password pairs with users.acl (in the Redis copy); it is absent until the runner is installed.
+  if [ "${JOBS_REDIS_PRESENT:-0}" = 1 ]; then extra+=("$JOBS_REDIS_FILE"); fi
   # The snapshot count before this backup is the reference the forget guard compares against (unknown on a failed listing).
   PRE_SNAP_COUNT=""
   if timed_io restic-snapshots-pre 120 - "$pre" restic snapshots --json --host platform --tag platform; then
@@ -941,7 +965,7 @@ phase_restic_backup() {
     log "WARN: cannot count the snapshots before the backup; the forget guard checks only that the new snapshot is listed"
   fi
   restic_timed restic-backup 3600 backup --json --host platform --tag platform --tag "$RUN_MODE" \
-    --exclude '.*.lock' --exclude '.tmp.*' "$STAGING" "$SECRETS_ROOT" "$PG_ADMIN_FILE" "$REDIS_ADMIN_FILE" || rc=$?
+    --exclude '.*.lock' --exclude '.tmp.*' "$STAGING" "$SECRETS_ROOT" "$JOB_SECRETS_ROOT" ${extra[@]+"${extra[@]}"} "$PG_ADMIN_FILE" "$REDIS_ADMIN_FILE" || rc=$?
   if [ "$rc" -ne 0 ] && [ "$rc" -ne 3 ]; then return "$rc"; fi
   while IFS= read -r line || [ -n "$line" ]; do
     if [[ "$line" =~ $sum_re ]] && [[ "$line" =~ $id_re ]]; then sid="${BASH_REMATCH[1]}"; fi
@@ -1114,7 +1138,7 @@ payload_restore_sh() {
 # production value, an unparsable value exits 2). A restore needs the same values the backup ran with:
 #   PLATFORM_BACKUP_ENV_FILE PLATFORM_BACKUP_ENV_OWNER PLATFORM_BACKUP_ROOT
 #   PLATFORM_BACKUP_LOG_DIR PLATFORM_BACKUP_LOCK PLATFORM_BACKUP_SECRETS_ROOT PLATFORM_BACKUP_LOCK_DIR
-#   PLATFORM_BACKUP_PG_ADMIN_FILE
+#   PLATFORM_BACKUP_PG_ADMIN_FILE PLATFORM_BACKUP_JOB_SECRETS_ROOT PLATFORM_BACKUP_JOBS_REDIS_FILE
 #   PLATFORM_BACKUP_REDIS_ADMIN_FILE PLATFORM_BACKUP_PG_CONTAINER PLATFORM_BACKUP_REDIS_CONTAINER
 # (PLATFORM_BACKUP_DEADLINE_SECS is not read here.) Restore-only test overrides:
 #   PLATFORM_RESTORE_ALLOW_NONROOT   unset: require EUID 0. Only the value 1 bypasses that check (it does not relax the
@@ -1158,6 +1182,7 @@ readonly APP_RE='^[a-z][a-z0-9-]{1,30}$'
 readonly DB_RE='^[a-z][a-z0-9_]{1,30}$'
 readonly SNAP_RE='^(latest|[0-9a-f]{8,64})$'
 readonly SECRETS_GID=64323
+readonly JOBS_GID=64324
 readonly ADMIN_GID=64322
 # Bounded polls (each one pause of POLL_PAUSE seconds): 60 x 2s = 120s per wait.
 readonly POLL_MAX=60
@@ -1268,6 +1293,8 @@ load_overrides() {
   ov_path LOCK_FILE PLATFORM_BACKUP_LOCK /run/platform-backup.lock
   ov_path SECRETS_ROOT PLATFORM_BACKUP_SECRETS_ROOT /var/lib/platform/secrets
   ov_path LOCK_DIR PLATFORM_BACKUP_LOCK_DIR /var/lib/platform/locks
+  ov_path JOB_SECRETS_ROOT PLATFORM_BACKUP_JOB_SECRETS_ROOT /var/lib/platform/job-secrets
+  ov_path JOBS_REDIS_FILE PLATFORM_BACKUP_JOBS_REDIS_FILE /etc/platform/jobs-redis.password
   ov_path PG_ADMIN_FILE PLATFORM_BACKUP_PG_ADMIN_FILE /etc/platform/postgres-admin.password
   ov_path REDIS_ADMIN_FILE PLATFORM_BACKUP_REDIS_ADMIN_FILE /etc/platform/redis-admin.password
   ov_name PG_CONTAINER PLATFORM_BACKUP_PG_CONTAINER platform-data-postgres
@@ -1640,35 +1667,54 @@ check_healthy() {
 
 # check_secrets_src <app>: the restored <secrets root>/<app> is a real directory holding only files and directories (exit 2).
 check_secrets_src() {
-  local app="$1" src="$RDIR$SECRETS_ROOT/$1"
-  STEP="secrets:$app"
-  [ -d "$src" ] && [ ! -L "$src" ] || fail "secrets:$app" "the snapshot holds no secrets directory for '$app'" 2
-  if [ -n "$(find "$src" ! -type f ! -type d -print -quit)" ]; then fail "secrets:$app" "the restored tree holds a symlink or special file" 2; fi
+  local app="$1" root="${2:-$SECRETS_ROOT}" label="${3:-secrets}" src
+  src="$RDIR$root/$app"
+  STEP="$label:$app"
+  [ -d "$src" ] && [ ! -L "$src" ] || fail "$label:$app" "the snapshot holds no $label directory for '$app'" 2
+  if [ -n "$(find "$src" ! -type f ! -type d -print -quit)" ]; then fail "$label:$app" "the restored tree holds a symlink or special file" 2; fi
 }
+
+# has_secrets_src <app> <root>: the snapshot holds <root>/<app> (a real directory; a symlink counts as present so that
+# check_secrets_src refuses it).
+has_secrets_src() { [ -e "$RDIR$2/$1" ] || [ -L "$RDIR$2/$1" ]; }
 
 # place_secrets <app>: sets the owner of the restored <secrets root>/<app> tree to the CURRENT deploy uid and gid 64323,
 # modes 2750 (dir) / 0440 (file), and verifies each with stat, all INSIDE the root-only restore dir (0700, so the deploy
 # user cannot swap a symlink in under a path-based chown). The mv -T into the deploy-owned secrets root is the LAST step:
 # no root chown/chmod follows a path the deploy user can reach. The secrets root itself is untouched.
 place_secrets() {
-  local app="$1" src dst uid p st want
-  src="$RDIR$SECRETS_ROOT/$app"
-  dst="$SECRETS_ROOT/$app"
-  check_secrets_src "$app"
+  stage_secrets "$1" "$SECRETS_ROOT" "$SECRETS_GID" secrets
+  move_secrets "$1" "$SECRETS_ROOT" "$SECRETS_GID" secrets
+}
+
+# stage_secrets <app> <root> <gid> <label>: the chown/chmod/verify half of place_secrets, on the tree inside the restore
+# dir. The same layout serves the job-secrets root (deploy:64324, dirs 2750, files 0440).
+stage_secrets() {
+  local app="$1" root="$2" gid="$3" label="$4" src uid p st want
+  src="$RDIR$root/$app"
+  check_secrets_src "$app" "$root" "$label"
   uid="$(deploy_uid)"
   while IFS= read -r -d '' p; do
-    "$CHOWN" -h "$uid:$SECRETS_GID" -- "$p" || fail "secrets:$app" "chown failed"
-    if [ -d "$p" ]; then chmod 2750 -- "$p" || fail "secrets:$app" "chmod failed"; else chmod 0440 -- "$p" || fail "secrets:$app" "chmod failed"; fi
+    "$CHOWN" -h "$uid:$gid" -- "$p" || fail "$label:$app" "chown failed"
+    if [ -d "$p" ]; then chmod 2750 -- "$p" || fail "$label:$app" "chmod failed"; else chmod 0440 -- "$p" || fail "$label:$app" "chmod failed"; fi
   done < <(find "$src" -print0)
   while IFS= read -r -d '' p; do
-    if [ -d "$p" ]; then want="$uid:$SECRETS_GID 2750"; else want="$uid:$SECRETS_GID 440"; fi
-    st="$(stat -c '%u:%g %a' -- "$p")" || fail "secrets:$app" "cannot stat a restored path"
-    if [ "$st" != "$want" ]; then fail "secrets:$app" "a restored path has owner/mode '$st', want '$want'"; fi
+    if [ -d "$p" ]; then want="$uid:$gid 2750"; else want="$uid:$gid 440"; fi
+    st="$(stat -c '%u:%g %a' -- "$p")" || fail "$label:$app" "cannot stat a restored path"
+    if [ "$st" != "$want" ]; then fail "$label:$app" "a restored path has owner/mode '$st', want '$want'"; fi
   done < <(find "$src" -print0)
+}
+
+# move_secrets <app> <root> <gid> <label>: the final mv -T of a staged tree into the live root.
+move_secrets() {
+  local app="$1" root="$2" gid="$3" label="$4" src dst uid
+  src="$RDIR$root/$app"
+  dst="$root/$app"
+  uid="$(deploy_uid)"
   # Re-checked right before the move (mv -T onto an empty directory would succeed silently).
   if [ -e "$dst" ] || [ -L "$dst" ]; then refuse "$dst already exists; nothing more was changed"; fi
-  mv -T -- "$src" "$dst" || fail "secrets:$app" "cannot move the restored directory into $SECRETS_ROOT"
-  log "secrets: restored $dst owner=$uid:$SECRETS_GID"
+  mv -T -- "$src" "$dst" || fail "$label:$app" "cannot move the restored directory into $root"
+  log "$label: restored $dst owner=$uid:$gid"
 }
 
 # take_app_lock <app>: flock -n on <lock dir>/<app>.lock, the lock new-db.sh uses. The lock dir is root-owned (never the
@@ -1745,14 +1791,32 @@ GRANT CONNECT ON DATABASE \"$INTO\" TO \"$PGROLE\";"
 cmd_secrets() {
   [[ "$APP" =~ $APP_RE ]] || refuse "invalid app name (want $APP_RE)"
   [ -d "$SECRETS_ROOT" ] && [ ! -L "$SECRETS_ROOT" ] || refuse "the secrets root $SECRETS_ROOT is missing or not a directory"
+  [ -d "$JOB_SECRETS_ROOT" ] && [ ! -L "$JOB_SECRETS_ROOT" ] || refuse "the job-secrets root $JOB_SECRETS_ROOT is missing or not a directory (install-data install first)"
   if [ -e "$SECRETS_ROOT/$APP" ] || [ -L "$SECRETS_ROOT/$APP" ]; then refuse "$SECRETS_ROOT/$APP already exists; nothing was changed"; fi
+  if [ -e "$JOB_SECRETS_ROOT/$APP" ] || [ -L "$JOB_SECRETS_ROOT/$APP" ]; then refuse "$JOB_SECRETS_ROOT/$APP already exists; nothing was changed"; fi
   take_app_lock "$APP"
-  # Re-checked under the lock: new-db.sh may have created the directory in between.
+  # Re-checked under the lock: new-db.sh may have created the directories in between.
   if [ -e "$SECRETS_ROOT/$APP" ] || [ -L "$SECRETS_ROOT/$APP" ]; then refuse "$SECRETS_ROOT/$APP already exists; nothing was changed"; fi
+  if [ -e "$JOB_SECRETS_ROOT/$APP" ] || [ -L "$JOB_SECRETS_ROOT/$APP" ]; then refuse "$JOB_SECRETS_ROOT/$APP already exists; nothing was changed"; fi
   prepare_restore_dir
-  restic_restore restic-restore-secrets "$SECRETS_ROOT/$APP"
+  restic_restore restic-restore-secrets "$SECRETS_ROOT/$APP" "$JOB_SECRETS_ROOT/$APP"
+  # Both trees are staged (validated, chowned, verified inside the restore dir) before either is moved. An app made
+  # before the job secrets existed has no job-secrets directory in the snapshot: its secrets restore alone.
+  stage_secrets_pre "$APP"
   place_secrets "$APP"
   echo "restored $SECRETS_ROOT/$APP"
+  if has_secrets_src "$APP" "$JOB_SECRETS_ROOT"; then
+    move_secrets "$APP" "$JOB_SECRETS_ROOT" "$JOBS_GID" job-secrets
+    echo "restored $JOB_SECRETS_ROOT/$APP"
+  else
+    echo "the snapshot holds no job-secrets for '$APP'; run platform new-db to create them"
+  fi
+}
+
+# stage_secrets_pre <app>: validates and stages the job-secrets tree (when the snapshot holds one) so a defect in it
+# refuses before the main secrets tree is moved.
+stage_secrets_pre() {
+  if has_secrets_src "$1" "$JOB_SECRETS_ROOT"; then stage_secrets "$1" "$JOB_SECRETS_ROOT" "$JOBS_GID" job-secrets; fi
 }
 
 # admin_state <src> <dst>: prints absent | same | differs (a symlink or non-regular destination refuses).
@@ -1764,10 +1828,10 @@ admin_state() {
   if cmp -s -- "$src" "$dst"; then echo same; else echo differs; fi
 }
 
-write_admin() { # <src> <dst>: temp file beside the destination, root:64322 0640, atomic rename
-  local src="$1" dst="$2" tmp
+write_admin() { # <src> <dst> [gid, default 64322]: temp file beside the destination, root:<gid> 0640, atomic rename
+  local src="$1" dst="$2" gid="${3:-$ADMIN_GID}" tmp
   tmp="$(mktemp "$(dirname "$dst")/.tmp.restore.XXXXXX")" || fail host-files "cannot create a temp file beside $dst"
-  if ! { cat -- "$src" > "$tmp" && chmod 0640 -- "$tmp" && "$CHOWN" "0:$ADMIN_GID" -- "$tmp" && mv -f -- "$tmp" "$dst"; }; then
+  if ! { cat -- "$src" > "$tmp" && chmod 0640 -- "$tmp" && "$CHOWN" "0:$gid" -- "$tmp" && mv -f -- "$tmp" "$dst"; }; then
     rm -f -- "$tmp"
     fail host-files "cannot write $dst"
   fi
@@ -1961,10 +2025,12 @@ full_prevalidate() {
 }
 
 cmd_full() {
-  local f st differs=0 app d
-  local -a files=("$PG_ADMIN_FILE" "$REDIS_ADMIN_FILE") apps=()
+  local f st differs=0 app d jobs_pw_state=none
+  local -a files=("$PG_ADMIN_FILE" "$REDIS_ADMIN_FILE") apps=() japps=()
   [ -f "$COMPOSE_FILE" ] || refuse "the data stack compose file $COMPOSE_FILE is missing (install-data install first)"
   [ -d "$SECRETS_ROOT" ] && [ ! -L "$SECRETS_ROOT" ] || refuse "the secrets root $SECRETS_ROOT is missing or not a directory (install-data install first)"
+  [ -d "$JOB_SECRETS_ROOT" ] && [ ! -L "$JOB_SECRETS_ROOT" ] || refuse "the job-secrets root $JOB_SECRETS_ROOT is missing or not a directory (install-data install first)"
+  [ -d "$(dirname "$JOBS_REDIS_FILE")" ] || refuse "the directory $(dirname "$JOBS_REDIS_FILE") does not exist"
   check_healthy
   full_check_empty
   for f in "${files[@]}"; do
@@ -1972,7 +2038,7 @@ cmd_full() {
   done
   resolve_snapshot
   prepare_restore_dir
-  restic_restore restic-restore-full "$BACKUP_ROOT/staging/postgres" "$BACKUP_ROOT/staging/redis" "$SECRETS_ROOT" "${files[@]}"
+  restic_restore restic-restore-full "$BACKUP_ROOT/staging/postgres" "$BACKUP_ROOT/staging/redis" "$SECRETS_ROOT" "$JOB_SECRETS_ROOT" "$JOBS_REDIS_FILE" "${files[@]}"
   for f in "${files[@]}"; do
     [ -f "$RDIR$f" ] || fail host-files "the snapshot holds no $f"
     st="$(admin_state "$RDIR$f" "$f")"
@@ -1989,9 +2055,38 @@ cmd_full() {
       apps+=("$app")
     done
   fi
+  if [ -d "$RDIR$JOB_SECRETS_ROOT" ]; then
+    for d in "$RDIR$JOB_SECRETS_ROOT"/*; do
+      [ -e "$d" ] || [ -L "$d" ] || continue
+      app="${d##*/}"
+      [[ "$app" =~ $APP_RE ]] || fail job-secrets "restored name '${app:0:40}' is not a valid app name" 2
+      if [ -e "$JOB_SECRETS_ROOT/$app" ] || [ -L "$JOB_SECRETS_ROOT/$app" ]; then refuse "$JOB_SECRETS_ROOT/$app already exists; full restores only onto an empty stack"; fi
+      check_secrets_src "$app" "$JOB_SECRETS_ROOT" job-secrets
+      japps+=("$app")
+    done
+  fi
+  # The runner password pairs with users.acl: absent from the snapshot (runner never installed) is fine, a live file that
+  # differs from the snapshot copy refuses, like the admin files.
+  if [ -e "$RDIR$JOBS_REDIS_FILE" ] || [ -L "$RDIR$JOBS_REDIS_FILE" ]; then
+    [ -f "$RDIR$JOBS_REDIS_FILE" ] && [ ! -L "$RDIR$JOBS_REDIS_FILE" ] || fail job-secrets "the snapshot copy of $JOBS_REDIS_FILE is not a regular file" 2
+    jobs_pw_state="$(admin_state "$RDIR$JOBS_REDIS_FILE" "$JOBS_REDIS_FILE")"
+    if [ "$jobs_pw_state" = differs ]; then
+      refuse "$JOBS_REDIS_FILE differs from the snapshot copy (it pairs with the users.acl restored from the same snapshot); remove the live file and run full again; nothing was changed"
+    fi
+  elif [ -e "$JOBS_REDIS_FILE" ]; then
+    log "WARN: the snapshot holds no runner password but $JOBS_REDIS_FILE exists; the restored users.acl has no runner user, so rerun host-jobs install"
+  fi
   full_prevalidate
   # Secrets first (the dumps and globals reference the roles whose passwords live there), then Postgres, then Redis.
   for app in "${apps[@]}"; do place_secrets "$app"; done
+  for app in "${japps[@]}"; do
+    stage_secrets "$app" "$JOB_SECRETS_ROOT" "$JOBS_GID" job-secrets
+    move_secrets "$app" "$JOB_SECRETS_ROOT" "$JOBS_GID" job-secrets
+  done
+  if [ "$jobs_pw_state" = absent ]; then
+    write_admin "$RDIR$JOBS_REDIS_FILE" "$JOBS_REDIS_FILE" "$JOBS_GID"
+    log "job-secrets: restored $JOBS_REDIS_FILE owner=0:$JOBS_GID"
+  fi
   restore_globals
   restore_databases
   pg_sql pg-revoke postgres - "REVOKE CONNECT ON DATABASE postgres, template1 FROM PUBLIC;"
@@ -2043,7 +2138,7 @@ payload_window_env() {
   cat <<'PLATFORM_PAYLOAD_EOF'
 BACKUP_WINDOW_START=03:30
 BACKUP_WINDOW_END=05:00
-BACKUP_WINDOW_TZ=America/Chicago
+BACKUP_WINDOW_TZ=America/Los_Angeles
 PLATFORM_PAYLOAD_EOF
 }
 # END-PAYLOAD platform/backup/window.env
@@ -2077,7 +2172,7 @@ payload_platform_backup_timer() {
 Description=Platform nightly backup timer (inside the 03:30-05:00 backup window)
 
 [Timer]
-OnCalendar=*-*-* 03:35:00 America/Chicago
+OnCalendar=*-*-* 03:35:00 America/Los_Angeles
 Persistent=true
 AccuracySec=1min
 Unit=platform-backup.service
@@ -2158,6 +2253,9 @@ precond_install() {
   fi
   if ! priv test -d "$SECRETS_DIR" || priv test -L "$SECRETS_DIR"; then
     problem "the secrets root $SECRETS_DIR is missing or not a directory: run make host-data install first"
+  fi
+  if ! priv test -d "$JOB_SECRETS_DIR" || priv test -L "$JOB_SECRETS_DIR"; then
+    problem "the job-secrets root $JOB_SECRETS_DIR is missing, a symlink or not a directory: run host-data install first"
   fi
   for f in "$PG_ADMIN_FILE" "$REDIS_ADMIN_FILE"; do
     if ! priv test -f "$f" || priv test -L "$f"; then problem "the admin password file $f is missing (create it as described in platform/host/README.md)"; fi
@@ -2317,6 +2415,14 @@ check_restic() {
   if [ -n "$h" ] && [ "$h" = "$side" ]; then pass "restic binary hash matches the record made at install"; else fail "restic hash drift: the installed binary differs from the recorded hash"; fi
 }
 
+check_job_secrets_root() {
+  if priv test -d "$JOB_SECRETS_DIR" && ! priv test -L "$JOB_SECRETS_DIR"; then
+    pass "the job-secrets root $JOB_SECRETS_DIR is a directory"
+  else
+    fail "the job-secrets root $JOB_SECRETS_DIR is missing, a symlink or not a directory: run host-data install first"
+  fi
+}
+
 check_envfile() {
   local why
   if why="$(env_problem)"; then pass "backup.env (owner, mode, six keys, literal values)"; else fail "backup.env: $why"; fi
@@ -2400,6 +2506,7 @@ do_checks() {
   check_payload "$UNIT_DIR/$TIMER_NAME" 644 payload_platform_backup_timer
   check_restic
   check_envfile
+  check_job_secrets_root
   check_timer
   check_window
   check_state

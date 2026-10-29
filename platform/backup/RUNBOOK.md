@@ -64,11 +64,27 @@ The restore goes into a **new** database, owned by the app's role, next to the l
    Start the app, and drop `<db>_old` once you are satisfied.
 
 If an app's password files were lost, bring them back with `sudo /opt/platform/backup/restore.sh secrets <app>`
-(it refuses when `<secrets root>/<app>/` already exists; owner becomes the current `deploy` uid and gid 64323).
+(it refuses when `<secrets root>/<app>/` or `<job-secrets root>/<app>/` already exists; owner becomes the current
+`deploy` uid, with gid 64323 for the password files and gid 64324 for `job-secrets/<app>/jobs-secret`; dirs 2750, files
+0440). A snapshot of an app made before job secrets existed holds no `job-secrets/<app>/`: the command says so and
+restores the password files alone; run `platform new-db` to create the job secret. The two trees are validated and
+staged before either is moved; if a move still fails midway, `secrets/<app>/` may exist without `job-secrets/<app>/`:
+move the placed `secrets/<app>/` aside and run the command again.
+
+The runner Redis password (`/etc/platform/jobs-redis.password`, `root:64324 0640`) is in every nightly once the runner
+is installed, and `restore.sh full` puts it back. It only works as a pair with `users.acl` (restored from the Redis
+copy in the same snapshot): the ACL line carries the hash of that password, so restoring one without the other leaves
+the runner failing `WRONGPASS`. Restore both from the same snapshot. `/etc/platform/jobs.env` is intentionally NOT
+backed up (it holds the Discord webhook, like `backup.env`): after a restore recreate it per `platform/jobs/README.md`,
+then run `host-jobs install`.
 
 ## 4. Rebuilt-host order (a whole new machine)
 
 Order matters: the admin passwords must exist before the data stack starts, and the data stack before the restore.
+
+Rollout order: `host-data install` must run before the first `host-backup install` that deploys the `backup.sh` that
+backs up the job-secrets root (it creates that root; a nightly with the root missing fails the env phase). The same
+holds on a rebuilt host: `install-data install` (step 4) creates the root `full` needs.
 
 1. `install-deploy-user`
 2. `install-backup restore-only` (needs only a valid `/etc/platform/backup.env`; installs restic and `restore.sh`, no
@@ -82,7 +98,8 @@ Order matters: the admin passwords must exist before the data stack starts, and 
 
 `full` refuses unless the stack is fresh: the Postgres cluster must hold only `postgres` and templates, Redis must hold
 no key and no ACL user besides `default`, `admin` and `health`, and the admin password files must already match the
-snapshot. There is no override. It restores the secrets, loads the Postgres globals, restores every database, re-applies
+snapshot. There is no override. It restores the secrets and job secrets (and the runner password file when the snapshot
+holds one; a live copy that differs refuses), loads the Postgres globals, restores every database, re-applies
 the `REVOKE CONNECT ... FROM PUBLIC` hardening on `postgres` and `template1`, loads Redis through a one-shot container
 (the stack runs `appendonly yes`, which would ignore a bare RDB), and runs `install-data.sh verify` when that script is
 present. No installer places `install-data.sh` on the host (it runs from the workstation), so on the Pi that step is
@@ -97,7 +114,7 @@ In this order:
    `last-run.tsv`.
 2. **Record the snapshot id** to restore (from `restore.sh list` or the preceding `run-now`) and pass
    `--snapshot <id>` to `host-files` and `full`; `full` prints the snapshot it chose.
-3. Compose down with `-v`, remove the disposable apps' secret dirs, **and remove the two admin password files**, so
+3. Compose down with `-v`, remove the disposable apps' secret and job-secrets dirs, **and remove the two admin password files**, so
    the drill exercises the rebuilt-host order above.
 4. Follow section 4 from step 3 on. The final `install-backup install` re-enables the timer; `verify` FAILs if it was
    left off.
@@ -119,7 +136,7 @@ In this order:
 - `restore: step 'app-pg-restore' failed` (single-app restore): the new database `<db>_restore` was already created and is
   now half-restored. Drop it before retrying (`sudo docker exec -i platform-data-postgres psql -U postgres -c 'DROP
   DATABASE "<db>_restore"'`), because `app` refuses an `--into` name that already exists.
-- `full` validates the whole snapshot (globals, dump names, Redis files, every app secrets directory, the Redis image and
+- `full` validates the whole snapshot (globals, dump names, Redis files, every app secrets and job-secrets directory, the Redis image and
   `/data` mount) before it changes anything, so a refusal (exit 2) at that point needs no wipe: fix the cause (for
   example pick a complete `--snapshot`) and re-run.
 - `--keep` leaves the restore directory (`/var/lib/platform/backup/restore/<stamp>`, root only; it holds restored dumps

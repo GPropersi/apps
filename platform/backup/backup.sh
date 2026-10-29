@@ -21,6 +21,8 @@
 #   PLATFORM_BACKUP_LOG_DIR             /var/log/platform-backup
 #   PLATFORM_BACKUP_LOCK                /run/platform-backup.lock
 #   PLATFORM_BACKUP_SECRETS_ROOT        /var/lib/platform/secrets
+#   PLATFORM_BACKUP_JOB_SECRETS_ROOT    /var/lib/platform/job-secrets   (must exist; a missing root fails the env phase)
+#   PLATFORM_BACKUP_JOBS_REDIS_FILE     /etc/platform/jobs-redis.password   (optional: absent until the runner is installed)
 #   PLATFORM_BACKUP_PG_ADMIN_FILE       /etc/platform/postgres-admin.password
 #   PLATFORM_BACKUP_REDIS_ADMIN_FILE    /etc/platform/redis-admin.password
 #   PLATFORM_BACKUP_PG_CONTAINER        platform-data-postgres
@@ -206,6 +208,8 @@ load_overrides() {
   ov_path LOG_DIR PLATFORM_BACKUP_LOG_DIR /var/log/platform-backup
   ov_path LOCK_FILE PLATFORM_BACKUP_LOCK /run/platform-backup.lock
   ov_path SECRETS_ROOT PLATFORM_BACKUP_SECRETS_ROOT /var/lib/platform/secrets
+  ov_path JOB_SECRETS_ROOT PLATFORM_BACKUP_JOB_SECRETS_ROOT /var/lib/platform/job-secrets
+  ov_path JOBS_REDIS_FILE PLATFORM_BACKUP_JOBS_REDIS_FILE /etc/platform/jobs-redis.password
   ov_path PG_ADMIN_FILE PLATFORM_BACKUP_PG_ADMIN_FILE /etc/platform/postgres-admin.password
   ov_path REDIS_ADMIN_FILE PLATFORM_BACKUP_REDIS_ADMIN_FILE /etc/platform/redis-admin.password
   ov_name PG_CONTAINER PLATFORM_BACKUP_PG_CONTAINER platform-data-postgres
@@ -536,6 +540,22 @@ phase_env() {
     die_phase env 2 "missing required env var(s): $missing"
   fi
   export RESTIC_REPOSITORY RESTIC_PASSWORD AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_DEFAULT_REGION
+  # The job-secrets root is created by install-data (before the first backup that carries this check): fail closed on a
+  # missing or non-directory root rather than let restic silently skip it. The runner password file is optional.
+  if [ ! -d "$JOB_SECRETS_ROOT" ] || [ -L "$JOB_SECRETS_ROOT" ]; then
+    log "FATAL: the job-secrets root $JOB_SECRETS_ROOT is missing or not a directory (run host-data install)"
+    die_phase env 2 "the job-secrets root is missing or not a directory"
+  fi
+  JOBS_REDIS_PRESENT=0
+  if [ -L "$JOBS_REDIS_FILE" ] || { [ -e "$JOBS_REDIS_FILE" ] && [ ! -f "$JOBS_REDIS_FILE" ]; }; then
+    log "FATAL: $JOBS_REDIS_FILE is a symlink or not a regular file"
+    die_phase env 2 "the runner password path is a symlink or not a regular file"
+  elif [ -f "$JOBS_REDIS_FILE" ]; then
+    JOBS_REDIS_PRESENT=1
+    log "state jobs_redis_password=present"
+  else
+    log "state jobs_redis_password=absent"
+  fi
   # The unit runs with neither $HOME nor $XDG_CACHE_HOME, so restic would warn on every call and prune without a cache.
   # A fixed cache inside the root-only state dir (restic creates it 0700); the caller's RESTIC_CACHE_DIR was scrubbed.
   export RESTIC_CACHE_DIR="$BACKUP_ROOT/restic-cache"
@@ -735,6 +755,9 @@ phase_redis() {
 
 phase_restic_backup() {
   local rc=0 line sid="" sum_re='"message_type":"summary"' id_re='"snapshot_id":"([0-9a-f]{8,64})"' pre="$WORK/snapshots-before"
+  local -a extra=()
+  # The runner password pairs with users.acl (in the Redis copy); it is absent until the runner is installed.
+  if [ "${JOBS_REDIS_PRESENT:-0}" = 1 ]; then extra+=("$JOBS_REDIS_FILE"); fi
   # The snapshot count before this backup is the reference the forget guard compares against (unknown on a failed listing).
   PRE_SNAP_COUNT=""
   if timed_io restic-snapshots-pre 120 - "$pre" restic snapshots --json --host platform --tag platform; then
@@ -743,7 +766,7 @@ phase_restic_backup() {
     log "WARN: cannot count the snapshots before the backup; the forget guard checks only that the new snapshot is listed"
   fi
   restic_timed restic-backup 3600 backup --json --host platform --tag platform --tag "$RUN_MODE" \
-    --exclude '.*.lock' --exclude '.tmp.*' "$STAGING" "$SECRETS_ROOT" "$PG_ADMIN_FILE" "$REDIS_ADMIN_FILE" || rc=$?
+    --exclude '.*.lock' --exclude '.tmp.*' "$STAGING" "$SECRETS_ROOT" "$JOB_SECRETS_ROOT" ${extra[@]+"${extra[@]}"} "$PG_ADMIN_FILE" "$REDIS_ADMIN_FILE" || rc=$?
   if [ "$rc" -ne 0 ] && [ "$rc" -ne 3 ]; then return "$rc"; fi
   while IFS= read -r line || [ -n "$line" ]; do
     if [[ "$line" =~ $sum_re ]] && [[ "$line" =~ $id_re ]]; then sid="${BASH_REMATCH[1]}"; fi

@@ -16,6 +16,7 @@ down-page
 status
 platform
 runner
+jobs
 backup
 admin
 health

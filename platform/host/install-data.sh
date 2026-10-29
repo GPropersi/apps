@@ -9,14 +9,15 @@
 # Host-side inputs (you create them; the installer never writes a secret and never edits /etc/group):
 #   /etc/platform/postgres-admin.password   the Postgres admin password: regular file, root:64322, mode exactly 0640,
 #   /etc/platform/redis-admin.password      the Redis admin password: the same, one line (one trailing newline is fine)
-#   a group with gid 64322 (admin secrets: the containers get it through group_add) and a group with gid 64323 (app
-#   secrets: app containers get it through group_add); both must have no members, be no account's primary group and
+#   a group with gid 64322 (admin secrets: the containers get it through group_add), a group with gid 64323 (app
+#   secrets: app containers get it through group_add) and a group with gid 64324 (job secrets); all must have no members, be no account's primary group and
 #   not be the Docker socket's group
 #   the `deploy` user (make host-deploy-user) and the `platform` network (make host-ingress)
 # The installer itself creates (as root, explicit owners and modes, never relying on umask):
 #   /var/lib/platform            root:root 0755
 #   /var/lib/platform/secrets    deploy:64323 2710 (setgid, so `platform new-db` running as deploy, which is not in that
 #                                group and has no sudo, creates every file and directory with group 64323 and no chgrp)
+#   /var/lib/platform/job-secrets deploy:64324 2710 (the same, for the per-app jobs-secret the jobs runner reads)
 #   /opt/platform/data           root:root 0755: compose.yaml, pg_hba.conf, reserved-names.txt and connection.env 0644,
 #                                redis-entrypoint.sh 0755 (a 0644 entrypoint cannot be run by the non-root container user),
 #                                new-db.sh 0755 (run by `platform new-db` as the deploy user)
@@ -67,6 +68,8 @@ export PATH="$PATH:/usr/sbin:/sbin"
 # services in compose.yaml (the stack test compares them); SECRETS_GID is the app-secrets group named in data/README.md.
 readonly ADMIN_GID=64322
 readonly SECRETS_GID=64323
+# JOBS_GID is the job-secrets group (the jobs runner reads <app>/jobs-secret through it, and no DB password).
+readonly JOBS_GID=64324
 readonly PROJECT="platform-data"
 NETWORK="${INSTALL_DATA_NETWORK:-platform}"
 [[ "$NETWORK" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*$ ]] || { printf '%s\n' "INSTALL_DATA_NETWORK must be a Docker network name (letters, digits, _ . -)" >&2; exit 2; }
@@ -78,6 +81,7 @@ ROOT="${INSTALL_DATA_ROOT:-}"
 INSTALL_DIR="${INSTALL_DATA_DIR:-$ROOT/opt/platform/data}"
 VAR_DIR="${INSTALL_DATA_VAR_DIR:-$ROOT/var/lib/platform}"
 SECRETS_DIR="${INSTALL_DATA_SECRETS_ROOT:-$VAR_DIR/secrets}"
+JOB_SECRETS_DIR="${INSTALL_DATA_JOB_SECRETS_ROOT:-$VAR_DIR/job-secrets}"
 LOCK_DIR="${INSTALL_DATA_LOCK_DIR:-$VAR_DIR/locks}"
 PG_ADMIN_FILE="${INSTALL_DATA_PG_ADMIN_FILE:-$ROOT/etc/platform/postgres-admin.password}"
 REDIS_ADMIN_FILE="${INSTALL_DATA_REDIS_ADMIN_FILE:-$ROOT/etc/platform/redis-admin.password}"
@@ -240,6 +244,8 @@ services:
       - everysec
       - --aclfile
       - /data/users.acl
+      - --proto-max-bulk-len
+      - 1mb
     volumes:
       - platform-data-redis:/data
       - /etc/platform/redis-admin.password:/etc/platform/redis-admin.password:ro
@@ -387,6 +393,7 @@ down-page
 status
 platform
 runner
+jobs
 backup
 admin
 health
@@ -429,6 +436,9 @@ payload_new_db_sh() {
 # the Redis admin password is read inside the container from the mounted admin file (one trailing newline stripped,
 # as the entrypoint's hash does) and reaches redis-cli only through REDISCLI_AUTH.
 #
+# Job secret: <job-secrets root>/<app>/jobs-secret (same format, 0440, never rotated) in a separate root
+# (deploy:64324 2710, made by install-data.sh) so the jobs runner can read it without reading any DB password.
+#
 # Logging: a timestamped line per phase start and end (rc and duration) on stderr and through `logger -t platform`;
 # error text from docker is logged with both of the app's passwords masked. Every docker call runs under `timeout`.
 #
@@ -439,7 +449,7 @@ payload_new_db_sh() {
 # Env overrides (tests only; the dispatcher runs this script with a scrubbed environment):
 # NEW_DB_PG_CONTAINER / NEW_DB_REDIS_CONTAINER (default platform-data-postgres / platform-data-redis),
 # NEW_DB_RESERVED_NAMES (default /opt/platform/data/reserved-names.txt), NEW_DB_SECRETS_ROOT
-# (default /var/lib/platform/secrets), NEW_DB_LOCK_DIR (default /var/lib/platform/locks), NEW_DB_REDIS_CTR_ADMIN_FILE (the admin file as the Redis container sees it),
+# (default /var/lib/platform/secrets), NEW_DB_JOB_SECRETS_ROOT (default /var/lib/platform/job-secrets), NEW_DB_LOCK_DIR (default /var/lib/platform/locks), NEW_DB_REDIS_CTR_ADMIN_FILE (the admin file as the Redis container sees it),
 # NEW_DB_LOCK_WAIT (seconds, default 30), NEW_DB_EXEC_TIMEOUT (seconds per docker call, default 30).
 set -euo pipefail
 
@@ -457,6 +467,7 @@ PG="${NEW_DB_PG_CONTAINER:-platform-data-postgres}"
 REDIS="${NEW_DB_REDIS_CONTAINER:-platform-data-redis}"
 RESERVED_FILE="${NEW_DB_RESERVED_NAMES:-/opt/platform/data/reserved-names.txt}"
 SECRETS_ROOT="${NEW_DB_SECRETS_ROOT:-/var/lib/platform/secrets}"
+JOB_SECRETS_ROOT="${NEW_DB_JOB_SECRETS_ROOT:-/var/lib/platform/job-secrets}"
 LOCK_DIR="${NEW_DB_LOCK_DIR:-/var/lib/platform/locks}"
 REDIS_CTR_ADMIN_FILE="${NEW_DB_REDIS_CTR_ADMIN_FILE:-/etc/platform/redis-admin.password}"
 LOCK_WAIT="${NEW_DB_LOCK_WAIT:-30}"
@@ -472,7 +483,9 @@ APP=""
 PGROLE=""
 DB_PW=""
 REDIS_PW=""
+JOB_PW=""
 APPDIR=""
+JOBDIR=""
 ERRF=""
 LOCKFD=""
 PHASE_OUT=""
@@ -484,7 +497,7 @@ err() { printf '%s\n' "$1" >&2; }
 # mask <text>: the text with both of the app's passwords (when known) replaced.
 mask() {
   local s="$1" p
-  for p in "$DB_PW" "$REDIS_PW"; do
+  for p in "$DB_PW" "$REDIS_PW" "$JOB_PW"; do
     [ -z "$p" ] || s="${s//"$p"/***}"
   done
   printf '%s' "$s"
@@ -585,6 +598,7 @@ validate_name() {
 take_lock() {
   local lock old
   [ -d "$SECRETS_ROOT" ] && [ ! -L "$SECRETS_ROOT" ] || die "the secrets root $SECRETS_ROOT is missing or not a directory: run \`make host-data HOST=<alias> ARGS=install\`" 1
+  [ -d "$JOB_SECRETS_ROOT" ] && [ ! -L "$JOB_SECRETS_ROOT" ] || die "the job-secrets root $JOB_SECRETS_ROOT is missing or not a directory: run \`make host-data HOST=<alias> ARGS=install\`" 1
   [ -d "$LOCK_DIR" ] && [ ! -L "$LOCK_DIR" ] || die "the lock directory $LOCK_DIR is missing or not a directory: run \`make host-data HOST=<alias> ARGS=install\`" 1
   lock="$LOCK_DIR/$APP.lock"
   [ ! -L "$lock" ] || die "the lock path $lock is a symlink" 1
@@ -623,6 +637,7 @@ PG_DBS=0
 RD_PRESENT=0
 S_DB=0
 S_RD=0
+S_JOB=0
 
 # secret_state <path>: 0 absent, 1 a valid regular file; anything else refuses (fail closed).
 secret_state() {
@@ -639,6 +654,8 @@ preflight() {
   local out problems=0
   [ ! -L "$APPDIR" ] || die "the app secrets path $APPDIR is a symlink" 1
   [ ! -e "$APPDIR" ] || [ -d "$APPDIR" ] || die "the app secrets path $APPDIR is not a directory" 1
+  [ ! -L "$JOBDIR" ] || die "the app job-secrets path $JOBDIR is a symlink" 1
+  [ ! -e "$JOBDIR" ] || [ -d "$JOBDIR" ] || die "the app job-secrets path $JOBDIR is not a directory" 1
 
   pg_phase "preflight-postgres" postgres "SELECT (SELECT count(*) FROM pg_roles WHERE rolname = '$PGROLE') || '|' || (SELECT count(*) FROM pg_database WHERE datname = '$PGROLE');"
   out="$PHASE_OUT"
@@ -662,7 +679,8 @@ preflight() {
 
   if secret_state "$APPDIR/db-password"; then S_DB=1; fi
   if secret_state "$APPDIR/redis-password"; then S_RD=1; fi
-  log "state postgres_role=$PG_ROLES postgres_db=$PG_DBS db_password_file=$S_DB redis_user=$RD_PRESENT redis_password_file=$S_RD"
+  if secret_state "$JOBDIR/jobs-secret"; then S_JOB=1; fi
+  log "state postgres_role=$PG_ROLES postgres_db=$PG_DBS db_password_file=$S_DB redis_user=$RD_PRESENT redis_password_file=$S_RD jobs_secret_file=$S_JOB"
 
   if [ "$((PG_ROLES + PG_DBS))" -gt 0 ] && [ "$S_DB" -eq 0 ]; then
     err "new-db: the Postgres role or database '$PGROLE' exists but $APPDIR/db-password is missing."
@@ -694,13 +712,13 @@ gen_password() {
 # write_secret <path> <value>: temp file in the same directory (umask 227 gives 0440), then an atomic rename.
 write_secret() {
   local dest="$1" value="$2" tmp
-  tmp="$APPDIR/.tmp.${dest##*/}.$$"
+  tmp="${dest%/*}/.tmp.${dest##*/}.$$"
   TMPFILES+=("$tmp")
   (
     umask 227
     set -C
     printf '%s' "$value" >"$tmp"
-  ) || die "cannot write the temp secret file in $APPDIR" 1
+  ) || die "cannot write the temp secret file in ${dest%/*}" 1
   mv -f -- "$tmp" "$dest" || die "cannot move the secret file into place at $dest" 1
 }
 
@@ -713,6 +731,31 @@ ensure_appdir() {
     info "changed: $APPDIR/"
   else
     info "already: $APPDIR/"
+  fi
+}
+
+ensure_jobdir() {
+  if [ ! -d "$JOBDIR" ]; then
+    (
+      umask 027
+      mkdir -- "$JOBDIR"
+    ) || die "cannot create $JOBDIR" 1
+    info "changed: $JOBDIR/"
+  else
+    info "already: $JOBDIR/"
+  fi
+}
+
+# apply_jobs: the per-app job secret in its own root (group 64324), never rotated.
+apply_jobs() {
+  ensure_jobdir
+  if [ "$S_JOB" -eq 1 ]; then
+    JOB_PW="$(<"$JOBDIR/jobs-secret")"
+    info "already: $JOBDIR/jobs-secret"
+  else
+    JOB_PW="$(gen_password)"
+    write_secret "$JOBDIR/jobs-secret" "$JOB_PW"
+    info "changed: $JOBDIR/jobs-secret"
   fi
 }
 
@@ -775,6 +818,7 @@ main() {
 
   validate_name
   APPDIR="$SECRETS_ROOT/$APP"
+  JOBDIR="$JOB_SECRETS_ROOT/$APP"
   log "start"
   take_lock
   ERRF="$(mktemp)"
@@ -783,6 +827,7 @@ main() {
   ensure_appdir
   apply_postgres
   apply_redis
+  apply_jobs
   log "end rc=0"
   info "new-db: done $APP"
 }
@@ -889,7 +934,7 @@ chk_group() {
   fi
 }
 
-chk_groups() { chk_group "$ADMIN_GID" "admin-secrets"; chk_group "$SECRETS_GID" "app-secrets"; }
+chk_groups() { chk_group "$ADMIN_GID" "admin-secrets"; chk_group "$SECRETS_GID" "app-secrets"; chk_group "$JOBS_GID" "job-secrets"; }
 
 # chk_path_kind <label> <path>: a symlink or a non-directory at a directory path fails closed.
 chk_path_kind() {
@@ -904,6 +949,7 @@ chk_secret_paths() {
   chk_path_kind "install directory" "$INSTALL_DIR"
   chk_path_kind "platform state directory" "$VAR_DIR"
   chk_path_kind "secrets root" "$SECRETS_DIR"
+  chk_path_kind "job-secrets root" "$JOB_SECRETS_DIR"
   chk_path_kind "lock directory" "$LOCK_DIR"
 }
 
@@ -915,11 +961,18 @@ chk_secrets_dirs() {
     meta="$(file_meta "$VAR_DIR")" || meta="unreadable"
     [ "$meta" = "0:0 755" ] || echo "$VAR_DIR uid:gid/mode is '$meta', want '0:0 755'"
   fi
-  if [ ! -d "$SECRETS_DIR" ] || [ -L "$SECRETS_DIR" ]; then echo "$SECRETS_DIR is missing or not a directory"; return 0; fi
   uid="$(deploy_uid 2>/dev/null || true)"
-  [[ "$uid" =~ ^[0-9]+$ ]] || { echo "cannot read the deploy user's uid to judge the secrets root owner"; return 0; }
-  meta="$(file_meta "$SECRETS_DIR")" || meta="unreadable"
-  [ "$meta" = "$uid:$SECRETS_GID 2710" ] || echo "$SECRETS_DIR uid:gid/mode is '$meta', want '$uid:$SECRETS_GID 2710' (owner deploy, group $SECRETS_GID, setgid, mode 2710)"
+  if [ ! -d "$SECRETS_DIR" ] || [ -L "$SECRETS_DIR" ]; then echo "$SECRETS_DIR is missing or not a directory"
+  elif ! [[ "$uid" =~ ^[0-9]+$ ]]; then echo "cannot read the deploy user's uid to judge the secrets root owner"
+  else
+    meta="$(file_meta "$SECRETS_DIR")" || meta="unreadable"
+    [ "$meta" = "$uid:$SECRETS_GID 2710" ] || echo "$SECRETS_DIR uid:gid/mode is '$meta', want '$uid:$SECRETS_GID 2710' (owner deploy, group $SECRETS_GID, setgid, mode 2710)"
+  fi
+  if [ ! -d "$JOB_SECRETS_DIR" ] || [ -L "$JOB_SECRETS_DIR" ]; then echo "$JOB_SECRETS_DIR is missing or not a directory"
+  elif [[ "$uid" =~ ^[0-9]+$ ]]; then
+    meta="$(file_meta "$JOB_SECRETS_DIR")" || meta="unreadable"
+    [ "$meta" = "$uid:$JOBS_GID 2710" ] || echo "$JOB_SECRETS_DIR uid:gid/mode is '$meta', want '$uid:$JOBS_GID 2710' (owner deploy, group $JOBS_GID, setgid, mode 2710)"
+  fi
   if [ ! -d "$LOCK_DIR" ] || [ -L "$LOCK_DIR" ]; then echo "$LOCK_DIR is missing or not a directory"; return 0; fi
   meta="$(file_meta "$LOCK_DIR")" || meta="unreadable"
   [ "$meta" = "0:0 1777" ] || echo "$LOCK_DIR uid:gid/mode is '$meta', want '0:0 1777' (root-owned sticky lock directory)"
@@ -930,6 +983,7 @@ print_instructions() {
   err "Create the host-side inputs yourself (nothing here writes a secret or edits /etc/group):"
   err "  sudo groupadd --gid $ADMIN_GID platform-data-admin     # once; no members, no account may use it as primary group"
   err "  sudo groupadd --gid $SECRETS_GID platform-app-secrets  # once; the same rules"
+  err "  sudo groupadd --gid $JOBS_GID platform-job-secrets     # once; the same rules"
   err "  sudo install -d -m 0755 -o root -g root /etc/platform"
   err "  sudo install -m 0640 -o root -g $ADMIN_GID /dev/null $PG_ADMIN_FILE"
   err "  openssl rand -hex 24 | sudo tee $PG_ADMIN_FILE >/dev/null     # or paste your own single-line password"
@@ -1083,6 +1137,7 @@ do_install() {
   place_file "$TMP/connection.env" "$INSTALL_DIR/connection.env" 644
   ensure_dir "$VAR_DIR" 0 0 755
   ensure_dir "$SECRETS_DIR" "$uid" "$SECRETS_GID" 2710
+  ensure_dir "$JOB_SECRETS_DIR" "$uid" "$JOBS_GID" 2710
   # The per-app lock files (new-db.sh as deploy, restore.sh as root) live in this root-owned sticky directory, never in the
   # deploy-owned secrets root, so root never creates or follows a path the deploy user controls.
   ensure_dir "$LOCK_DIR" 0 0 1777
@@ -1190,6 +1245,61 @@ acl_tok() {
   esac
 }
 
+# The jobs runner's Redis user (installed by install-jobs.sh; kept equal to its RUNNER_ACL_RULE by a test). The password
+# token is a placeholder: the live rule carries a #<hash> instead, so both sides drop their password token.
+readonly RUNNER_ACL_RULE='runner on resetpass ><password> resetkeys ~*:jobs:* resetchannels -@all +@list +@sortedset +@string +@keyspace +@transaction +@connection -@dangerous -@scripting -@pubsub -scan -randomkey -dbsize'
+
+# runner_problems <the runner line after "user runner">: one line per difference between the live rule and
+# RUNNER_ACL_RULE. Compares token sequences after dropping the tokens Redis rewrites (on, sanitize-payload, resetpass,
+# the #<hash> or ><password> token, resetkeys); never a literal string compare, and no password token is ever printed.
+# shellcheck disable=SC2329 # reached through acl_problems, which run_check invokes by name
+runner_problems() {
+  local t hashes=0 want_seq="" live_seq="" want_set=" " live_set=" "
+  local -a live want
+  read -r -a live <<<"$1"
+  read -r -a want <<<"${RUNNER_ACL_RULE#runner }"
+  [[ " $1 " == *" on "* ]] || echo "the Redis runner user is not enabled"
+  for t in "${live[@]}"; do
+    case "$t" in
+      on | sanitize-payload | resetpass | resetkeys) ;;
+      "#"*) hashes=$((hashes + 1)) ;;
+      *) live_seq+="$t "; live_set+="$t " ;;
+    esac
+  done
+  [ "$hashes" -eq 1 ] || echo "the Redis runner user has $hashes password hashes, want exactly 1"
+  for t in "${want[@]}"; do
+    case "$t" in
+      on | sanitize-payload | resetpass | resetkeys | ">"*) ;;
+      *) want_seq+="$t "; want_set+="$t " ;;
+    esac
+  done
+  set -f # the rule tokens hold '*': no globbing while they are word-split below
+  for t in $live_seq; do
+    [[ "$want_set" == *" $t "* ]] && continue
+    case "$t" in
+      "~"* | "%"* | allkeys | "&"* | allchannels) echo "the Redis runner user has an extra key or channel scope '$(acl_tok "$t")'" ;;
+      *) echo "the Redis runner user has an unexpected rule '$(acl_tok "$t")'" ;;
+    esac
+  done
+  for t in $want_seq; do
+    [[ "$live_set" == *" $t "* ]] || echo "the Redis runner user lacks '$(acl_tok "$t")'"
+  done
+  # Same members in a different order or count (an allow after the deny rules re-enables a command).
+  if [ "$live_seq" != "$want_seq" ] && [ -z "$(runner_member_diff "$live_set" "$want_set")" ]; then
+    echo "the Redis runner user rule differs from RUNNER_ACL_RULE in order or repetition"
+  fi
+  set +f
+}
+
+# runner_member_diff <live set> <want set>: non-empty when the two sets have different members (helper for the above).
+# shellcheck disable=SC2329 # reached through runner_problems
+runner_member_diff() {
+  local t
+  set -f
+  for t in $1; do [[ "$2" == *" $t "* ]] || { printf x; return 0; }; done
+  for t in $2; do [[ "$1" == *" $t "* ]] || { printf x; return 0; }; done
+}
+
 # acl_problems <ACL LIST text>: one line per problem. Accepted: default (off), admin, health (each restricted), and any
 # non-reserved app user whose rule is key-scoped (~<name>:*), has no channels and has the dangerous commands denied.
 # shellcheck disable=SC2329 # reached through chk_redis_acl, which run_check invokes by name
@@ -1224,6 +1334,9 @@ acl_problems() {
         for t in on nopass -@all +ping; do
           [[ " $rest " == *" $t "* ]] || echo "the Redis health user lacks '$t'"
         done
+        ;;
+      runner)
+        runner_problems "$rest"
         ;;
       *)
         if ! [[ "$name" =~ $APP_RE ]] || grep -qxF -- "$name" <<<"$reserved"; then
@@ -1270,6 +1383,15 @@ chk_redis_acl() {
   local text
   text="$(redis_admin acl list)" || { echo "cannot read ACL LIST (admin auth failed or Redis is down)"; return 0; }
   acl_problems "$text"
+}
+
+# check_runner_present: an absent runner user is advisory (install-jobs.sh creates it), so a WARN, never a FAIL. It is
+# emitted here, outside run_check (which turns every output line into a FAIL), and an unreadable ACL LIST is left to
+# chk_redis_acl to report.
+check_runner_present() {
+  local text
+  text="$(redis_admin acl list 2>/dev/null)" || return 0
+  grep -q '^user runner ' <<<"$text" || warn "the Redis runner user is not installed yet (install-jobs.sh creates it)"
 }
 
 check_redis_config() {
@@ -1390,6 +1512,7 @@ do_checks() {
   for name in "$PG" "$REDIS"; do container_checks "$name"; done
 
   run_check "Redis ACL users" chk_redis_acl
+  check_runner_present
   check_redis_config
   check_redis_memory
   check_postgres

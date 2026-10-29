@@ -66,6 +66,7 @@ RDC="$rid-redis"
 gen="$T_TMP/compose.live.yaml"
 payload="$T_TMP/payload"
 secrets="$T_TMP/secrets"
+jobsec="$T_TMP/job-secrets"
 locks="$T_TMP/locks"
 pg_admin_file="$T_TMP/postgres-admin.password"
 redis_admin_file="$T_TMP/redis-admin.password"
@@ -135,12 +136,12 @@ pg_as() {
 
 newdb() {
   NEW_DB_PG_CONTAINER="$PGC" NEW_DB_REDIS_CONTAINER="$RDC" NEW_DB_RESERVED_NAMES="$here/../registry/reserved-names.txt" \
-    NEW_DB_SECRETS_ROOT="$secrets" NEW_DB_LOCK_DIR="$locks" NEW_DB_LOCK_WAIT=10 NEW_DB_EXEC_TIMEOUT=60 bash "$here/../data/new-db.sh" "$1" 2>&1
+    NEW_DB_SECRETS_ROOT="$secrets" NEW_DB_JOB_SECRETS_ROOT="$jobsec" NEW_DB_LOCK_DIR="$locks" NEW_DB_LOCK_WAIT=10 NEW_DB_EXEC_TIMEOUT=60 bash "$here/../data/new-db.sh" "$1" 2>&1
 }
 
 verify() {
   env INSTALL_DATA_SUDO= INSTALL_DATA_PG_CONTAINER="$PGC" INSTALL_DATA_REDIS_CONTAINER="$RDC" INSTALL_DATA_NETWORK="$net" \
-    INSTALL_DATA_DIR="$payload" INSTALL_DATA_VAR_DIR="$T_TMP/var" INSTALL_DATA_SECRETS_ROOT="$secrets" INSTALL_DATA_LOCK_DIR="$locks" \
+    INSTALL_DATA_DIR="$payload" INSTALL_DATA_VAR_DIR="$T_TMP/var" INSTALL_DATA_SECRETS_ROOT="$secrets" INSTALL_DATA_JOB_SECRETS_ROOT="$jobsec" INSTALL_DATA_LOCK_DIR="$locks" \
     INSTALL_DATA_PG_ADMIN_FILE="$pg_admin_file" INSTALL_DATA_REDIS_ADMIN_FILE="$redis_admin_file" \
     bash "$here/../host/install-data.sh" verify 2>&1
 }
@@ -150,7 +151,8 @@ verify() {
 shared_ov() {
   printf '%s\0' "PLATFORM_BACKUP_TESTING=1" "PLATFORM_BACKUP_LOCK_DIR=$locks" "PLATFORM_BACKUP_ENV_FILE=$envf" "PLATFORM_BACKUP_ENV_OWNER=$test_uid:$test_gid" "PLATFORM_BACKUP_ROOT=$broot" \
     "PLATFORM_BACKUP_STATE_DIR=$bstate" "PLATFORM_BACKUP_LOG_DIR=$blog" "PLATFORM_BACKUP_LOCK=$block" \
-    "PLATFORM_BACKUP_SECRETS_ROOT=$secrets" "PLATFORM_BACKUP_PG_ADMIN_FILE=$pg_admin_file" \
+    "PLATFORM_BACKUP_SECRETS_ROOT=$secrets" "PLATFORM_BACKUP_JOB_SECRETS_ROOT=$jobsec" "PLATFORM_BACKUP_JOBS_REDIS_FILE=$T_TMP/jobs-redis.password" \
+    "PLATFORM_BACKUP_PG_ADMIN_FILE=$pg_admin_file" \
     "PLATFORM_BACKUP_REDIS_ADMIN_FILE=$redis_admin_file" "PLATFORM_BACKUP_PG_CONTAINER=$PGC" "PLATFORM_BACKUP_REDIS_CONTAINER=$RDC"
 }
 mapfile -d '' -t SHARED < <(shared_ov)
@@ -245,9 +247,10 @@ done
 
 # ---- generate the isolated compose file (same mapping as test_data_live.sh) ----
 
-mkdir -p "$payload" "$secrets" "$locks" "$T_TMP/var"
-chmod 2710 "$secrets"
+mkdir -p "$payload" "$secrets" "$jobsec" "$locks" "$T_TMP/var"
+chmod 2710 "$secrets" "$jobsec"
 chmod 1777 "$locks"
+printf 'jobspass\n' > "$T_TMP/jobs-redis.password"
 mkdir -p "$broot"
 : > "$broot/.platform-backup-root"
 cp "$here/../data/pg_hba.conf" "$payload/pg_hba.conf"
@@ -371,7 +374,8 @@ expect_has "snapshot host is platform" "$snaps" '"hostname":"platform"'
 ls_out="$(rcmd ls latest --host platform)"
 for p in "$broot/staging/postgres/globals.sql" "$broot/staging/postgres/$role_a.dump" "$broot/staging/postgres/$role_b.dump" \
   "$broot/staging/redis/dump.rdb" "$broot/staging/redis/users.acl" "$secrets/$app_a/db-password" "$secrets/$app_a/redis-password" \
-  "$secrets/$app_b/db-password" "$secrets/$app_b/redis-password" "$pg_admin_file" "$redis_admin_file"; do
+  "$secrets/$app_b/db-password" "$secrets/$app_b/redis-password" "$pg_admin_file" "$redis_admin_file" \
+  "$jobsec/$app_a/jobs-secret" "$jobsec/$app_b/jobs-secret" "$T_TMP/jobs-redis.password"; do
   expect_re "snapshot holds ${p#"$T_TMP"/}" "$ls_out" "^${p//./\\.}\$"
 done
 expect_lacks "snapshot holds no lock file" "$ls_out" ".lock"
@@ -406,8 +410,9 @@ expect_eq "a second restore into the same name is refused (exit 2)" "$rc" 2
 dc down -v > "$T_TMP/down.txt" 2>&1 || { echo "FAIL: compose down -v"; cat "$T_TMP/down.txt"; }
 expect_eq "down -v removed both containers" "$(docker ps -aq --filter "name=^${rid}-" | wc -l)" 0
 expect_eq "down -v removed both volumes" "$(docker volume ls -q --filter "name=^${rid}-" | wc -l)" 0
-find "$secrets" -mindepth 1 -delete
-expect_eq "the throwaway secrets are gone" "$(find "$secrets" -mindepth 1 | wc -l)" 0
+find "$secrets" "$jobsec" -mindepth 1 -delete
+rm -f "$T_TMP/jobs-redis.password"
+expect_eq "the throwaway secrets are gone" "$(find "$secrets" "$jobsec" -mindepth 1 | wc -l)" 0
 # Rebuilt host: the admin files are gone too, and `host-files` (RUNBOOK order) brings them back before the stack starts.
 rm -f "$pg_admin_file" "$redis_admin_file"
 : > "$chown_log"
@@ -451,6 +456,12 @@ for a in "$app_a" "$app_b"; do
   expect_has "chown stub saw $a db-password" "$(< "$chown_log")" "$secrets/$a/db-password"
   expect_has "chown stub saw $a redis-password" "$(< "$chown_log")" "$secrets/$a/redis-password"
 done
+for a in "$app_a" "$app_b"; do
+  expect_has "chown stub saw $a jobs-secret at gid 64324" "$(< "$chown_log")" "$jobsec/$a/jobs-secret"
+  expect_eq "the job secret of $a is restored" "$([ -s "$jobsec/$a/jobs-secret" ] && echo yes || echo no)" yes
+done
+expect_eq "the runner password is restored with its original content" "$(< "$T_TMP/jobs-redis.password")" "jobspass"
+expect_re "full chowned the runner password to root:64324 (stub record)" "$(< "$chown_log")" "^0:64324 -- .*\\.tmp\\.restore\\."
 expect_has "full reports done" "$full_out" "full restore done from snapshot"
 vout="$(verify)"
 expect_has "verify on the restored stack: both containers healthy" "$vout" "PASS: both containers are running and healthy"

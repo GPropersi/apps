@@ -24,6 +24,7 @@ REAL_CHMOD="$(command -v chmod)"
 t_init
 STATE="$T_TMP/state"
 SECRETS="$T_TMP/secrets"
+JOBS="$T_TMP/job-secrets"
 LOCKS="$T_TMP/locks"
 RESERVED="$T_TMP/reserved-names.txt"
 LOGGER_LOG="$T_TMP/logger.log"
@@ -161,15 +162,17 @@ EOF
 # ---- harness ----
 
 fresh() {
-  rm -rf "$STATE" "$SECRETS" "$LOCKS" "$RESERVED"
-  mkdir -p "$STATE" "$SECRETS" "$LOCKS"
+  rm -rf "$STATE" "$SECRETS" "$JOBS" "$LOCKS" "$RESERVED"
+  mkdir -p "$STATE" "$SECRETS" "$JOBS" "$LOCKS"
   "$REAL_CHMOD" 2710 "$SECRETS"
+  "$REAL_CHMOD" 2710 "$JOBS"
   "$REAL_CHMOD" 1777 "$LOCKS"
   cp "$RESERVED_SRC" "$RESERVED"
   : > "$STATE/stdin.log"
   : > "$LOGGER_LOG"
   t_reset_calls
   export NEW_DB_SECRETS_ROOT="$SECRETS"
+  export NEW_DB_JOB_SECRETS_ROOT="$JOBS"
   export NEW_DB_LOCK_DIR="$LOCKS"
   export NEW_DB_RESERVED_NAMES="$RESERVED"
   export NEW_DB_PG_CONTAINER="$PGC"
@@ -184,7 +187,8 @@ docker_calls() { grep -c '^docker ' "$CALL_LOG" || true; }
 # entries written to the data stores (anything past the read-only preflight queries)
 mutations() { grep -E 'CREATE|ALTER|REVOKE|GRANT|ACL SETUSER|ACL SAVE' "$STATE/stdin.log" || true; }
 # every file under the secrets root except the per-app lock files
-secret_files() { find "$SECRETS" -mindepth 1 ! -name '.*.lock' || true; }
+secret_files() { find "$SECRETS" "$JOBS" -mindepth 1 ! -name '.*.lock' || true; }
+jv() { cat "$JOBS/${2:-myapp}/$1" 2>/dev/null; }                # jv <file> [app]: a file in the job-secrets root
 pre_secret() { # <file> <value> [app]
   local app="${3:-myapp}"
   mkdir -p "$SECRETS/$app"
@@ -197,8 +201,9 @@ valid_pw() { [[ "$1" =~ ^[A-Za-z0-9]{40}$ ]]; }
 
 no_leaks() { # label: neither of the app's passwords is in the output, any argv or any log
   local pw f
-  for f in db-password redis-password; do
+  for f in db-password redis-password jobs-secret; do
     pw="$(sv "$f" "${2:-myapp}")"
+    [ -n "$pw" ] || pw="$(jv "$f" "${2:-myapp}")"
     [ -n "$pw" ] || continue
     expect_out_lacks "$1 ($f not printed)" "$pw"
     if grep -qF -- "$pw" "$CALL_LOG"; then _fail "$1 ($f not in any argv)" "the password reached an argv"; else _pass; fi
@@ -317,11 +322,21 @@ expect_rc "first run" 0
 expect_out_has "first run: changed secret directory" "changed: $SECRETS/myapp/"
 expect_out_has "first run: changed db-password with its path" "changed: $SECRETS/myapp/db-password"
 expect_out_has "first run: changed redis-password with its path" "changed: $SECRETS/myapp/redis-password"
+expect_out_has "first run: changed job-secrets directory" "changed: $JOBS/myapp/"
+expect_out_has "first run: changed jobs-secret with its path" "changed: $JOBS/myapp/jobs-secret"
 expect_out_has "first run: changed Postgres" "changed: postgres role and database myapp"
 expect_out_has "first run: changed Redis" "changed: redis user myapp"
 expect_out_has "first run: done" "new-db: done myapp"
 DBPW="$(sv db-password)"
 RDPW="$(sv redis-password)"
+JBPW="$(jv jobs-secret)"
+if valid_pw "$JBPW"; then _pass; else _fail "jobs-secret is 40 characters [A-Za-z0-9]"; fi
+if [ "$JBPW" != "$DBPW" ] && [ "$JBPW" != "$RDPW" ]; then _pass; else _fail "the jobs-secret differs from both other passwords"; fi
+expect_eq "jobs-secret mode" "$(/usr/bin/stat -c '%a' "$JOBS/myapp/jobs-secret")" "440"
+expect_eq "the job-secrets app directory is 2750" "$(/usr/bin/stat -c '%a' "$JOBS/myapp")" "2750"
+expect_eq "jobs-secret owns the group of the setgid job-secrets root" "$(/usr/bin/stat -c '%g' "$JOBS/myapp/jobs-secret")" "$(/usr/bin/stat -c '%g' "$JOBS")"
+expect_eq "no jobs-secret in the DB secrets directory" "$(count_named "$SECRETS/myapp" 'jobs-secret*')" "0"
+expect_eq "no temp file is left in the job-secrets directory" "$(count_named "$JOBS/myapp" '.tmp*')" "0"
 if valid_pw "$DBPW"; then _pass; else _fail "db-password is 40 characters [A-Za-z0-9]"; fi
 if valid_pw "$RDPW"; then _pass; else _fail "redis-password is 40 characters [A-Za-z0-9]"; fi
 if [ "$DBPW" != "$RDPW" ]; then _pass; else _fail "the two passwords differ"; fi
@@ -390,9 +405,54 @@ expect_out_has "second run: already Postgres" "already: postgres role and databa
 expect_out_has "second run: already Redis" "already: redis user myapp"
 expect_eq "second run keeps db-password" "$(sv db-password)" "$DBPW"
 expect_eq "second run keeps redis-password" "$(sv redis-password)" "$RDPW"
+expect_out_has "second run: already jobs-secret" "already: $JOBS/myapp/jobs-secret"
+expect_eq "second run keeps jobs-secret" "$(jv jobs-secret)" "$JBPW"
 expect_eq "the role was created once" "$(cat "$STATE/role_creates")" "1"
 expect_eq "second run keeps the Postgres role password" "$(cat "$STATE/rolepw_myapp")" "$DBPW"
 no_leaks "second run"
+
+# an existing app (db-password and redis-password present, no jobs-secret): only jobs-secret is created
+rm -rf "$JOBS/myapp"
+t_reset_calls
+nd myapp
+expect_rc "existing app without a job secret" 0
+expect_out_has "existing app: job-secrets directory created" "changed: $JOBS/myapp/"
+expect_out_has "existing app: jobs-secret created" "changed: $JOBS/myapp/jobs-secret"
+expect_out_lacks "existing app: db-password untouched" "changed: $SECRETS/myapp/db-password"
+expect_out_lacks "existing app: redis-password untouched" "changed: $SECRETS/myapp/redis-password"
+expect_out_lacks "existing app: no store changed" "changed: postgres"
+expect_eq "existing app keeps db-password" "$(sv db-password)" "$DBPW"
+expect_eq "existing app keeps redis-password" "$(sv redis-password)" "$RDPW"
+if valid_pw "$(jv jobs-secret)"; then _pass; else _fail "the new jobs-secret is valid"; fi
+JBPW="$(jv jobs-secret)"
+no_leaks "existing app"
+# the job-secrets directory present, the file missing: only the file is created
+rm -f "$JOBS/myapp/jobs-secret"
+nd myapp
+expect_rc "job-secrets dir present, file missing" 0
+expect_out_has "dir present: already the directory" "already: $JOBS/myapp/"
+expect_out_has "dir present: changed jobs-secret" "changed: $JOBS/myapp/jobs-secret"
+JBPW="$(jv jobs-secret)"
+# a third run changes nothing
+nd myapp
+expect_rc "third run" 0
+expect_out_lacks "third run changes nothing" "changed:"
+expect_eq "third run keeps jobs-secret" "$(jv jobs-secret)" "$JBPW"
+# a malformed existing jobs-secret is refused, never overwritten
+"$REAL_CHMOD" 640 "$JOBS/myapp/jobs-secret"
+printf 'short' > "$JOBS/myapp/jobs-secret"
+nd myapp
+expect_rc "a malformed jobs-secret is refused" 1
+expect_eq "the malformed jobs-secret is left alone" "$(jv jobs-secret)" "short"
+printf '%s' "$JBPW" > "$JOBS/myapp/jobs-secret"
+"$REAL_CHMOD" 440 "$JOBS/myapp/jobs-secret"
+# a missing job-secrets root fails before any docker call
+mv "$JOBS" "$JOBS-parked"
+t_reset_calls
+nd myapp
+expect_rc "a missing job-secrets root fails" 1
+expect_eq "a missing job-secrets root makes no docker call" "$(docker_calls)" "0"
+mv "$JOBS-parked" "$JOBS"
 
 # drift: a manually altered connection limit and a drifted Redis rule are repaired with the existing passwords
 echo 50 > "$STATE/rolelimit_myapp"
@@ -526,6 +586,22 @@ nd myapp
 expect_rc "a symlinked app directory is refused" 1
 expect_eq "nothing is written through the symlinked app directory" "$(count_named "$T_TMP" '*password*')" "0"
 rm -f "$SECRETS/myapp"
+# the job-secrets directory for the app: a symlink or a plain file is refused before any docker call
+fresh
+ln -s "$T_TMP" "$JOBS/myapp"
+t_reset_calls
+nd myapp
+expect_rc "a symlinked job-secrets app directory is refused" 1
+expect_eq "a symlinked job-secrets app directory sends no mutation" "$(mutations)" ""
+expect_eq "nothing is written through the symlinked job-secrets directory" "$(count_named "$T_TMP" '*jobs-secret*')" "0"
+rm -f "$JOBS/myapp"
+fresh
+: > "$JOBS/myapp"
+t_reset_calls
+nd myapp
+expect_rc "a plain file at the job-secrets app path is refused" 1
+expect_eq "a plain file at the job-secrets app path sends no mutation" "$(mutations)" ""
+rm -f "$JOBS/myapp"
 
 # ---- 4. unhealthy containers fail closed before any write ----
 

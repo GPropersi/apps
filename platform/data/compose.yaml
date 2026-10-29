@@ -105,6 +105,8 @@ services:
       - everysec
       - --aclfile
       - /data/users.acl
+      - --proto-max-bulk-len
+      - 1mb
     volumes:
       - platform-data-redis:/data
       - /etc/platform/redis-admin.password:/etc/platform/redis-admin.password:ro
