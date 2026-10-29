@@ -13,6 +13,12 @@ Design and phases live in the stronghold: `~/code/plans/stronghold/open/app-host
   (`if: github.event_name == 'push' && github.ref == 'refs/heads/main'`), never for fork PRs.
 - Every change reaches `main` through a PR with the `ci` check green; reviewer `GPropersi`.
 - Pin every dependency, image and action to an exact version (actions to a full commit SHA).
+- Tool pins: shellcheck is pinned in `platform/lint/SHELLCHECK_VERSION`. Go is forced by
+  `GOTOOLCHAIN=go<GO_VERSION>` from `platform/jobs/GO_VERSION` (exported by `check-go.sh`, `test_go.sh` and
+  every script that runs go), so there is no machine-wide Go pin to maintain and the shared system Go is never
+  modified. The `go.mod` `toolchain` line must equal it (`make lint` checks); the `go` line is the language
+  version `1.26` because Go drops a `toolchain` line that equals the `go` line. Bump `GO_VERSION`, the
+  `toolchain` line and the Dockerfile builder digest together.
 
 ## Claude Config
 
@@ -46,6 +52,7 @@ Design and phases live in the stronghold: `~/code/plans/stronghold/open/app-host
   | Live host: claude identity installer (you run it; `HOST` required) | `make host-claude-access HOST=<alias> ARGS="install --pubkey-file PATH"` |
   | Live host: ingress stack installer (you run it; `HOST` required) | `make host-ingress HOST=<alias> ARGS="install"` |
   | Live host: shared Postgres and Redis installer (you run it; `HOST` required) | `make host-data HOST=<alias> ARGS="install"` |
+  | Live host: jobs runner installer, incl. the explicit `testapp-up` / `testapp-down` (you run it; `HOST` required) | `make host-jobs HOST=<alias> ARGS="install"` |
   | Live host: nightly backup installer and checks, incl. `run-now` and `init-repo` (you run it; `HOST` required) | `make host-backup HOST=<alias> ARGS="install"` |
   | Live host: restore from the backup, runs `restore.sh` as root over ssh (you run it; `HOST` required) | `make host-restore HOST=<alias> ARGS="list"` |
   | Live host: public Access-gate check, run from here (`HOST` required; domain via `PLATFORM_DOMAIN` or `--domain`) | `make host-verify-ingress HOST=<alias> ARGS="--domain D"` |

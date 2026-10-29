@@ -25,6 +25,7 @@ jobs:
   ci:
     name: ci
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -44,7 +45,18 @@ jobs:
           mkdir -p "${RUNNER_TEMP}/shellcheck-bin"
           tar -xJf "${RUNNER_TEMP}/${archive}" -C "${RUNNER_TEMP}/shellcheck-bin" --strip-components=1 "shellcheck-v${version}/shellcheck"
           echo "${RUNNER_TEMP}/shellcheck-bin" >> "${GITHUB_PATH}"
+      # No separate Go install: the runner image's preinstalled Go (>= 1.21) downloads the exact toolchain named
+      # in platform/jobs/GO_VERSION, because make lint and platform/jobs/test_go.sh export GOTOOLCHAIN=go<version>.
+      # That needs the module proxy on each run; a network flake fails CI. There is no second pin.
       - name: Lint
         run: make lint
+      # Real-Redis checks must run (not skip) in CI: REQUIRE_DOCKER=1 turns a missing docker or image into a failure.
+      # The script prints "cannot pull <image>" when the registry was unreachable (not a code failure) and
+      # "(build or test failure, not an image pull)" for a build or test failure against the pinned Redis; read the
+      # step log for which one it was.
+      # test_jobs_image.sh builds both images from the installer's embedded sources alone, so a broken payload fails here.
+      # make test runs test_jobs_live.sh and test_jobs_image.sh too, so the flag is set on this one step (no second run).
       - name: Test
+        env:
+          REQUIRE_DOCKER: "1"
         run: make test
