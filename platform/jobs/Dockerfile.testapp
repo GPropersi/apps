@@ -1,0 +1,15 @@
+# Jobs test app image (testapp-up only; never part of the runner image). A package in the same module as the runner, but
+# it imports only the standard library, so only go.mod and go.sum are needed beside it. Same digest pins as the
+# runner Dockerfile; the builder tag must equal platform/jobs/GO_VERSION.
+FROM golang:1.26.0@sha256:fb612b7831d53a89cbc0aaa7855b69ad7b0caf603715860cf538df854d047b84 AS build
+ARG VERSION=dev
+ENV GOTOOLCHAIN=local
+WORKDIR /src
+COPY go.mod go.sum ./
+COPY testapp/testapp_handler.go testapp/testapp_main.go ./testapp/
+RUN CGO_ENABLED=0 go build -trimpath -ldflags "-s -w -X main.version=${VERSION}" -o /testapp ./testapp
+
+FROM gcr.io/distroless/static-debian12:nonroot@sha256:afa5c872c891853ca7fcf1f12c3edb23f7eeef36189728842dd51042ff57f7ab
+COPY --from=build /testapp /testapp
+USER 65532:65532
+ENTRYPOINT ["/testapp"]
