@@ -1,0 +1,63 @@
+# Jobs runner: one small Go daemon that fires every app's scheduled jobs and drains the Redis queue, on the
+# `platform` network only. It publishes nothing and carries no `platform.app` label (it is platform infrastructure,
+# not an app, so `platform ls` does not list it).
+#
+# Host-side inputs (never written here, validated by install-jobs.sh): /etc/platform/jobs.env and
+# /etc/platform/jobs-redis.password (root:64324 0640, read through group_add 64324), the registry and job-secrets
+# roots, and the backup window directory. The image platform-jobs-runner:<source hash> is built on the host by
+# install-jobs.sh; RUNNER_TAG carries that hash and pull_policy never keeps compose from looking for a registry copy.
+#
+# Rules this file keeps (platform/jobs/test_jobs_stack.sh enforces them):
+# - It stays inside the small YAML subset (block style only) so the tests can read it without a YAML library.
+# - Nothing in `environment:` is secret; every secret is a mounted file. GOMEMLIMIT is about 75% of mem_limit so the Go
+#   GC works inside the container limit.
+# - The window directory /opt/platform/backup is mounted as a directory, never the single file window.env:
+#   install-backup.sh replaces window.env by temp file + rename, and a single-file bind mount would keep the old inode.
+# - stop_grace_period 65m is above the longest job timeout (1h, the registry maximum): on SIGTERM the runner waits for
+#   in-flight runs, and docker must not SIGKILL it after its default 10s. A stop can therefore take up to 65 minutes.
+# - Registry, job secrets and the backup directory are read-only; only jobs-status and jobs-state are writable.
+name: platform-jobs
+
+services:
+  runner:
+    image: platform-jobs-runner:${RUNNER_TAG:?RUNNER_TAG must be set}
+    pull_policy: never
+    container_name: platform-jobs-runner
+    environment:
+      GOMEMLIMIT: 36MiB
+    volumes:
+      - /var/lib/platform/registry:/var/lib/platform/registry:ro
+      - /var/lib/platform/job-secrets:/var/lib/platform/job-secrets:ro
+      - /opt/platform/backup:/opt/platform/backup:ro
+      - /etc/platform/jobs.env:/etc/platform/jobs.env:ro
+      - /etc/platform/jobs-redis.password:/etc/platform/jobs-redis.password:ro
+      - /var/lib/platform/jobs-status:/var/lib/platform/jobs-status
+      - /var/lib/platform/jobs-state:/var/lib/platform/jobs-state
+    tmpfs:
+      - /tmp
+    user: "65532:65532"
+    group_add:
+      - "64324"
+    networks:
+      - platform
+    restart: unless-stopped
+    stop_grace_period: 65m
+    mem_limit: 48m
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    read_only: true
+    healthcheck:
+      test:
+        - CMD
+        - /runner
+        - healthcheck
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+
+networks:
+  platform:
+    external: true
