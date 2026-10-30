@@ -100,7 +100,7 @@ host_files=" env.example lib.sh yaml-subset.sh test_ingress_stack.sh test_traefi
 # File names that platform/host/README.md mentions.
 host_files="$host_files platform.sh login-shell.sh install-deploy-user.sh claude-access.sh claude-helper.sh install-claude-access.sh install-ingress.sh "
 host_files="$host_files install-backup.sh restore.sh backup.sh platform-backup.service platform-backup.timer RUNBOOK.md "
-host_files="$host_files install-data.sh new-db.sh pg_hba.conf redis-entrypoint.sh postgres-admin.password redis-admin.password "
+host_files="$host_files install-data.sh install-jobs.sh jobs-redis.password new-db.sh pg_hba.conf redis-entrypoint.sh postgres-admin.password redis-admin.password "
 host_files="$host_files verify-egress.sh verify-ingress.sh server-host-base.sh authorized_keys.d egress-deny.cidrs egress-allow.cidrs "
 host_files="$host_files docker-user.rules.bak docker-user.rules docker-user-firewall.service "
 # Docker inspect template fields used by test_traefik_dynamic.sh.

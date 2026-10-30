@@ -56,6 +56,8 @@ dry_case "ingress, ARGS unset" host-ingress install-ingress.sh
 dry_case "ingress with ARGS" host-ingress install-ingress.sh ARGS='verify --live --hold'
 dry_case "data, ARGS unset" host-data install-data.sh
 dry_case "data with ARGS" host-data install-data.sh ARGS='verify'
+dry_case "jobs, ARGS unset" host-jobs install-jobs.sh
+dry_case "jobs with ARGS" host-jobs install-jobs.sh ARGS='testapp-up'
 dry_case "backup, ARGS unset" host-backup install-backup.sh
 dry_case "backup with ARGS" host-backup install-backup.sh ARGS='verify'
 # make -n leaves the shell expansion of ARGS unexpanded, so the real recipes run here against stub scripts in a
@@ -64,7 +66,7 @@ stub_tree="$T_TMP/stub-tree"
 rm -rf "$stub_tree"
 mkdir -p "$stub_tree/platform/host"
 cp -- "$root/Makefile" "$stub_tree/Makefile"
-for stub in install-deploy-user.sh install-claude-access.sh install-ingress.sh install-data.sh install-backup.sh verify-egress.sh verify-ingress.sh; do
+for stub in install-deploy-user.sh install-claude-access.sh install-ingress.sh install-data.sh install-jobs.sh install-backup.sh verify-egress.sh verify-ingress.sh; do
   printf '#!/usr/bin/env bash\nprintf "%%s\\n" "$*" > "$STUB_ARGV"\n' > "$stub_tree/platform/host/$stub"
   chmod +x "$stub_tree/platform/host/$stub"
 done
@@ -97,6 +99,11 @@ expect_rc "stub run: data, ARGS unset" 0
 expect_eq "ARGS unset: data defaults to status" "$(cat "$stub_argv")" "status --host alias"
 stub_run host-data 'install'
 expect_eq "ARGS set: data receives ARGS then --host" "$(cat "$stub_argv")" "install --host alias"
+stub_run host-jobs
+expect_rc "stub run: jobs, ARGS unset" 0
+expect_eq "ARGS unset: jobs defaults to status" "$(cat "$stub_argv")" "status --host alias"
+stub_run host-jobs 'testapp-down'
+expect_eq "ARGS set: jobs receives ARGS then --host" "$(cat "$stub_argv")" "testapp-down --host alias"
 stub_run host-backup
 expect_rc "stub run: backup, ARGS unset" 0
 expect_eq "ARGS unset: backup defaults to status" "$(cat "$stub_argv")" "status --host alias"
