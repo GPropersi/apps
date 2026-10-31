@@ -571,7 +571,10 @@ func TestMissingSecretSkipsDisablesAndAlertsOncePerChange(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { hits.Add(1) }))
 	defer srv.Close()
 	secrets := t.TempDir()
-	e := newEnv(t, laTime(6, 59, 0), goodWindow, oneJob("* * * * *", "30s", false))
+	// The timeout is long on purpose: the job's deadline runs on the fake clock but the request is real I/O, and the
+	// test advances the fake clock another 30s step right after the fire. A 30s deadline could expire before the
+	// response arrived on a loaded host and turn the "ok" record into a timeout.
+	e := newEnv(t, laTime(6, 59, 0), goodWindow, oneJob("* * * * *", "10m", false))
 	realDispatcher(e, srv, secrets)
 	e.run()
 	e.advTo(laTime(7, 3, 0))
