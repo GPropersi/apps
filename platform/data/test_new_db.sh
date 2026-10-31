@@ -222,6 +222,9 @@ if [ -n "$a" ] && [ "$a" = "$b" ]; then _pass; else _fail "new-db.sh and install
 bk_runner="$here/../backup/backup$(printf '.%s' sh)"
 c="$(grep -F 'readonly REDIS_ADMIN_SNIPPET=' "$bk_runner")"
 if [ -n "$a" ] && [ "$a" = "$c" ]; then _pass; else _fail "the backup runner and this script carry the same REDIS_ADMIN_SNIPPET"; fi
+# install-jobs.sh carries the fourth (it applies the runner's ACL through the admin user)
+d="$(grep -F 'readonly REDIS_ADMIN_SNIPPET=' "$here/../host/install-jobs.sh")"
+if [ -n "$a" ] && [ "$a" = "$d" ]; then _pass; else _fail "install-jobs.sh and this script carry the same REDIS_ADMIN_SNIPPET"; fi
 
 # ---- 1. usage, names, the reserved list: no docker call and no file written ----
 

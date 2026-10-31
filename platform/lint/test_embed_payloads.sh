@@ -222,6 +222,8 @@ if [[ "$out" =~ ([0-9]+)\ payload\(s\) ]] && [ "${BASH_REMATCH[1]}" -ge 2 ]; the
   mkdir -p "$real/platform/backup"
   cp "$repo_root/platform/backup/backup.sh" "$repo_root/platform/backup/restore.sh" "$repo_root/platform/backup/window.env" "$real/platform/backup/"
   cp "$repo_root/platform/backup/platform-backup.service" "$repo_root/platform/backup/platform-backup.timer" "$real/platform/backup/"
+  # the jobs installer's payload sources (the whole runner tree: Go sources, go.mod/go.sum, Dockerfiles, compose.yaml)
+  cp -R "$repo_root/platform/jobs" "$real/platform/jobs"
   echo '# drift' >> "$real/platform/host/platform.sh"
   run_cmd "$tool" --check --root "$real"
   expect_rc "a drifted dispatcher source fails the check" 1

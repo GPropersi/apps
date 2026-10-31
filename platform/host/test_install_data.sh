@@ -1017,6 +1017,9 @@ expect_eq "snippet: no trailing newline" "$(snippet_pw 'secret')" "secret"
 expect_eq "snippet: exactly one of two trailing newlines stripped" "$(snippet_pw 'secret\n\n'; echo x)" "secret
 x"
 expect_eq "snippet: password with spaces and quotes kept" "$(snippet_pw 'a b"c$d\n')" 'a b"c$d'
+jobs_snippet="$(grep -F 'readonly REDIS_ADMIN_SNIPPET=' "$here/install-jobs.sh")"
+data_snippet="$(grep -F 'readonly REDIS_ADMIN_SNIPPET=' "$script" | sort -u)"
+if [ -n "$jobs_snippet" ] && [ "$jobs_snippet" = "$data_snippet" ]; then _pass; else _fail "install-jobs.sh carries the same REDIS_ADMIN_SNIPPET as install-data.sh"; fi
 expect_calls_has "snippet: redis-cli runs as admin without printing the warning" "redis-cli --user admin --no-auth-warning ping"
 expect_calls_lacks "snippet: the password is not in redis-cli's argv" "secret"
 
