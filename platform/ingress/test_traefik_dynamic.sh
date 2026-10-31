@@ -336,8 +336,11 @@ docker run -d --name "$dname" --label "ingress-test=$rid" --network "$net" --net
   --user "$down_user" --read-only -v "$page_dir:/www:ro" "$pimage" "${down_cmd[@]}" >/dev/null || { echo "FAIL: start down-page"; exit 1; }
 docker run -d --name "$aname" --label "ingress-test=$rid" --label "platform.app=$long_app" --network "$net" --expose 8080 \
   --user 65534:65534 -v "$app_dir:/www:ro" "$pimage" httpd -f -vv -p 8080 -h /www >/dev/null || { echo "FAIL: start app"; exit 1; }
+# The 503 backend is one persistent listener (nc -lk forks a handler per connection), so there is never a moment between
+# connections with nothing listening; the handler reads the request head before it answers, so closing never resets a
+# connection that still has unread request bytes. (A `while true; nc -l` loop did both, which made this test load-sensitive.)
 docker run -d --name "$fname" --label "ingress-test=$rid" --label "platform.app=fails" --network "$net" --expose 8080 \
-  --user 65534:65534 "$pimage" sh -c 'while true; do printf "HTTP/1.1 503 Service Unavailable\r\nContent-Length: 4\r\nConnection: close\r\n\r\nnope" | nc -l -p 8080; done' >/dev/null \
+  --user 65534:65534 "$pimage" nc -lk -p 8080 -e sh -c 'while read -r l; do [ ${#l} -le 1 ] && break; done; printf "HTTP/1.1 503 Service Unavailable\r\nContent-Length: 4\r\nConnection: close\r\n\r\nnope"' >/dev/null \
   || { echo "FAIL: start 503 app"; exit 1; }
 docker run -d --name "$gname" --label "ingress-test=$rid" --label "platform.app=gone" --network "$net" --expose 8080 \
   --user 65534:65534 -v "$app_dir:/www:ro" "$pimage" sh -c 'httpd -f -p 8080 -h /www & while :; do sleep 1; done' >/dev/null \
