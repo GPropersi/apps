@@ -71,6 +71,18 @@ sock="${INGRESS_TEST_DOCKER_SOCK:-/var/run/docker.sock}"
 [ -S "$sock" ] || skip "no Docker socket at $sock (set INGRESS_TEST_DOCKER_SOCK)"
 sockgid="$(stat -c %g "$sock")"
 
+# Traefik's Docker provider watches every container on the daemon, so two copies of this test at once see each other's
+# containers and both fail. Runs queue on one lock instead (released when this process exits, on every exit path). The
+# wait is bounded and logged, so a holder that never finishes shows up here and not as a silent hang.
+lock="${INGRESS_TEST_LOCK:-/tmp/platform-traefik-dynamic-test-lock}"
+command -v flock >/dev/null 2>&1 || skip "flock is not installed"
+exec 8>>"$lock" || { echo "FAIL: cannot open the run lock $lock"; exit 1; }
+if ! flock -n 8; then
+  echo "$(date -u +%FT%TZ) waiting for another run of this test to finish (lock $lock, up to 1800s)"
+  flock -w 1800 8 || { echo "FAIL: another run still held $lock after 1800s"; exit 1; }
+  echo "$(date -u +%FT%TZ) got the run lock"
+fi
+
 rid="ingt-$$"
 net="$rid-net"
 fake_domain="example.test"
