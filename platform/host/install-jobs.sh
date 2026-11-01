@@ -69,6 +69,7 @@ readonly TESTAPP_APP="jobstest"
 # The declared jobs of the test app: the one list behind both the app.yaml it writes and the JOBS_DECLARED env var of
 # its container (the registry directory is not mounted into the test app, so the env var carries them).
 readonly TESTAPP_JOBS="ok-job always-fail"
+# Only this job is scheduled, so the scheduled trigger is visible end to end; the others are queue-only.
 readonly TESTAPP_SCHEDULED_JOB="ok-job"
 readonly TESTAPP_SCHEDULE='*/2 * * * *'
 NETWORK="${INSTALL_JOBS_NETWORK:-platform}"
