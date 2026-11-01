@@ -146,7 +146,12 @@ case "$sub" in
     exit 0 ;;
   pull) [ ! -f "$S/pull_fail" ] || { echo "pull error: stub registry down" >&2; exit 1; }; exit 0 ;;
   run)
-    if [ "$1" = "--rm" ]; then [ ! -f "$S/moddl_fail" ] || { echo "go: module proxy error: stub" >&2; exit 1; }; exit 0; fi
+    if [ "$1" = "--rm" ]; then
+      [ ! -f "$S/moddl_dns_fail" ] || { echo "go: dial tcp: lookup proxy.golang.org on resolver:53: read udp: i/o timeout" >&2; exit 1; }
+      [ ! -f "$S/moddl_nohost_fail" ] || { echo "go: dial tcp: lookup proxy.golang.org: no such host" >&2; exit 1; }
+      [ ! -f "$S/moddl_fail" ] || { echo "go: module proxy error: stub" >&2; exit 1; }
+      exit 0
+    fi
     printf '%s\n' "$@" > "$S/run_args"
     name=""
     lbl=""
@@ -462,7 +467,20 @@ ins install
 expect_out_has "the module proxy problem is listed" "go mod download"
 expect_out_has "the module error text is shown" "go: module proxy error: stub"
 expect_out_lacks "the pull succeeded now" "cannot pull"
+expect_out_lacks "a plain proxy error gets no DNS hint" "egress-allow.cidrs"
 rm -f "$STATE/moddl_fail"
+touch "$STATE/moddl_dns_fail"
+ins install
+expect_rc "a failed name lookup in the build network check" 1
+expect_out_has "the lookup error text is shown" "lookup proxy.golang.org"
+expect_out_has "a failed lookup names the egress allow file as the remedy" "/etc/platform/egress-allow.cidrs"
+rm -f "$STATE/moddl_dns_fail"
+touch "$STATE/moddl_nohost_fail"
+ins install
+expect_rc "a no-such-host lookup failure in the build network check" 1
+expect_out_has "the no-such-host error text is shown" "no such host"
+expect_out_has "a no-such-host failure also names the egress allow file" "/etc/platform/egress-allow.cidrs"
+rm -f "$STATE/moddl_nohost_fail"
 expect_calls_has "the module download check ran against the extracted sources" "docker run --rm"
 
 fresh
@@ -861,6 +879,9 @@ for k in schema_version name owner purpose template memory_cap port; do
   if grep -q "^$k:" "$yaml"; then _pass; else _fail "app.yaml has the required key $k"; fi
 done
 yaml_jobs="$(sed -n 's/^  - name: //p' "$yaml" | paste -sd, -)"
+expect_eq "ok-job carries the every-2-minutes schedule" "$(grep -c '^    schedule: "\*/2 \* \* \* \*"$' "$yaml")" "1"
+expect_eq "the schedule sits under ok-job and always-fail stays queue-only" "$(sed -n '/name: ok-job/,/name: always-fail/p' "$yaml" | grep -c schedule)" "1"
+expect_eq "always-fail has no schedule of its own" "$(sed -n '/name: always-fail/,$p' "$yaml" | grep -c schedule)" "0"
 env_jobs="$(sed -n 's/^JOBS_DECLARED=//p' "$STATE/env_$TESTC")"
 expect_eq "the JOBS_DECLARED env var equals the jobs of the written app.yaml" "$env_jobs" "$yaml_jobs"
 default_jobs="$(sed -n 's/^const DefaultDeclared = "\(.*\)"$/\1/p' "$repo_jobs/testapp/testapp_handler.go")"

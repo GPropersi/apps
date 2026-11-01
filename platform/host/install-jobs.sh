@@ -69,6 +69,9 @@ readonly TESTAPP_APP="jobstest"
 # The declared jobs of the test app: the one list behind both the app.yaml it writes and the JOBS_DECLARED env var of
 # its container (the registry directory is not mounted into the test app, so the env var carries them).
 readonly TESTAPP_JOBS="ok-job always-fail"
+# Only this job is scheduled, so the scheduled trigger is visible end to end; the others are queue-only.
+readonly TESTAPP_SCHEDULED_JOB="ok-job"
+readonly TESTAPP_SCHEDULE='*/2 * * * *'
 NETWORK="${INSTALL_JOBS_NETWORK:-platform}"
 [[ "$NETWORK" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*$ ]] || { printf '%s\n' "INSTALL_JOBS_NETWORK must be a Docker network name (letters, digits, _ . -)" >&2; exit 2; }
 readonly NETWORK
@@ -6171,6 +6174,13 @@ chk_build_network() {
     echo "\`go mod download\` failed (module proxy unreachable?): the image build needs the network"
     echo "  last lines of the go output:"
     tail -n 5 "$TMP/modproxy.log" 2>/dev/null | sed 's/^/    /' || true
+    # A default-bridge container uses the host's resolver. When that is a LAN router, the container egress firewall
+    # (egress-deny.cidrs) drops the query, so the lookup times out although the host itself resolves fine.
+    if grep -qE 'lookup .*(timeout|no such host|server misbehaving)' "$TMP/modproxy.log" 2>/dev/null; then
+      echo "  the name lookup itself failed: a default-bridge container uses the host's resolver, and the container egress"
+      echo "  firewall drops it when that resolver is in a denied range (the home LAN). If so, add the resolver as a /32 to"
+      echo "  /etc/platform/egress-allow.cidrs (udp/tcp port 53 only) and re-apply the firewall (platform/host/README.md)"
+    fi
   fi
 }
 
@@ -6547,7 +6557,11 @@ testapp_yaml() {
   local j
   printf 'schema_version: 1\nname: %s\nowner: platform\npurpose: Jobs runner test app (testapp-up only, removed by testapp-down)\n' "$TESTAPP_APP"
   printf 'template: go-htmx\nmemory_cap: 32m\nport: 8080\njobs:\n'
-  for j in $TESTAPP_JOBS; do printf '  - name: %s\n    timeout: 30s\n' "$j"; done
+  for j in $TESTAPP_JOBS; do
+    printf '  - name: %s\n    timeout: 30s\n' "$j"
+    # only ok-job is scheduled, so the scheduled trigger can be seen end to end; always-fail is for queued retries
+    [ "$j" != "$TESTAPP_SCHEDULED_JOB" ] || printf '    schedule: "%s"\n' "$TESTAPP_SCHEDULE"
+  done
 }
 
 # testapp_declared: the comma-separated job list for JOBS_DECLARED.

@@ -39,7 +39,10 @@ which recreates the container (`verify` fails until you do).
 State lives in bind mounts, never named volumes: `/var/lib/platform/jobs-status` and `/var/lib/platform/jobs-state`
 (`65532:65532`), `/opt/platform/jobs` (installer inputs record). Offline: the Pi cannot rebuild the image without the
 image registry and the Go module proxy (the `install` precondition checks them when a build is needed); with the image
-for the current source hash present, no network is needed.
+for the current source hash present, no network is needed. The build runs on the default Docker bridge, whose containers
+use the host's resolver. Where that resolver is the LAN router and the container egress firewall denies the LAN range,
+the lookup times out even though the host resolves fine; the precondition then says so, and the remedy is a /32 for the
+resolver in `/etc/platform/egress-allow.cidrs` (DNS only, see [`../host/README.md`](../host/README.md)).
 
 ## Run model
 
@@ -66,7 +69,8 @@ on `redis_state=down` and `config_state=invalid`. The usual repair for any FAIL 
 ## Test app
 
 `make host-jobs HOST=<alias> ARGS=testapp-up` (needs `platform new-db jobstest` first) builds the throwaway test app,
-registers `jobstest` (a registry `app.yaml` generated from the same job list as the container's `JOBS_DECLARED`) and
+registers `jobstest` (a registry `app.yaml` generated from the same job list as the container's `JOBS_DECLARED`, with
+`ok-job` scheduled `*/2 * * * *` so the scheduled trigger shows up within minutes; `always-fail` is queue-only) and
 starts it on the `platform` network with the `platform.app=jobstest` label. `ARGS=testapp-down` removes the container,
 the registry file and the image, and prints the commands to remove the secret and Redis user by hand. Neither runs from
 `install`, `verify` or `status`. A container named `platform-jobs-testapp` without that label is never replaced or removed.

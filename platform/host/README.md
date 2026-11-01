@@ -134,7 +134,8 @@ DOCKER-USER chain rules file); this repo only verifies them. Two host-side files
 
 - `/etc/platform/egress-deny.cidrs`: **required**, the ranges containers must not reach.
 - `/etc/platform/egress-allow.cidrs`: **optional**, a resolver exception only. Each range gets RETURN rules for
-  udp and tcp port 53 and nothing else (this lets Docker's embedded resolver reach a LAN DNS server).
+  udp and tcp port 53 and nothing else (this lets Docker's embedded resolver, and a default-bridge container such as the
+  jobs image build that inherits the host's LAN resolver, reach a LAN DNS server).
 
 Grammar, shared by both files:
 
