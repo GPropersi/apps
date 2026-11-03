@@ -61,7 +61,7 @@ Design and phases live in the stronghold: `~/code/plans/stronghold/open/app-host
 - **Issue labels:** n/a
 - **PR reviewer:** `GPropersi`
 - **Worktree policy:** `build-only`
-- **Worktree allowed targets:** `help, lint, test, embed, app-ls`
+- **Worktree allowed targets:** `help, lint, test, test-changed, test-app, embed, app-ls`
 - **Worktree link:** `n/a`
 - **Worktree setup:** `n/a`
 - **Worktree teardown:** `n/a`
