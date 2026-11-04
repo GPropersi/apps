@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Pre-merge run of the pinned Traefik against dynamic.yml and the Traefik settings in compose.yaml.
 #
-# Needs docker; on a host without a usable docker daemon (CI has none) it skips with a loud notice and exits 0. Run it
+# Needs docker; on a host without a usable docker daemon it skips with a loud notice and exits 0. Run it
 # once un-skipped on a docker host before merge, with REQUIRE_DOCKER=1 so a missing docker, daemon, curl or Docker
 # socket is a failure instead of a skip (a skip is otherwise indistinguishable from a pass):
 #   REQUIRE_DOCKER=1 platform/ingress/test_traefik_dynamic.sh

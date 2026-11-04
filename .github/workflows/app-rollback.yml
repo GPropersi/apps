@@ -1,0 +1,56 @@
+name: App rollback
+
+# Manual rollback of one app to its recorded previous deploy. It runs no tests (a broken main must not block it), sends
+# no token, and waits behind a running deploy of the same app instead of failing on the app lock. Main only.
+
+on:
+  workflow_dispatch:
+    inputs:
+      app:
+        description: App name
+        type: string
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  rollback:
+    name: rollback
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: production
+    permissions:
+      contents: read
+    concurrency:
+      group: deploy-${{ inputs.app }}
+      cancel-in-progress: false
+      queue: max
+    steps:
+      - name: Validate the inputs
+        env:
+          APP: ${{ inputs.app }}
+          DEPLOY_HOST: ${{ vars.PLATFORM_DEPLOY_HOST }}
+        run: |
+          # A repository variable is never masked by Actions; keep the host name out of a public log if ssh echoes it.
+          if [ -n "$DEPLOY_HOST" ]; then echo "::add-mask::$DEPLOY_HOST"; fi
+          if ! [[ "$APP" =~ ^[a-z][a-z0-9-]{1,30}$ ]]; then
+            echo "rollback: invalid app name: $APP" >&2
+            exit 1
+          fi
+          if [ -z "$DEPLOY_HOST" ]; then
+            echo "rollback: the repository variable PLATFORM_DEPLOY_HOST is empty; set it before rolling back" >&2
+            exit 1
+          fi
+      - name: Join the tailnet
+        uses: tailscale/github-action@064b10558093f38325e838ddea35486bdc6b1d5c # v4.4.0
+        with:
+          oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
+          oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
+          tags: tag:ci
+      - name: Roll back
+        env:
+          APP: ${{ inputs.app }}
+          DEPLOY_HOST: ${{ vars.PLATFORM_DEPLOY_HOST }}
+        run: tailscale ssh "deploy@${DEPLOY_HOST}" rollback "$APP" < /dev/null

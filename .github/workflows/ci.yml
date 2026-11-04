@@ -1,10 +1,10 @@
 name: CI
 
-# The repo's lint + test gate (same commands as the push gate in CLAUDE.md), on every PR into main
-# and on main itself. Public repo rules: never use `pull_request_target`, never reference secrets
-# here, and any future deploy job must carry
-#   if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-# so it can never run for a fork PR.
+# The repo's lint + test gate (a PR runs the selected tests like the push gate in CLAUDE.md; main runs them all), on
+# every PR into main and on main itself. Public repo rules: never use `pull_request_target`, never reference secrets
+# here; deploy jobs run only on `push` or `workflow_dispatch` from main, and any job with `environment:` must carry a job-level
+#   if: github.ref == 'refs/heads/main'
+# (never mentioning event_name == 'pull_request') so it can never run for a fork PR; make lint enforces both.
 
 on:
   pull_request:
@@ -18,10 +18,60 @@ permissions:
 
 # Supersede an in-flight run when a PR gets new pushes.
 concurrency:
-  group: ci-${{ github.ref }}
+  # A pull request run is superseded per ref; each push to main gets its own group so a queued merge is never collapsed
+  # (a dropped run would lose that merge's deploy).
+  group: ci-${{ github.event_name == 'pull_request' && github.ref || github.sha }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  # After a merge to main: which apps changed, then app-deploy.yml tests, builds and deploys each one on its own. Neither
+  # job exists for a pull request (the push+main guard), so a fork PR never reaches a build, a secret or an environment.
+  # The `ci` job below runs the full suite on the same push; its failure reports red but never blocks a deploy.
+  detect:
+    name: detect
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    outputs:
+      apps: ${{ steps.changed.outputs.apps }}
+      has_apps: ${{ steps.changed.outputs.has_apps }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0 # the before sha must resolve
+      - name: List the changed apps
+        id: changed
+        env:
+          BEFORE_SHA: ${{ github.event.before }}
+          AFTER_SHA: ${{ github.sha }}
+        run: |
+          apps="$(platform/ci/changed-apps.sh "$BEFORE_SHA" "$AFTER_SHA")"
+          echo "apps=$apps" >> "$GITHUB_OUTPUT"
+          if [ "$(jq 'length' <<< "$apps")" -eq 0 ]; then
+            echo "has_apps=false" >> "$GITHUB_OUTPUT"
+            echo "detect: no app changed"
+          else
+            echo "has_apps=true" >> "$GITHUB_OUTPUT"
+            echo "detect: changed apps $apps"
+          fi
+
+  # packages: write here is the ceiling for every job app-deploy.yml reaches (a called workflow's token can only be
+  # narrower than its caller's); it also covers the deploy job's packages: read. The ci job keeps contents: read only.
+  app-deploy:
+    name: app-deploy
+    needs: detect
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.detect.outputs.has_apps == 'true'
+    permissions:
+      contents: read
+      packages: write
+    uses: ./.github/workflows/app-deploy.yml
+    with:
+      apps: ${{ needs.detect.outputs.apps }}
+
   ci:
     name: ci
     runs-on: ubuntu-latest
@@ -31,6 +81,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          fetch-depth: 0 # make test-changed diffs against the pull request base sha
       # The runner image's shellcheck is an older apt build that differs from local, so pin one exact release.
       # The version lives in platform/lint/SHELLCHECK_VERSION (make lint enforces it); bumping it means updating
       # SHELLCHECK_SHA256 to the new linux.x86_64 tarball's checksum.
@@ -71,7 +122,16 @@ jobs:
       # step log for which one it was.
       # test_jobs_image.sh builds both images from the installer's embedded sources alone, so a broken payload fails here.
       # make test runs test_jobs_live.sh and test_jobs_image.sh too, so the flag is set on this one step (no second run).
+      # A pull request runs only the tests its diff needs (platform/test/areas.map); every push to main runs the whole
+      # suite, which catches a wrong map. The job is always `ci`, so the required check reports on every pull request.
       - name: Test
         env:
           REQUIRE_DOCKER: "1"
-        run: make test
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          if [ "$EVENT_NAME" = "pull_request" ]; then
+            make test-changed BASE="$BASE_SHA"
+          else
+            make test
+          fi

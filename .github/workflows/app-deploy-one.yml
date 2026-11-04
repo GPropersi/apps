@@ -1,0 +1,162 @@
+name: App deploy one
+
+# One app's test -> build -> deploy chain, called once per app by app-deploy.yml (so `needs:` binds within one app and a
+# failing app never stops its siblings). Only that app's tests gate its deploy; the full suite on main runs beside it in
+# ci.yml and never blocks a deploy. The called workflow calls nothing else. App names reach steps through env: only.
+# The `deploy` job holds the only secrets and the `production` environment (limited to main in the repository settings).
+
+on:
+  workflow_call:
+    inputs:
+      app:
+        description: App name (already validated by resolve-apps.sh)
+        type: string
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  arch:
+    name: arch
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    outputs:
+      runner: ${{ steps.arch.outputs.runner }}
+      platform: ${{ steps.arch.outputs.platform }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Map the build architecture
+        id: arch
+        env:
+          BUILD_ARCH: ${{ vars.PLATFORM_BUILD_ARCH }}
+        run: platform/ci/build-arch.sh "$BUILD_ARCH" >> "$GITHUB_OUTPUT"
+
+  test:
+    name: test
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Test the app
+        env:
+          REQUIRE_DOCKER: "1"
+          APP: ${{ inputs.app }}
+        run: make test-app APP="$APP"
+
+  build:
+    name: build
+    needs: [arch, test]
+    runs-on: ${{ needs.arch.outputs.runner }}
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - name: Log in to GHCR
+        uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      # The source label links the package to this repository, which is what lets the deploy job's GITHUB_TOKEN
+      # (packages: read) pull it. The image stays private.
+      - name: Build and push
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: apps/${{ inputs.app }}
+          file: apps/${{ inputs.app }}/Dockerfile
+          platforms: ${{ needs.arch.outputs.platform }}
+          push: true
+          provenance: false # keep the pushed tag a plain image manifest, not an OCI index
+          tags: ghcr.io/gpropersi/apps/${{ inputs.app }}:${{ github.sha }}
+          labels: org.opencontainers.image.source=https://github.com/${{ github.repository }}
+
+  deploy:
+    name: deploy
+    needs: [test, build]
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    environment: production
+    permissions:
+      contents: read
+      packages: read
+    # Deploys of one app queue in order; a late older job must not cancel a pending newer one, and a running deploy is
+    # never interrupted.
+    concurrency:
+      group: deploy-${{ inputs.app }}
+      cancel-in-progress: false
+      queue: max
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0 # should-deploy.sh needs the history for its ancestry check
+      - name: Require the deploy host
+        env:
+          DEPLOY_HOST: ${{ vars.PLATFORM_DEPLOY_HOST }}
+        run: |
+          # A repository variable is never masked by Actions; keep the host name out of a public log if ssh echoes it.
+          if [ -n "$DEPLOY_HOST" ]; then echo "::add-mask::$DEPLOY_HOST"; fi
+          if [ -z "$DEPLOY_HOST" ]; then
+            echo "deploy: the repository variable PLATFORM_DEPLOY_HOST is empty; set it before deploying" >&2
+            exit 1
+          fi
+      - name: Join the tailnet
+        uses: tailscale/github-action@064b10558093f38325e838ddea35486bdc6b1d5c # v4.4.0
+        with:
+          oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
+          oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
+          tags: tag:ci
+      # A queued older sha must not replace a newer live one: skip it (green) when it is a strict ancestor of the live
+      # tag. An error reading the live tag fails the job (never deploy blind).
+      - name: Compare with the live tag
+        id: live
+        env:
+          DEPLOY_HOST: ${{ vars.PLATFORM_DEPLOY_HOST }}
+          APP: ${{ inputs.app }}
+          OWN_SHA: ${{ github.sha }}
+        run: |
+          rc=0
+          live="$(tailscale ssh "deploy@${DEPLOY_HOST}" current "$APP" < /dev/null)" || rc=$?
+          decision="$(platform/ci/should-deploy.sh "$OWN_SHA" "$rc" "$live")"
+          echo "deploy decision for $APP: $decision"
+          case "$decision" in
+            deploy) echo "go=true" >> "$GITHUB_OUTPUT" ;;
+            *) echo "go=false" >> "$GITHUB_OUTPUT" ;;
+          esac
+      - name: Provision the database
+        if: steps.live.outputs.go == 'true'
+        env:
+          DEPLOY_HOST: ${{ vars.PLATFORM_DEPLOY_HOST }}
+          APP: ${{ inputs.app }}
+        run: tailscale ssh "deploy@${DEPLOY_HOST}" new-db "$APP" < /dev/null
+      # stdin = the short-lived pull token (this job's GITHUB_TOKEN), one line, then the app.yaml. The ssh command line
+      # carries neither.
+      - name: Deploy
+        if: steps.live.outputs.go == 'true'
+        env:
+          DEPLOY_HOST: ${{ vars.PLATFORM_DEPLOY_HOST }}
+          APP: ${{ inputs.app }}
+          OWN_SHA: ${{ github.sha }}
+          PULL_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          { printf '%s\n' "$PULL_TOKEN"; cat "apps/${APP}/app.yaml"; } | tailscale ssh "deploy@${DEPLOY_HOST}" deploy "$APP" "$OWN_SHA"

@@ -109,6 +109,28 @@ default gateway to fall inside a deny range (otherwise it exits 2 rather than pa
 `install-backup.sh` intentionally duplicate shared scaffolding, because each is streamed standalone over
 `ssh bash -s` and cannot source a common file. A fix to one must be mirrored in the others.
 
+## CI deploy
+
+A merge to `main` deploys changed apps with no one on the host. The chain is `ci.yml` (`detect`) -> `app-deploy.yml`
+(one instance per app) -> `app-deploy-one.yml` (`arch`, `test`, `build`, `deploy`). The `deploy` job joins the tailnet as
+`tag:ci` and runs `tailscale ssh deploy@<host>` with `new-db <app>` and then `deploy <app> <tag>`; the restricted login (`platform-login`) hands that to the
+dispatcher, which passes `app.yaml` and a short-lived registry pull token on stdin to `/opt/platform/deploy/deploy.sh`.
+The helper pulls the image (packages are private), checks its `USER`, labels and exposed port, replaces the running
+container with a health check, and keeps the previous deploy for `rollback`. `current <app>` is the read-only arm the
+workflow uses to skip a deploy that would go backwards.
+
+A host that already has the platform installed must re-run `host-deploy-user install` (new `current`, `deploy` and
+`rollback` dispatcher arms), `host-data install` (`rm-db.sh`) and `host-jobs install` (registry root) after this change
+is merged and before the first app deploys.
+
+What the host needs: the `deploy` user (`install-deploy-user`), the data stack, the ingress stack, and
+`make host-jobs HOST=<alias> ARGS=install` (it creates the image registry root; without it `deploy` exits 1 naming
+`preflight`). GitHub side, names only: environment `production`, its variable `PLATFORM_DEPLOY_HOST` and secrets
+`TS_OAUTH_CLIENT_ID` / `TS_OAUTH_SECRET`, and the repository variable `PLATFORM_BUILD_ARCH`. Redeploy-all
+(`app-deploy.yml` with `apps: all`) and the manual `app-rollback.yml` are the recovery paths; a server move is in
+[`../backup/RUNBOOK.md`](../backup/RUNBOOK.md) "Moving to a new server". App removal is never a CI path:
+`make host-app-rm` is run by an admin.
+
 ## Streaming invocation
 
 `--host ALIAS` streams the script over one `ssh ALIAS bash -s` call (BatchMode, no tty), except

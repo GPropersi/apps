@@ -1,0 +1,81 @@
+name: App deploy
+
+# Fans a deploy out over a list of apps, one app-deploy-one.yml instance per app, so one app's failure never stops another
+# (a `needs:` between separate matrix jobs would wait on every leg). Chain: ci.yml -> app-deploy.yml -> app-deploy-one.yml.
+# Two entry points: workflow_call (ci.yml passes the apps a push changed) and workflow_dispatch (a manual redeploy of one
+# app or `all`). Neither runs for a pull request. `make lint` (check-workflows.sh) enforces the guards below.
+# App names reach every step through env:, never interpolated into a run: block.
+
+on:
+  workflow_call:
+    inputs:
+      apps:
+        description: JSON array of app names
+        type: string
+        required: true
+  workflow_dispatch:
+    inputs:
+      apps:
+        description: "all, or the name of one app"
+        type: string
+        required: true
+        default: all
+
+permissions:
+  contents: read
+
+jobs:
+  resolve:
+    name: resolve
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    outputs:
+      apps: ${{ steps.resolve.outputs.apps }}
+      has_apps: ${{ steps.resolve.outputs.has_apps }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Resolve the app list
+        id: resolve
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          APPS_INPUT: ${{ inputs.apps }}
+          REF: ${{ github.ref }}
+        run: |
+          if [ "$REF" != "refs/heads/main" ]; then
+            echo "resolve: ref $REF is not main; fan-out will not run, nothing is deployed"
+          fi
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            apps="$(platform/ci/resolve-apps.sh dispatch "$APPS_INPUT")"
+          else
+            apps="$(platform/ci/resolve-apps.sh call "$APPS_INPUT")"
+          fi
+          count="$(jq 'length' <<< "$apps")"
+          echo "apps=$apps" >> "$GITHUB_OUTPUT"
+          if [ "$count" -eq 0 ]; then
+            echo "has_apps=false" >> "$GITHUB_OUTPUT"
+            echo "resolve: no app to deploy, nothing to do"
+          else
+            echo "has_apps=true" >> "$GITHUB_OUTPUT"
+            echo "resolve: deploying $apps"
+          fi
+
+  fan-out:
+    name: fan-out
+    needs: resolve
+    if: github.ref == 'refs/heads/main' && needs.resolve.outputs.has_apps == 'true'
+    # A reusable workflow's token can only be narrower than its caller's: these grants cover app-deploy-one.yml's jobs.
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        app: ${{ fromJSON(needs.resolve.outputs.apps) }}
+    uses: ./.github/workflows/app-deploy-one.yml
+    with:
+      app: ${{ matrix.app }}

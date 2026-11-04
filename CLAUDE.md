@@ -1,7 +1,7 @@
 # CLAUDE.md — apps
 
 Public monorepo for the self-hosted app platform: `platform/` (host and platform scripts), `apps/<name>/`
-(one directory per app), `templates/` (app starting points), `.github/workflows/` (CI, later build and deploy).
+(one directory per app), `templates/` (app starting points), `.github/workflows/` (CI, build and deploy).
 Design and phases live in the stronghold: `~/code/plans/stronghold/open/app-hosting-platform/`.
 
 ## Public repo rules (read before every commit)
@@ -9,8 +9,18 @@ Design and phases live in the stronghold: `~/code/plans/stronghold/open/app-host
 - **Public repo: no secrets, tokens, keys, personal data, IP addresses, tailnet names or ssh-scheme URLs, ever.**
   Credentials live in host-side files and repo secrets. `make lint` enforces this; fix the leak, do not
   allowlist it, unless the value is genuinely public.
-- Workflows never use `pull_request_target`; deploy jobs run only on `push` to `main`
-  (`if: github.event_name == 'push' && github.ref == 'refs/heads/main'`), never for fork PRs.
+- Workflows never use `pull_request_target`; deploy jobs run only on `push` or `workflow_dispatch` from `main`: every job
+  with `environment:` carries a job-level `if:` testing `github.ref == 'refs/heads/main'` (never
+  `event_name == 'pull_request'`, no `||`), so it never runs for fork PRs; `make lint` enforces it, with 40-hex action pins.
+- Deploy configuration (names only; values live in GitHub settings and never in this repo): environment `production`
+  (deployment branches: `main` only, no required reviewer); its variable `PLATFORM_DEPLOY_HOST`; the repository variable
+  `PLATFORM_BUILD_ARCH`; the environment secrets `TS_OAUTH_CLIENT_ID` and `TS_OAUTH_SECRET` (the Tailscale identity
+  `tag:ci`, which reaches the host only as the restricted `deploy` login). Only the `deploy` and `rollback` jobs see them.
+- Deploy rules: a merge to `main` tests only the changed app (`make test-app APP=<app>`), builds it, and deploys it with
+  health-checked replacement; the full suite runs beside it and never blocks a deploy. GHCR packages stay private: the
+  deploy job hands the host its own short-lived `GITHUB_TOKEN` on stdin. A deploy never goes backwards, rollback is the
+  manual `app-rollback.yml`, and app removal is admin-only (`make host-app-rm`), never a CI path. Moving servers:
+  `platform/backup/RUNBOOK.md` "Moving to a new server".
 - Every change reaches `main` through a PR with the `ci` check green; reviewer `GPropersi`.
 - Pin every dependency, image and action to an exact version (actions to a full commit SHA).
 - Tool pins: shellcheck is pinned in `platform/lint/SHELLCHECK_VERSION`. Go is forced by

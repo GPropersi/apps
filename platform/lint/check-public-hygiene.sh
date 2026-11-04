@@ -26,15 +26,19 @@ done
 cd "$root"
 [ -n "$allow" ] || allow="$root/platform/lint/hygiene-allow.txt"
 
-rule_names=(github-token github-pat aws-key slack-token private-key tailnet-name ssh-url)
+rule_names=(github-token github-pat aws-key slack-token private-key tailnet-name ssh-url tailscale-key cloudflare-token webhook-url ipv6)
 rule_regexes=(
   'gh[pousr]_[A-Za-z0-9]{20,}'
   'github_pat_[A-Za-z0-9_]{20,}'
   'AKIA[0-9A-Z]{16}'
   'xox[bp]-[A-Za-z0-9-]{10,}'
   '-----BEGIN [A-Z ]*PRIVATE KEY-----'
-  '[A-Za-z0-9-]+\.ts\.net'
+  '[A-Za-z0-9-]+\.[Tt][Ss]\.[Nn][Ee][Tt]'
   'ssh:[/][/]'
+  'tskey-(auth|client|api)-[A-Za-z0-9-]{10,}'
+  'cfut_[A-Za-z0-9]{20,}'
+  '(discord(app)?[.]com/api/webhooks/|hooks[.]slack[.]com/services/)'
+  '([0-9A-Fa-f]{1,4}:){4,}[0-9A-Fa-f]{1,4}'
 )
 
 failures=0
@@ -56,7 +60,7 @@ while IFS= read -r -d '' file; do
   [ -f "$file" ] || continue
 
   case "$file" in
-    *.pem|*.key) report "$file" tracked-key-file "" ;;
+    *.pem|*.key|*.p12|*.pfx|*.tfstate|*.tfstate.backup|id_rsa|id_rsa.*|id_ed25519|id_ed25519.*|id_ecdsa|*/id_rsa|*/id_rsa.*|*/id_ed25519|*/id_ed25519.*|*/id_ecdsa|credentials.json|*/credentials.json) report "$file" tracked-key-file "" ;;
   esac
   case "$file" in
     .env.example|.env.sample|*/.env.example|*/.env.sample) ;;
