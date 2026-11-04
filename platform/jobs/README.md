@@ -80,10 +80,13 @@ the registry file and the image, and prints the commands to remove the secret an
 - **Dead list.** As Redis admin, `LRANGE <app>:jobs:dead 0 -1` shows the last 100 dead records of an app. On the
   host: `sudo docker exec platform-data-redis sh -c 'REDISCLI_AUTH="$(cat /etc/platform/redis-admin.password)" exec redis-cli --user admin --no-auth-warning LRANGE <app>:jobs:dead 0 -1'`
   (the password is read inside the container, never on an argv).
-- **Orphan keys.** The runner never enumerates Redis. After an app is removed or disabled, its `<app>:jobs:queue`,
+- **Orphan keys.** The runner never enumerates Redis. After an app is *disabled* its `<app>:jobs:queue`,
   `:processing`, `:delayed` and `:dead` keys stay. As admin, inspect with `EXISTS`/`LLEN`/`ZCARD` per key, and delete
   with `DEL <app>:jobs:queue <app>:jobs:processing <app>:jobs:delayed <app>:jobs:dead` once nothing should run.
-  Use `redis-cli` through the admin snippet in `install-data.sh`, never a password on argv.
+  Use `redis-cli` through the admin snippet in `install-data.sh`, never a password on argv. A *retired* app is removed
+  with `make host-app-rm` (see [`../data/README.md`](../data/README.md) "Removing an app"), which deletes its registry
+  dir (so the runner stops scheduling it) and every `<app>:*` Redis key, including these. The `jobs-status` history for
+  the app stays; removal does not edit it.
 - **Reserved namespace.** `<app>:jobs:*` is reserved inside each app prefix; apps must not use it for other data.
 - **1 MB limit.** The shared Redis rejects any single value above 1 MB for every client.
 - **Redis OOM.** A Redis `OOM` that stalls the queue is alert-and-log only. It is not shown in `runner.tsv`,

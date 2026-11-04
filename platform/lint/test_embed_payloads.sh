@@ -216,7 +216,7 @@ if [[ "$out" =~ ([0-9]+)\ payload\(s\) ]] && [ "${BASH_REMATCH[1]}" -ge 2 ]; the
   cp "$repo_root/platform/ingress/down-page/index.html" "$real/platform/ingress/down-page/"
   # the data installer's payload sources (explicit list: a new payload source must be added here)
   mkdir -p "$real/platform/data" "$real/platform/registry"
-  cp "$repo_root/platform/data/compose.yaml" "$repo_root/platform/data/pg_hba.conf" "$repo_root/platform/data/redis-entrypoint.sh" "$repo_root/platform/data/new-db.sh" "$real/platform/data/"
+  cp "$repo_root/platform/data/compose.yaml" "$repo_root/platform/data/pg_hba.conf" "$repo_root/platform/data/redis-entrypoint.sh" "$repo_root/platform/data/new-db.sh" "$repo_root/platform/data/rm-db.sh" "$real/platform/data/"
   cp "$repo_root/platform/registry/reserved-names.txt" "$real/platform/registry/"
   # the backup installer's payload sources (explicit list: a new payload source must be added here)
   mkdir -p "$real/platform/backup"
@@ -270,8 +270,8 @@ if [[ "$out" =~ ([0-9]+)\ payload\(s\) ]] && [ "${BASH_REMATCH[1]}" -ge 2 ]; the
   run_cmd "$tool" --root "$real"
   expect_rc "regenerating after the altered ingress copy" 0
 
-  # the data installer's five payloads are checked too (one mutation per payload)
-  for src in data/compose.yaml data/pg_hba.conf data/redis-entrypoint.sh registry/reserved-names.txt data/new-db.sh; do
+  # the data installer's six payloads are checked too (one mutation per payload)
+  for src in data/compose.yaml data/pg_hba.conf data/redis-entrypoint.sh registry/reserved-names.txt data/new-db.sh data/rm-db.sh; do
     run_cmd "$tool" --root "$real"
     expect_rc "regenerating before the data $src drift" 0
     echo '# drift' >> "$real/platform/$src"
@@ -287,7 +287,8 @@ if [[ "$out" =~ ([0-9]+)\ payload\(s\) ]] && [ "${BASH_REMATCH[1]}" -ge 2 ]; the
     's/^local all postgres peer$/local all postgres trust/|data/pg_hba.conf' \
     's/^umask 077$/umask 022/|data/redis-entrypoint.sh' \
     's/^cloudflared$/cloudflaredx/|registry/reserved-names.txt' \
-    's/^readonly PW_LEN=40$/readonly PW_LEN=8/|data/new-db.sh'; do
+    's/^readonly PW_LEN=40$/readonly PW_LEN=8/|data/new-db.sh' \
+    's/^readonly SCAN_SCRIPT=/readonly SCAN_SCRIPTX=/|data/rm-db.sh'; do
     run_cmd "$tool" --root "$real"
     expect_rc "regenerating before the altered embedded ${spec#*|} copy" 0
     sed -i "${spec%|*}" "$real/platform/host/install-data.sh"
