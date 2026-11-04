@@ -28,11 +28,11 @@ Design and phases live in the stronghold: `~/code/plans/stronghold/open/app-host
 - **Default branch:** `main`
 - **Plans store (central):** `~/code/plans/apps/{open,completed,research}/<topic>/`
 - **Plans bucket:** `apps`
-- **Push gate:** (suites a push must pass; first matching row wins per changed path, all matched suites run sequentially; each app adds its own `apps/<name>/**` row above the catch-all when it lands)
+- **Push gate:** (suites a push must pass; first matching row wins per changed path, all matched suites run sequentially; an app adds no row, its `apps/<name>/test_*.sh` runs under the catch-all)
   | Paths (space-separated globs)               | Command                                             |
   | ------------------------------------------- | --------------------------------------------------- |
   | `README.md **/README.md docs/** .claude/**` | na docs and skill text only, no code or build input |
-  | `**`                                        | `make lint && make test`                            |
+  | `**`                                        | `make lint && make test-changed`                    |
 - **Bot identity:** `gpropersi-claude[bot]` `141576524+gpropersi-claude[bot]@users.noreply.github.com`
 - **Bot push script:** `~/code/.claude/scripts/gh-app-push.sh` (central, repo-agnostic; derives the repo from `origin`, pushes as the shared bot)
 - **Token generator:** `~/code/.claude/scripts/generate-gh-token.sh` (tracked in the stronghold; the shared `gpropersi-claude` App, installation resolved from the repo owner)
@@ -43,8 +43,10 @@ Design and phases live in the stronghold: `~/code/plans/stronghold/open/app-host
   | Purpose | Command |
   |---|---|
   | Help | `make help` |
-  | Lint (public-repo hygiene + embed drift + app.yaml registry validation + shellcheck) | `make lint` |
-  | Tests (every `platform/**/test_*.sh`) | `make test` |
+  | Lint (public-repo hygiene + embed drift + app.yaml registry validation + per-app contract + shellcheck) | `make lint` |
+  | Tests (every `platform/**/test_*.sh` and `apps/<name>/test_*.sh`) | `make test` |
+  | Tests the change since `BASE` needs, per `platform/test/areas.map` (default `BASE=origin/main`) | `make test-changed` |
+  | One app's tests | `make test-app APP=<name>` |
   | Regenerate embedded installer payloads | `make embed` |
   | List registered apps (registry only, offline) | `make app-ls` |
   | Live host: registered apps plus live state; needs the passwordless sudo the other `host-*` targets use (you run it; `HOST` required) | `make host-app-ls HOST=<alias>` |
@@ -55,6 +57,7 @@ Design and phases live in the stronghold: `~/code/plans/stronghold/open/app-host
   | Live host: jobs runner installer, incl. the explicit `testapp-up` / `testapp-down` (you run it; `HOST` required) | `make host-jobs HOST=<alias> ARGS="install"` |
   | Live host: nightly backup installer and checks, incl. `run-now` and `init-repo` (you run it; `HOST` required) | `make host-backup HOST=<alias> ARGS="install"` |
   | Live host: restore from the backup, runs `restore.sh` as root over ssh (you run it; `HOST` required) | `make host-restore HOST=<alias> ARGS="list"` |
+  | Live host: DESTRUCTIVE admin-only app removal, runs `rm-db.sh` as root over ssh; remove `apps/<name>/` by PR first (you run it; `HOST` required) | `make host-app-rm HOST=<alias> ARGS="<app> --confirm <app> [--stop]"` |
   | Live host: public Access-gate check, run from here (`HOST` required; domain via `PLATFORM_DOMAIN` or `--domain`) | `make host-verify-ingress HOST=<alias> ARGS="--domain D"` |
   | Live host: read-only egress check (`HOST` required) | `make host-verify-egress HOST=<alias> ARGS="--probe"` |
 - **GitHub project board:** n/a
