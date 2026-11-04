@@ -1,0 +1,22 @@
+# Which tests each part of the repo needs. Read by platform/test/select.sh (make test-changed, CI, the push gate).
+# Rows: <globs><TAB><targets>. First matching row wins per changed path. A path under apps/<name>/ that is not
+# "none" here selects only that app's apps/<name>/test_*.sh, whatever its row says.
+# Globs (space-separated): anchored; **/ is zero or more directories; a trailing /** is everything beneath;
+# * and ? stop at /.
+# Targets (comma-separated): a platform/<area> directory name, apps (every app), none, or all.
+# A test that reads another area (../<area>/ or ../lib/) needs that area's row to list the test's own area;
+# test_areas_map.sh enforces it.
+README.md **/README.md docs/** .claude/**	none
+Makefile .github/** platform/test/**	all
+CLAUDE.md	host
+platform/lib/**	registry,data,host,backup,jobs,ingress,deploy,apps
+platform/registry/**	registry,data,host,backup,jobs,lint,deploy,apps
+platform/data/**	data,host,backup,jobs,lint,deploy,apps
+platform/jobs/**	jobs,host,lint,apps
+platform/backup/**	backup,host,data,lint,apps
+platform/ingress/**	ingress,host,lint,apps
+platform/host/**	host,data,backup,jobs,lint,apps
+platform/deploy/**	deploy,host,lint,data
+platform/lint/**	lint
+platform/ci/**	ci
+**	all

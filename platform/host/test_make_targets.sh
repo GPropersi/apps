@@ -165,12 +165,22 @@ t_reset_calls
 run_cmd env ARGS='app myapp --into myapp_restored' make -s -C "$stub_tree" host-restore HOST=alias
 expect_eq "host-restore app argv" "$(t_calls)" "ssh -o BatchMode=yes -- alias sudo -n /opt/platform/backup/restore.sh app myapp --into myapp_restored"
 
+# host-app-rm: the same shape as host-restore (ssh stubbed, exact argv asserted), pointing at rm-db.sh
+t_reset_calls
+run_cmd env -u HOST -u ARGS make -s -C "$stub_tree" host-app-rm
+expect_rc "host-app-rm without HOST is a usage error" 2
+expect_eq "host-app-rm without HOST makes no ssh call" "$(t_calls)" ""
+t_reset_calls
+run_cmd env ARGS='myapp --confirm myapp --stop' make -s -C "$stub_tree" host-app-rm HOST=alias
+expect_eq "host-app-rm argv" "$(t_calls)" "ssh -o BatchMode=yes -- alias sudo -n /opt/platform/data/rm-db.sh myapp --confirm myapp --stop"
+
 # make test on scratch trees: a failing test fails the run, a passing tree passes, an empty tree is an error.
 scratch_make() {
   local dir="$1"
   rm -rf "$dir"
-  mkdir -p "$dir/platform"
+  mkdir -p "$dir/platform/test"
   cp -- "$root/Makefile" "$dir/Makefile"
+  cp -- "$root/platform/test/run.sh" "$dir/platform/test/run.sh"
 }
 scratch="$T_TMP/scratch-pass"
 scratch_make "$scratch"
@@ -192,11 +202,41 @@ scratch="$T_TMP/scratch-empty"
 scratch_make "$scratch"
 run_cmd make -s -C "$scratch" test
 expect_rc "make test with no tests is an error" 2
-expect_out_has "the empty tree names what is missing" "no platform/**/test_*.sh found"
+expect_out_has "the empty tree names what is missing" "no test_*.sh found"
 
-# No live-host target may be offered in a worktree: the allowed list in CLAUDE.md is help, lint, test, embed, app-ls only.
+# An app's tests run too: apps/<name>/test_*.sh is discovered, and make test-app runs only that app's files.
+scratch="$T_TMP/scratch-apps"
+scratch_make "$scratch"
+mkdir -p "$scratch/apps/foo" "$scratch/apps/foo-bar"
+printf '#!/usr/bin/env bash\nexit 0\n' > "$scratch/apps/foo/test_a.sh"
+printf '#!/usr/bin/env bash\nexit 1\n' > "$scratch/apps/foo-bar/test_b.sh"
+run_cmd make -s -C "$scratch" test
+expect_rc "make test runs app tests and fails on a failing app test" 2
+expect_out_has "make test ran apps/foo-bar" "== apps/foo-bar/test_b.sh"
+run_cmd make -s -C "$scratch" test-app APP=foo
+expect_rc "make test-app runs one app" 0
+expect_out_has "test-app ran foo's test" "== apps/foo/test_a.sh"
+expect_out_lacks "test-app did not run foo-bar's test" "foo-bar"
+run_cmd make -s -C "$scratch" test-app APP=foo-bar
+expect_rc "make test-app fails on a failing app test" 2
+expect_out_has "test-app ran foo-bar's failing test" "== apps/foo-bar/test_b.sh"
+printf '#!/usr/bin/env bash\nexit 0\n' > "$scratch/apps/foo-bar/test_b.sh"
+run_cmd make -s -C "$scratch" test
+expect_rc "make test passes once every app test passes" 0
+run_cmd make -s -C "$scratch" test-app APP=foo-bar
+expect_rc "make test-app passes once the app test passes" 0
+run_cmd make -s -C "$scratch" test-app APP=nope
+expect_rc "make test-app with an app without tests is an error" 2
+run_cmd make -s -C "$scratch" test-app APP='../x'
+expect_rc "make test-app with an invalid name is an error" 2
+run_cmd make -s -C "$scratch" test-app
+expect_rc "make test-app without APP is an error" 2
+run_cmd make -s -C "$scratch" test-app APP=$'foo\n../x'
+expect_rc "make test-app with a multi-line APP is an error" 2
+
+# No live-host target may be offered in a worktree: the allowed list in CLAUDE.md is help, lint, test, test-changed, test-app, embed, app-ls only.
 allowed=$(grep -E '^- \*\*Worktree allowed targets:\*\*' "$root/CLAUDE.md" || true)
-for want in help lint test embed app-ls; do
+for want in help lint test test-changed test-app embed app-ls; do
   case "$allowed" in
     *"$want"*) _pass ;;
     *) _fail "allowed targets line lists $want" "line missing or renamed" ;;
