@@ -4,7 +4,8 @@
 # dispatcher (an echo stub, or the real platform.sh). Stubs docker/sudo/systemctl/shell tools log to the shared call
 # log, which must stay empty on every path: the wrapper never starts a shell or a tool of its own.
 # SC2016: payloads are single-quoted on purpose (they must not expand). SC1091: lib.sh is sourced by relative path.
-# shellcheck disable=SC1091,SC2016
+# SC2154: out is set by run_cmd from lib.sh.
+# shellcheck disable=SC1091,SC2016,SC2154
 set -uo pipefail
 
 here="$(cd "$(dirname "$0")" && pwd)"
@@ -52,10 +53,11 @@ run_cmd env SSH_ORIGINAL_COMMAND="rollback myapp" bash "$echo_wrapper" -c "$echo
 expect_rc "openssh shape dispatches" 0
 expect_out_has "openssh shape passes SSH_ORIGINAL_COMMAND unsplit" "GOT[rollback myapp] argc=0"
 
-# Through the real dispatcher: a valid command reaches the placeholder (exit 3), proving end-to-end dispatch.
-run_cmd env SSH_ORIGINAL_COMMAND="rollback myapp" bash "$real_wrapper" -c "$real_dispatcher"
-expect_rc "openssh shape reaches the real dispatcher" 3
-expect_out_has "real dispatcher placeholder ran" "rollback is not implemented"
+# Through the real dispatcher: a valid command is accepted (`current` for an app with no deploy state is the one
+# read-only arm that needs no helper: exit 0, nothing printed), proving end-to-end dispatch.
+run_cmd env SSH_ORIGINAL_COMMAND="current zqxd-no-such-app" bash "$real_wrapper" -c "$real_dispatcher"
+expect_rc "openssh shape reaches the real dispatcher" 0
+expect_eq "real dispatcher accepted the command and printed nothing" "$out" ""
 
 # A non-matching command over the key returns the dispatcher usage error, never a shell.
 run_cmd env SSH_ORIGINAL_COMMAND="bash" bash "$real_wrapper" -c "$real_dispatcher"
