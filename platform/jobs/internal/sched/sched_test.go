@@ -57,6 +57,12 @@ func TestFiresAtCronTimePlusFnvOffsetInLosAngeles(t *testing.T) {
 		r := e.jobRow("aa", "j")
 		return r != nil && r[4] == "ok" && r[7] == next && r[8] == "ok" && r[2] == "0 7 * * *" && r[3] == "false"
 	})
+	// The run-end line is logged after the history and jobs.tsv writes, so a snapshot taken as soon as the row
+	// appears can miss it under load; wait for it before the single-shot assertions.
+	waitFor(t, "the run end log line", func() bool {
+		l := e.logs.String()
+		return strings.Contains(l, "run end app=aa job=j trigger=schedule run_id=") && strings.Contains(l, " result=ok http=200 dur_ms=")
+	})
 	logs := e.logs.String()
 	for _, frag := range []string{"run start app=aa job=j trigger=schedule run_id=", "run end app=aa job=j trigger=schedule run_id=", " result=ok http=200 dur_ms="} {
 		if !strings.Contains(logs, frag) {
