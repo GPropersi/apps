@@ -94,7 +94,13 @@ make host-verify-ingress HOST=<alias> ARGS="--domain <your domain>"
 - **Apps must not carry `traefik.*` labels.** An app-supplied label could shadow the `/_jobs` deny (a
   higher-priority router would bypass it). Deploy-path requirement: the deploy path must reject any `traefik.*`
   label, and must validate `platform.app` as a lowercase DNS label, before an app is deployed. Nothing in the
-  ingress stack enforces either rule.
+  ingress stack enforces either rule; the enforcement point is `platform/deploy/deploy.sh`. Its `inspect` phase refuses an
+  image carrying any `traefik.*` or `platform.*` label (or not exposing exactly the registered port), and its `docker run`
+  (no compose file is generated) sets the one `platform.app=<name>` label itself from the name that passed the
+  app-name check.
+- **A stopped `app-<name>-old` keeps its label.** Labels are immutable, so during a deploy the old container, renamed
+  `app-<name>-old` and stopped, still carries `platform.app=<name>`: `platform ls` shows the app `exited` from the swap until
+  the commit removes it, and after an interrupted deploy until the next deploy removes or restores it. This is accepted.
 - **`/_jobs` is denied** at the edge for every app (case-insensitive, and the normalised and encoded variants
   recorded in `dynamic.yml`); it never reaches the app. The jobs runner is reached another way.
 - **502, 503 and 504 are replaced by the friendly page.** Any app response with one of these statuses gets the down
