@@ -1,0 +1,13 @@
+# The files that decide what CI may reach, what the public-repo hygiene lint accepts and what the host runs as the deploy
+# identity. A change to any of them needs the owner's review once branch protection requires code-owner review.
+/.github/                  @GPropersi
+/platform/lint/            @GPropersi
+/platform/deploy/          @GPropersi
+/platform/host/            @GPropersi
+/platform/ci/              @GPropersi
+/platform/data/            @GPropersi
+/platform/registry/        @GPropersi
+/platform/lib/             @GPropersi
+/platform/backup/          @GPropersi
+/Makefile                  @GPropersi
+/CLAUDE.md                 @GPropersi

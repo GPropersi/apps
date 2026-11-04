@@ -29,8 +29,10 @@ exit 1) while a backup runs.
 5. Initialise the repository once (an explicit installer mode, never automatic): `make host-backup HOST=<alias>
    ARGS="init-repo"`.
 
-**Store the restic password offsite in your password manager.** Without it the backups cannot be restored, and the
-copy in `backup.env` is lost together with the host.
+**Store the restic password and the R2 credentials (`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, the bucket
+endpoint in `RESTIC_REPOSITORY`) offsite in your password manager.** Without the restic password the backups cannot
+be restored, without the R2 credentials they cannot be read, and the copy in `backup.env` is lost together with the
+host. The `backup.env` file itself is intentionally not in the backup.
 
 ## 2. Look at what exists
 
@@ -104,6 +106,50 @@ the `REVOKE CONNECT ... FROM PUBLIC` hardening on `postgres` and `template1`, lo
 (the stack runs `appendonly yes`, which would ignore a bare RDB), and runs `install-data.sh verify` when that script is
 present. No installer places `install-data.sh` on the host (it runs from the workstation), so on the Pi that step is
 skipped and logged: run `make host-data HOST=<alias> ARGS="verify"` yourself as step 7.
+
+### Moving to a new server
+
+Use this to move to a bigger or different machine (or to rebuild after losing the old one). It extends the order
+above; apps come back by redeploying them from CI, and their data comes back from the backup.
+
+1. **Have the secrets ready from the password manager:** the restic password and the `backup.env` values (R2 access
+   key id and secret, bucket endpoint, Discord webhook). Nothing else is needed from the old host.
+2. **Admin passwords:** these stay out of GitHub by decision. On a first install you create the Postgres and Redis admin
+   password files by hand; on a move, `restore.sh host-files` (step 3 above) writes them back from the snapshot, and
+   `full` refuses unless they match it. They are read only at first start and are already in every snapshot, so a
+   separate copy in GitHub would help only if the backup were lost too.
+3. **Prepare the host for CI.** Install Docker and curl, join the host to the tailnet with Tailscale SSH enabled, and tag
+   it so the access policy lets `tag:ci` reach it as the `deploy` login only (the policy is edited by hand in the
+   admin console). Then set `vars.PLATFORM_DEPLOY_HOST` (a variable of the GitHub environment `production`) to the new
+   host's name, and `vars.PLATFORM_BUILD_ARCH` (a repository-level Actions variable) to its CPU architecture.
+4. **Install the host pieces** in the order of section 4 above (deploy user with
+   `make host-deploy-user HOST=<alias> ARGS="install --pubkey-file PATH"`, restore-only backup, `host-files`, data
+   stack, `full` restore, normal backup install, verify). Then, before any redeploy:
+   `make host-ingress HOST=<alias> ARGS="install"` (it creates the Docker network the deploy preflight needs) and
+   `make host-jobs HOST=<alias> ARGS=install` (it creates the image registry root; without it every deploy exits 1
+   naming `preflight`).
+5. **Redeploy every app:** in GitHub, Actions, run the `app-deploy.yml` workflow on branch `main` with `apps: all`.
+   Each app is tested, built and deployed on its own; one failing app does not stop the others. A blank host has no
+   live tag, so no deploy is skipped as "going backwards".
+
+What carries over and what does not:
+
+- A same-architecture move needs no rebuild of the data. Logical dumps (the Postgres dump and the Redis RDB load)
+  also restore across architectures, so a move from arm64 to amd64 or back is supported; only the images are rebuilt,
+  for the architecture in `PLATFORM_BUILD_ARCH`.
+- The deploy state (`/var/lib/platform/deploy`) and the local images are **not** in the backup. Rollback right after a
+  move therefore exits 1 (`no previous deploy`) until a second deploy of that app has run on the new host.
+- Redeploy-all pulls the images with the workflow's own short-lived token, so the packages stay private and the new
+  host needs no standing registry credential.
+
+### Retiring an app (removal)
+
+Remove `apps/<name>/` by PR first, so nothing redeploys it, then run
+`make host-app-rm HOST=<alias> ARGS="<app> --confirm <app> [--stop]"`. It deletes the app's containers, registry entry,
+Redis keys and user, database and role, secrets, deploy state and local images (see
+[`../data/README.md`](../data/README.md) "Removing an app"). The nightly snapshots keep the app's data until the restic
+retention prunes them, so a removal made in error is recoverable with `restore.sh app` and `restore.sh secrets` until
+then.
 
 ## 5. Wipe procedure (acceptance drill and any in-place recovery)
 

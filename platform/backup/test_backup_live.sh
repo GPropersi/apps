@@ -2,7 +2,7 @@
 # Pre-merge round trip of the REAL backup.sh and restore.sh against the REAL pinned Postgres and Redis (compose.yaml of the
 # data stack), the real new-db.sh, the real restic and a local-directory restic repository.
 #
-# Needs docker, the compose plugin and restic on PATH. Without any of them (CI has no docker daemon) it skips with a loud
+# Needs docker, the compose plugin and restic on PATH. Without any of them it skips with a loud
 # banner and exits 0. Run it once un-skipped on a docker host before merge, with REQUIRE_DOCKER=1 so a skip becomes a
 # failure (a skip is otherwise indistinguishable from a pass):
 #   REQUIRE_DOCKER=1 bash platform/backup/test_backup_live.sh > /tmp/claude/backup-live.txt 2>&1

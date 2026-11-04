@@ -72,6 +72,35 @@ expect_fail "tailnet name" tailnet-name "$seed"
 new_repo; seed="ssh:/""/user@host"; add_file "$repo" a.txt "$seed"; run_check
 expect_fail "ssh url" ssh-url "$seed"
 
+new_repo; seed="myhost.tail9"".TS.NET"; add_file "$repo" a.txt "$seed"; run_check
+expect_fail "tailnet name in upper case" tailnet-name "$seed"
+
+new_repo; seed="tsk""ey-auth-abcdef1234567890"; add_file "$repo" a.txt "$seed"; run_check
+expect_fail "tailscale key" tailscale-key "$seed"
+
+new_repo; seed="cf""ut_$pad"; add_file "$repo" a.txt "$seed"; run_check
+expect_fail "cloudflare token" cloudflare-token "$seed"
+
+new_repo; seed="https://disc""ord.com/api/webhooks/1/x"; add_file "$repo" a.txt "$seed"; run_check
+expect_fail "discord webhook url" webhook-url "$seed"
+
+new_repo; seed="fd7a:115c:a1e0:ab12"":4843:cd96:6250:1234"; add_file "$repo" a.txt "$seed"; run_check
+expect_fail "ipv6 literal (a tailscale ULA)" ipv6 "$seed"
+
+new_repo; seed="key""body"; add_file "$repo" deploy/id_ed25519 "$seed"; run_check
+expect_fail "tracked ssh private key file" tracked-key-file "$seed"
+
+new_repo; seed="state""body"; add_file "$repo" infra/prod.tfstate "$seed"; run_check
+expect_fail "tracked tfstate" tracked-key-file "$seed"
+
+new_repo; seed="https://hooks"".slack.com/services/T0/B0/x"; add_file "$repo" a.txt "$seed"; run_check
+expect_fail "slack webhook url" webhook-url "$seed"
+
+for f in deploy/cert.p12 deploy/cert.pfx deploy/credentials.json credentials.json deploy/id_rsa deploy/id_ecdsa infra/prod.tfstate.backup; do
+  new_repo; seed="file""body"; add_file "$repo" "$f" "$seed"; run_check
+  expect_fail "tracked $f" tracked-key-file "$seed"
+done
+
 new_repo; seed="8.8.8"".8"; add_file "$repo" a.txt "$seed"; run_check
 expect_fail "public ipv4" ipv4 "$seed"
 
