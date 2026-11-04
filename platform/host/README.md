@@ -7,9 +7,9 @@ the host; Claude never runs the live-host targets (they are denied in a worktree
 
 | File | Role |
 |---|---|
-| `platform.sh` | The `platform` dispatcher: the only command the `deploy` identity can run. Validates one unsplit string against an allowlist. `new-db <app>` hands over to `/opt/platform/data/new-db.sh` (exit 1 with "run `make host-data ... install`" when it is not installed). `ls` prints one TSV row per labelled app (`app`, `state`, `health`; contract in [`../registry/README.md`](../registry/README.md)) and exits 1 on a docker failure. `make host-app-ls HOST=<alias>` runs it over ssh as `sudo -n /usr/local/bin/platform ls`, so it needs the passwordless sudo the other `host-*` targets use. `deploy` and `rollback` are placeholders that exit 3 (not implemented) until later steps. |
+| `platform.sh` | The `platform` dispatcher: the only command the `deploy` identity can run. Validates one unsplit string against an allowlist. `new-db <app>` hands over to `/opt/platform/data/new-db.sh` (exit 1 with "run `make host-data ... install`" when it is not installed). `ls` prints one TSV row per labelled app (`app`, `state`, `health`; contract in [`../registry/README.md`](../registry/README.md)) and exits 1 on a docker failure. `make host-app-ls HOST=<alias>` runs it over ssh as `sudo -n /usr/local/bin/platform ls`, so it needs the passwordless sudo the other `host-*` targets use. `deploy <app> <tag>` and `rollback <app>` hand over to `/opt/platform/deploy/deploy.sh` (exit 1 with "run `make host-deploy-user ... install`" when it is not installed) with a scrubbed environment (`env -i`, so no `DEPLOY_*` test hook is reachable) and the caller's stdin passed through (the pull-token line and `app.yaml`). `current <app>` is read-only and has no helper: it prints the live tag from `/var/lib/platform/deploy/<app>/current/tag`, prints nothing (exit 0) when there is none, and exits 1 when the file is unreadable or not a valid tag. There is no `rm-db` or app-removal command. |
 | `login-shell.sh` | Root-owned validating login shell of `deploy` (`platform-login`). Never starts a shell; hands one `-c` command to the dispatcher. |
-| `install-deploy-user.sh` | Creates the `deploy` user, its forced-command key and the `Match User deploy` sshd drop-in. |
+| `install-deploy-user.sh` | Creates the `deploy` user, its forced-command key and the `Match User deploy` sshd drop-in. Also installs the deploy helper tree `/opt/platform/deploy` (`deploy.sh`, `registry/validate-app-yaml.sh`, `registry/reserved-names.txt`, `lib/yaml-subset.sh`; all `root:root`, never writable by `deploy`) and creates `/var/lib/platform/deploy` (`deploy:deploy 0755`); `status` and `verify` check each file by bytes plus owner and mode. |
 | `claude-access.sh`, `claude-helper.sh` | Validating wrapper (also the login shell) and root helper for the `claude` debugging identity: `ps`, `stats`, `status`, `logs <app> [lines]`, `restart <app>`. |
 | `install-claude-access.sh` | Creates the `claude` user, its key and the `Match User claude` sshd drop-in; prints one sudoers line for you to install. |
 | `install-ingress.sh` | Installs the ingress stack (Traefik, cloudflared, socket proxy, down page) under `/opt/platform/ingress` and starts it. Never creates the tunnel token or its group (`64321`); checks both fail-closed and prints how to create them. `install`, `status`, `verify`, and `verify --live [--hold]` (disposable containers prove routing and the down-page fallbacks; `--hold` also waits for one real login through the tunnel). Run it with `make host-ingress HOST=<alias> ARGS="..."`. |
@@ -21,7 +21,7 @@ the host; Claude never runs the live-host targets (they are denied in a worktree
 
 The installers embed their payloads (dispatcher, wrapper, helper, for the ingress installer compose.yaml,
 dynamic.yml and the down page's index page, and for the data installer compose.yaml, pg_hba.conf,
-redis-entrypoint.sh, reserved-names.txt and new-db.sh, and for the backup installer backup.sh, restore.sh,
+redis-entrypoint.sh, reserved-names.txt, new-db.sh and rm-db.sh, and for the backup installer backup.sh, restore.sh,
 window.env, the service unit and the timer unit) because the host has no checkout: edit the
 source file, run `make embed`, and `make lint` fails if an embedded copy differs from its source.
 
@@ -91,7 +91,7 @@ and run it there directly.
    `install` (and `restore-only`) downloads the pinned `restic` release on the host, so the host needs outbound
    network access at install time; without it, place the binary by hand (download the pinned release elsewhere and
    copy it to the path `install-backup.sh` names, then re-run; the sha256 check still applies).
-   `ARGS` for `host-restore` is re-parsed by the remote shell as root, so its words must be plain tokens (no spaces
+   `ARGS` for `host-restore` and `host-app-rm` is re-parsed by the remote shell as root, so its words must be plain tokens (no spaces
    or shell metacharacters).
 10. Jobs runner: needs steps 7 and 9 done first (data stack healthy, `window.env` installed). Create the two files
     the installer never writes (`/etc/platform/jobs-redis.password` and `/etc/platform/jobs.env`, both

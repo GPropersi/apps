@@ -103,6 +103,8 @@ mkstub stat <<'EOF'
 path="${@: -1}"
 mode="$(/usr/bin/stat -c '%a' -- "$path")" || exit 1
 og="root:root"
+# the one directory the installer hands to deploy
+[ "$path" != "$INSTALL_DEPLOY_ROOT/var/lib/platform/deploy" ] || og="deploy:deploy"
 if [ -f "$STATE/stat_override" ]; then
   line="$(grep -F -- "$path " "$STATE/stat_override" | head -n1 || true)"
   [ -z "$line" ] || og="${line##* }"
@@ -635,6 +637,76 @@ tamper_case "dispatcher bytes altered" "dispatcher bytes differ"
 fresh; inst install --pubkey-file "$T_TMP/key.pub" >/dev/null
 printf '\n# tampered\n' >> "$(root $INSTALLED_WRAPPER)"
 tamper_case "wrapper bytes altered" "login wrapper bytes differ"
+
+# The deploy helper tree: each file by bytes and owner/mode, plus the directories and the state directory.
+HELPER_ROOT=/opt/platform/deploy
+helper_files=(
+  "$HELPER_ROOT/deploy.sh|$here/../deploy/deploy.sh|755|deploy helper"
+  "$HELPER_ROOT/registry/validate-app-yaml.sh|$here/../registry/validate-app-yaml.sh|755|app.yaml validator"
+  "$HELPER_ROOT/registry/reserved-names.txt|$here/../registry/reserved-names.txt|644|reserved names"
+  "$HELPER_ROOT/lib/yaml-subset.sh|$here/../lib/yaml-subset.sh|755|yaml reader"
+)
+for spec in "${helper_files[@]}"; do
+  IFS='|' read -r dest src mode label <<<"$spec"
+  fresh; inst install --pubkey-file "$T_TMP/key.pub" >/dev/null
+  if cmp -s "$src" "$(root "$dest")"; then _pass; else _fail "installed $label bytes equal the tracked source"; fi
+  expect_eq "$label mode" "$(/usr/bin/stat -c %a "$(root "$dest")")" "$mode"
+  expect_calls_has "$label is chowned root:root before the rename" "chown root:root $(root "$dest").new"
+  printf '\n# tampered\n' >> "$(root "$dest")"
+  tamper_case "$label bytes altered" "$label bytes differ"
+  fresh; inst install --pubkey-file "$T_TMP/key.pub" >/dev/null
+  rm -f "$(root "$dest")"
+  tamper_case "$label removed" "$label missing"
+  fresh; inst install --pubkey-file "$T_TMP/key.pub" >/dev/null
+  printf '%s %s\n' "$(root "$dest")" "deploy:deploy" > "$STATE/stat_override"
+  tamper_case "$label owned by deploy" "$label owner/mode"
+  fresh; inst install --pubkey-file "$T_TMP/key.pub" >/dev/null
+  chmod 666 "$(root "$dest")"
+  tamper_case "$label writable by others" "$label owner/mode"
+done
+for d in "$HELPER_ROOT" "$HELPER_ROOT/registry" "$HELPER_ROOT/lib"; do
+  fresh; inst install --pubkey-file "$T_TMP/key.pub" >/dev/null
+  expect_eq "$d mode" "$(/usr/bin/stat -c %a "$(root "$d")")" "755"
+  expect_calls_has "$d is chowned root:root" "chown root:root $(root "$d")"
+  printf '%s %s\n' "$(root "$d")" "deploy:deploy" > "$STATE/stat_override"
+  inst verify
+  expect_rc "verify fails when $d is owned by deploy" 1
+done
+
+# deploy cannot write anything under /opt/platform/deploy: no path in the tree is owned by deploy (every chown aimed
+# there is root:root) and none is group- or world-writable.
+fresh; inst install --pubkey-file "$T_TMP/key.pub" >/dev/null
+expect_eq "no chown under /opt/platform/deploy hands anything to deploy" "$(grep '^chown ' "$CALL_LOG" | grep "$(root $HELPER_ROOT)" | grep -vc '^chown root:root ')" "0"
+expect_eq "nothing under /opt/platform/deploy is group- or world-writable" "$(find "$(root $HELPER_ROOT)" -perm /022 | wc -l)" "0"
+expect_eq "positive control: the helper tree was chowned root:root (3 dirs, 4 files)" "$(grep '^chown root:root ' "$CALL_LOG" | grep -c "$(root $HELPER_ROOT)")" "7"
+expect_eq "the helper tree holds exactly the four files" "$(find "$(root $HELPER_ROOT)" -type f | wc -l)" "4"
+
+# The state directory is the one thing deploy owns.
+fresh; inst install --pubkey-file "$T_TMP/key.pub" >/dev/null
+expect_eq "state directory mode" "$(/usr/bin/stat -c %a "$(root /var/lib/platform/deploy)")" "755"
+expect_calls_has "state directory is chowned to deploy" "chown deploy:deploy $(root /var/lib/platform/deploy)"
+printf '%s %s\n' "$(root /var/lib/platform/deploy)" "root:root" > "$STATE/stat_override"
+tamper_case "state directory not owned by deploy" "deploy state directory owner/mode"
+fresh; inst install --pubkey-file "$T_TMP/key.pub" >/dev/null
+rm -rf "$(root /var/lib/platform/deploy)"
+tamper_case "state directory removed" "deploy state directory missing"
+fresh; inst install --pubkey-file "$T_TMP/key.pub" >/dev/null
+chmod 777 "$(root /var/lib/platform/deploy)"
+tamper_case "state directory mode 777" "deploy state directory owner/mode"
+fresh; inst install --pubkey-file "$T_TMP/key.pub" >/dev/null
+rm -rf "$(root /var/lib/platform/deploy)"
+ln -s /tmp "$(root /var/lib/platform/deploy)"
+tamper_case "state directory is a symlink" "deploy state directory is a symlink"
+fresh; inst install --pubkey-file "$T_TMP/key.pub" >/dev/null
+rm -rf "$(root $HELPER_ROOT/lib)"
+ln -s /tmp "$(root $HELPER_ROOT/lib)"
+tamper_case "helper lib directory is a symlink" "helper lib directory is a symlink"
+
+# The state directory is chowned to deploy only after the deploy user exists (a chown to a missing user fails on a host).
+fresh; inst install --pubkey-file "$T_TMP/key.pub" >/dev/null
+u_line="$(grep -n -m1 '^useradd ' "$CALL_LOG" | cut -d: -f1)"
+s_line="$(grep -n -m1 "chown deploy:deploy $(root /var/lib/platform/deploy)" "$CALL_LOG" | cut -d: -f1)"
+if [ -n "$u_line" ] && [ -n "$s_line" ] && [ "$u_line" -lt "$s_line" ]; then _pass; else _fail "useradd precedes the state directory chown" "useradd line '$u_line', chown line '$s_line'"; fi
 
 fresh; inst install --pubkey-file "$T_TMP/key.pub" >/dev/null
 printf 'command="/bin/sh" %s\n' "$KEY" > "$(root $KEYFILE_PATH)"

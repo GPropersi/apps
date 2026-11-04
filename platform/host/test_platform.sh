@@ -42,23 +42,62 @@ reject_case() {
   if grep -q 'reason=' "$LOGGER_LOG"; then _pass; else _fail "reject logs a reason: $1" "no reason= in logger argv"; fi
 }
 
-# accept_case <label> <payload> <placeholder-name>: exit exactly 3 from its own placeholder.
+# The dispatcher's helper and state paths are readonly constants (no override), so the tests run a copy whose paths point
+# at a stub helper and a state tree in the scratch dir. The real paths are asserted below.
+HELPER="$T_TMP/new-db-helper.sh"
+HELPER_ARGS="$T_TMP/new-db-helper.args"
+DEPLOY_STUB="$T_TMP/deploy-helper.sh"
+DEPLOY_REC="$T_TMP/deploy-helper.rec"
+STATE_TREE="$T_TMP/state-tree"
+copy="$T_TMP/platform-under-test.sh"
+sed -e "s#^readonly NEW_DB_HELPER=.*#readonly NEW_DB_HELPER='$HELPER'#" \
+  -e "s#^readonly DEPLOY_HELPER=.*#readonly DEPLOY_HELPER='$DEPLOY_STUB'#" \
+  -e "s#^readonly DEPLOY_STATE_DIR=.*#readonly DEPLOY_STATE_DIR='$STATE_TREE'#" "$script" > "$copy"
+if grep -qF "readonly NEW_DB_HELPER='$HELPER'" "$copy" && grep -qF "readonly DEPLOY_HELPER='$DEPLOY_STUB'" "$copy" &&
+  grep -qF "readonly DEPLOY_STATE_DIR='$STATE_TREE'" "$copy"; then _pass; else _fail "the helper and state paths in the test copy were rewritten"; fi
+run_copy() { run_cmd env LC_ALL=en_US.UTF-8 SSH_ORIGINAL_COMMAND="$1" bash "$copy"; }
+if grep -qF "readonly NEW_DB_HELPER='/opt/platform/data/new-db.sh'" "$script"; then _pass; else _fail "the real helper path is /opt/platform/data/new-db.sh"; fi
+if grep -qF "readonly DEPLOY_HELPER='/opt/platform/deploy/deploy.sh'" "$script"; then _pass; else _fail "the real deploy helper path is /opt/platform/deploy/deploy.sh"; fi
+if grep -qF "readonly DEPLOY_STATE_DIR='/var/lib/platform/deploy'" "$script"; then _pass; else _fail "the real deploy state path is /var/lib/platform/deploy"; fi
+
+# The stub records its argv, its stdin and every DEPLOY_* variable it can see.
+# (The record path is baked in: the dispatcher scrubs the environment, so the stub cannot be told where to write.)
+cat > "$DEPLOY_STUB" <<EOF
+#!/usr/bin/env bash
+{
+  printf 'args=%s\n' "\$*"
+  cat > "$DEPLOY_REC.stdin"
+  printf 'env=%s\n' "\$(env | grep '^DEPLOY_' | sort | tr '\n' ',')"
+} > "$DEPLOY_REC"
+echo "deploy helper ran"
+exit 0
+EOF
+chmod 755 "$DEPLOY_STUB"
+
+# feed_stdin <env args...>: run with a fixed two-line stdin (a token line, then a yaml line), like a deploy over ssh.
+feed_stdin() { printf 'tok-ZQXD1\nname: demo\n\n' | env "$@"; }
+
+# accept_case <label> <payload> <expected helper argv>: the helper runs once with exactly these arguments, no stub is hit.
 accept_case() {
   t_reset_calls
-  run_payload "$2"
-  expect_rc "accept: $1" 3
-  expect_out_has "accept placeholder: $1" "$3 is not implemented"
+  rm -f "$DEPLOY_REC"
+  run_cmd feed_stdin LC_ALL=en_US.UTF-8 SSH_ORIGINAL_COMMAND="$2" bash "$copy"
+  expect_rc "accept: $1" 0
+  expect_out_has "accept runs the helper: $1" "deploy helper ran"
+  expect_eq "accept helper argv: $1" "$(grep '^args=' "$DEPLOY_REC")" "args=$3"
   expect_eq "accept no stub call: $1" "$(t_calls)" ""
 }
 
-accept_case "deploy" "deploy myapp v1.2.3" deploy
-accept_case "deploy sha tag" "deploy my-app abc123_DEF.4-5" deploy
-accept_case "rollback" "rollback myapp" rollback
-accept_case "app min length 2" "rollback ab" rollback
-accept_case "tag max length 128" "deploy myapp $(printf 'a%.0s' $(seq 1 128))" deploy
+long_tag="$(printf 'a%.0s' $(seq 1 128))"
+long_app="a$(printf 'b%.0s' $(seq 1 30))"
+accept_case "deploy" "deploy myapp v1.2.3" "deploy myapp v1.2.3"
+accept_case "deploy sha tag" "deploy my-app abc123_DEF.4-5" "deploy my-app abc123_DEF.4-5"
+accept_case "rollback" "rollback myapp" "rollback myapp"
+accept_case "app min length 2" "rollback ab" "rollback ab"
+accept_case "tag max length 128" "deploy myapp $long_tag" "deploy myapp $long_tag"
 
-accept_case "app max length 31" "rollback a$(printf 'b%.0s' $(seq 1 30))" rollback
-accept_case "longest valid command (app 31, tag 128)" "deploy a$(printf 'b%.0s' $(seq 1 30)) $(printf 'a%.0s' $(seq 1 128))" deploy
+accept_case "app max length 31" "rollback $long_app" "rollback $long_app"
+accept_case "longest valid command (app 31, tag 128)" "deploy $long_app $long_tag" "deploy $long_app $long_tag"
 
 reject_case "empty" ""
 reject_case "spaces only" "   "
@@ -124,16 +163,7 @@ if grep -qF -- 'reason=too-long len=273' "$LOGGER_LOG"; then _pass; else _fail "
 run_cmd env SSH_ORIGINAL_COMMAND="bad" bash -c 'exec 2>&-; exec bash "$0"' "$script"
 expect_rc "reject exits 2 even if stderr is closed" 2
 
-# new-db hands over to the installed helper. The dispatcher's helper path is a readonly constant (no override), so the
-# test runs a copy whose path points at a stub helper in the scratch tree.
-HELPER="$T_TMP/new-db-helper.sh"
-HELPER_ARGS="$T_TMP/new-db-helper.args"
-copy="$T_TMP/platform-under-test.sh"
-sed "s#^readonly NEW_DB_HELPER=.*#readonly NEW_DB_HELPER='$HELPER'#" "$script" > "$copy"
-if grep -qF "readonly NEW_DB_HELPER='$HELPER'" "$copy"; then _pass; else _fail "the helper path in the test copy was rewritten"; fi
-run_copy() { run_cmd env LC_ALL=en_US.UTF-8 SSH_ORIGINAL_COMMAND="$1" bash "$copy"; }
-if grep -qF "readonly NEW_DB_HELPER='/opt/platform/data/new-db.sh'" "$script"; then _pass; else _fail "the real helper path is /opt/platform/data/new-db.sh"; fi
-
+# new-db hands over to the installed helper (the copy and stub are set up above).
 rm -f "$HELPER" "$HELPER_ARGS"
 t_reset_calls
 run_copy "new-db myapp"
@@ -159,12 +189,146 @@ run_copy "new-db myapp extra"
 expect_rc "new-db with an extra argument is rejected before the helper" 2
 if [ -e "$HELPER_ARGS" ]; then _fail "an extra argument never reaches the helper"; else _pass; fi
 
+# deploy and rollback: stdin reaches the helper unchanged, and no DEPLOY_* variable does, hook by hook. DEPLOY_VALIDATOR
+# and DEPLOY_SKIP_REGISTRY would let a caller swap the validator or skip the registry login, so each is asserted alone.
+t_reset_calls
+rm -f "$DEPLOY_REC"
+run_cmd feed_stdin LC_ALL=en_US.UTF-8 SSH_ORIGINAL_COMMAND="deploy myapp v1" bash "$copy"
+printf 'tok-ZQXD1\nname: demo\n\n' > "$T_TMP/stdin.expected"
+if cmp -s "$T_TMP/stdin.expected" "$DEPLOY_REC.stdin"; then _pass; else _fail "deploy passes stdin through byte for byte (token line, yaml, trailing blank line)"; fi
+hooks=(DEPLOY_NETWORK DEPLOY_SECRETS_ROOT DEPLOY_JOB_SECRETS_ROOT DEPLOY_STATE_ROOT DEPLOY_REGISTRY_ROOT DEPLOY_LOCK_DIR
+  DEPLOY_CONNECTION_ENV DEPLOY_SKIP_REGISTRY DEPLOY_VALIDATOR DEPLOY_LOCK_WAIT DEPLOY_EXEC_TIMEOUT DEPLOY_PULL_TIMEOUT
+  DEPLOY_STOP_TIMEOUT DEPLOY_HEALTH_WAIT DEPLOY_NOPATH_WAIT DEPLOY_POLL_INTERVAL DEPLOY_HELPER DEPLOY_STATE_DIR)
+for hook in "${hooks[@]}"; do
+  rm -f "$DEPLOY_REC"
+  run_cmd feed_stdin "$hook=/caller/chosen-ZQXD2" LC_ALL=en_US.UTF-8 SSH_ORIGINAL_COMMAND="deploy myapp v1" bash "$copy"
+  expect_rc "deploy with $hook set runs the helper" 0
+  expect_eq "deploy scrubs $hook" "$(grep '^env=' "$DEPLOY_REC")" "env="
+  rm -f "$DEPLOY_REC"
+  run_cmd feed_stdin "$hook=/caller/chosen-ZQXD2" LC_ALL=en_US.UTF-8 SSH_ORIGINAL_COMMAND="rollback myapp" bash "$copy"
+  expect_eq "rollback scrubs $hook" "$(grep '^env=' "$DEPLOY_REC")" "env="
+done
+rm -f "$DEPLOY_REC"
+all_env=()
+for hook in "${hooks[@]}"; do all_env+=("$hook=/caller/chosen-ZQXD2"); done
+run_cmd feed_stdin "${all_env[@]}" LC_ALL=en_US.UTF-8 SSH_ORIGINAL_COMMAND="deploy myapp v1" bash "$copy"
+expect_eq "deploy with every DEPLOY_* hook set: the helper sees none" "$(grep '^env=' "$DEPLOY_REC")" "env="
+if grep -q 'ZQXD2' "$DEPLOY_REC"; then _fail "no caller-chosen value reaches the helper"; else _pass; fi
+
+# A missing or non-executable helper exits 1 and names the install command; nothing is run, nothing is hit.
+rm -f "$DEPLOY_REC"
+chmod 644 "$DEPLOY_STUB"
+t_reset_calls
+run_cmd feed_stdin LC_ALL=en_US.UTF-8 SSH_ORIGINAL_COMMAND="deploy myapp v1" bash "$copy"
+expect_rc "deploy with a non-executable helper exits 1" 1
+if grep -q 'deploy helper missing' "$LOGGER_LOG"; then _pass; else _fail "a missing helper is logged"; fi
+expect_out_has "deploy with a non-executable helper names the install command" "make host-deploy-user"
+mv "$DEPLOY_STUB" "$DEPLOY_STUB.off"
+run_cmd feed_stdin LC_ALL=en_US.UTF-8 SSH_ORIGINAL_COMMAND="rollback myapp" bash "$copy"
+expect_rc "rollback with the helper absent exits 1" 1
+expect_out_has "rollback with the helper absent names the install command" "make host-deploy-user"
+expect_eq "a missing helper makes no stub call and runs nothing" "$(t_calls)" ""
+if [ -e "$DEPLOY_REC" ]; then _fail "a missing helper is never run"; else _pass; fi
+# Invalid input is still a rejection (exit 2) with no helper call, also with the helper absent.
+run_copy "deploy My_App v1"
+expect_rc "deploy with an invalid app exits 2 before the helper check" 2
+run_copy "deploy myapp -bad"
+expect_rc "deploy with an invalid tag exits 2 before the helper check" 2
+mv "$DEPLOY_STUB.off" "$DEPLOY_STUB"
+chmod 755 "$DEPLOY_STUB"
+rm -f "$DEPLOY_REC"
+run_copy "deploy My_App v1"
+expect_rc "deploy with an invalid app exits 2" 2
+run_copy "deploy myapp -bad"
+expect_rc "deploy with an invalid tag exits 2" 2
+run_copy "rollback My_App"
+expect_rc "rollback with an invalid app exits 2" 2
+if [ -e "$DEPLOY_REC" ]; then _fail "an invalid name or tag never reaches the helper"; else _pass; fi
+
+# rm-db is not a command (app removal is admin-only through a make target).
+reject_case "rm-db is unknown" "rm-db myapp"
+reject_case "rm-db with no argument is unknown" "rm-db"
+
+# current <app>: the live tag, or nothing. Read-only, fixed path, fail closed.
+cur_dir() { printf '%s/%s/current' "$STATE_TREE" "$1"; }
+mkdir -p "$(cur_dir myapp)"
+printf 'v1.2.3\n' > "$(cur_dir myapp)/tag"
+t_reset_calls
+run_copy "current myapp"
+expect_rc "current prints the live tag" 0
+expect_eq "current output is the tag" "$out" "v1.2.3"
+expect_eq "current makes no stub call" "$(t_calls)" ""
+printf 'abc123' > "$(cur_dir myapp)/tag"
+run_copy "current myapp"
+expect_rc "current accepts a tag file without a trailing newline" 0
+expect_eq "current prints a tag file without a trailing newline" "$out" "abc123"
+run_copy "current other-app"
+expect_rc "current with no state for the app exits 0" 0
+expect_eq "current with no state prints nothing" "$out" ""
+mkdir -p "$(cur_dir emptyapp)"
+run_copy "current emptyapp"
+expect_rc "current with a current/ dir but no tag file exits 0" 0
+expect_eq "current with no tag file prints nothing" "$out" ""
+before_tree="$(find "$STATE_TREE" -exec /usr/bin/stat -c '%n %a %s %Y' {} + | sort)"
+run_copy "current myapp"
+expect_eq "current writes nothing" "$(find "$STATE_TREE" -exec /usr/bin/stat -c '%n %a %s %Y' {} + | sort)" "$before_tree"
+run_copy "current My_App"
+expect_rc "current with an invalid app exits 2" 2
+expect_out_has "current invalid app prints usage" "usage: platform"
+run_copy "current ../myapp"
+expect_rc "current with a path in the app exits 2" 2
+run_copy "current myapp extra"
+expect_rc "current with an extra argument exits 2" 2
+run_copy "current"
+expect_rc "current with no argument exits 2" 2
+# Unreadable: the tag path is a directory (holds for root too).
+mkdir -p "$(cur_dir dirapp)/tag"
+run_copy "current dirapp"
+expect_rc "current with a directory as the tag file exits 1" 1
+expect_out_has "current with a directory says why" "current failed"
+# Malformed content fails closed, with no partial output.
+bad_tag_case() { # label content
+  mkdir -p "$(cur_dir badapp)"
+  printf '%b' "$2" > "$(cur_dir badapp)/tag"
+  run_copy "current badapp"
+  expect_rc "current rejects a malformed tag: $1" 1
+  expect_out_lacks "current prints no malformed tag: $1" "ZQXD3"
+}
+bad_tag_case "leading dot" ".ZQXD3\n"
+bad_tag_case "space inside" "ZQXD3 x\n"
+bad_tag_case "two lines" "ZQXD3\nv2\n"
+bad_tag_case "empty file" ""
+bad_tag_case "blank line" "\n"
+bad_tag_case "too long (129)" "$(printf 'a%.0s' $(seq 1 129))ZQXD3\n"
+bad_tag_case "shell metacharacter" "ZQXD3;id\n"
+bad_tag_case "carriage return" "ZQXD3\r\n"
+mkdir -p "$(cur_dir symapp)"
+ln -sf "$(cur_dir myapp)/tag" "$(cur_dir symapp)/tag"
+run_copy "current symapp"
+expect_rc "current refuses a symlinked tag file" 1
+expect_out_lacks "current prints nothing for a symlinked tag file" "abc123"
+mkdir -p "$(cur_dir dangling)"
+ln -sf /nonexistent-zqxd4 "$(cur_dir dangling)/tag"
+run_copy "current dangling"
+expect_rc "current refuses a dangling symlinked tag file" 1
+if [ "$(id -u)" -ne 0 ]; then
+  mkdir -p "$(cur_dir noperm)"
+  printf 'v9\n' > "$(cur_dir noperm)/tag"
+  chmod 000 "$(cur_dir noperm)/tag"
+  run_copy "current noperm"
+  expect_rc "current with an unreadable tag file exits 1" 1
+  chmod 644 "$(cur_dir noperm)/tag"
+fi
+# The real dispatcher reads only the fixed production path: a caller cannot point it elsewhere.
+run_cmd env LC_ALL=C DEPLOY_STATE_DIR="$STATE_TREE" SSH_ORIGINAL_COMMAND="current myapp" bash "$script"
+if [ -d /var/lib/platform/deploy/myapp ]; then _pass; else expect_eq "DEPLOY_STATE_DIR in the caller's environment is ignored" "$out" ""; fi
+
 # The unset-variable and argv paths.
 t_reset_calls
-run_cmd env -u SSH_ORIGINAL_COMMAND bash "$script" deploy myapp v1
-expect_rc "argv fallback accepts deploy" 3
-run_cmd env -u SSH_ORIGINAL_COMMAND bash "$script" rollback myapp
-expect_rc "argv fallback accepts rollback" 3
+run_cmd feed_stdin -u SSH_ORIGINAL_COMMAND bash "$copy" deploy myapp v1
+expect_rc "argv fallback accepts deploy" 0
+run_cmd feed_stdin -u SSH_ORIGINAL_COMMAND bash "$copy" rollback myapp
+expect_rc "argv fallback accepts rollback" 0
 run_cmd env -u SSH_ORIGINAL_COMMAND bash "$script"
 expect_rc "no command and no args rejects" 2
 run_cmd env -u SSH_ORIGINAL_COMMAND bash "$script" 'rollback' 'myapp;id'
