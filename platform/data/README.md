@@ -12,7 +12,8 @@ Compose service names `postgres` and `redis`.
 | `pg_hba.conf` | Mounted read-only. One `local all postgres peer` line (used by `docker exec` as the postgres uid, so `new-db` and `verify` need no password) a first `host all postgres samenet reject` line (the superuser never logs in over the network), then `scram-sha-256` `host` lines on `samenet`. No `trust`. |
 | `redis-entrypoint.sh` | Mounted read-only as the Redis entrypoint. Builds `users.acl` from the admin secret file at first start (atomic write), then execs `redis-server`. |
 | `new-db.sh` | The `platform new-db <app>` helper, installed to `/opt/platform/data/new-db.sh` (`root:root 0755`) and run by the dispatcher as `deploy`. Gives one app its own Postgres role and database and its own Redis user, writing the credentials to the secret files below. See "Provisioning an app". |
-| `test_data_stack.sh`, `test_redis_entrypoint.sh`, `test_new_db.sh` | Offline tests (`make test`). |
+| `rm-db.sh` | The admin-only app removal, installed to `/opt/platform/data/rm-db.sh` (`root:root 0755`) and run as root by `make host-app-rm`. Not reachable through `platform`. See "Removing an app". |
+| `test_data_stack.sh`, `test_redis_entrypoint.sh`, `test_new_db.sh`, `test_rm_db.sh` | Offline tests (`make test`). |
 | `test_data_live.sh` | Live checks against real containers; skips without docker. |
 
 Data lives in the named volumes `platform-data-postgres` (mounted at `/var/lib/postgresql`, the data path of the
@@ -99,6 +100,24 @@ directory; the group comes from the setgid secrets root, so no `chgrp` runs).
   fails closed), and the Postgres identifier rule (no `pg_` prefix; not `postgres`, `template0`, `template1`, `public`).
 - Each phase logs its start, end, rc and duration to stderr and to `logger -t platform`; error text is masked.
 
+## Removing an app
+
+Admin only, never from CI: `rm-db.sh` is installed to `/opt/platform/data/rm-db.sh` (`root:root 0755`) and has no
+`platform` or `platform-login` arm, so a leaked CI credential cannot reach it. Remove `apps/<name>/` by PR first (so
+nothing redeploys it), then run `make host-app-rm HOST=<alias> ARGS="<app> --confirm <app> [--stop]"` (over admin ssh with
+`sudo -n`). Typing the name twice is the confirmation; a mismatch or a missing `--confirm` exits non-zero before any change.
+
+- It takes the same per-app lock as `new-db` and `deploy`; a held lock exits 1.
+- A container labelled `platform.app=<app>` (a leftover `app-<app>-old` counts) makes it refuse, unless `--stop` removes
+  every labelled container first.
+- Order: containers, the registry dir (the jobs runner stops scheduling), every Redis `<app>:*` key (admin `SCAN` plus
+  `DEL`), `ACL DELUSER` and `ACL SAVE`, `DROP DATABASE ... WITH (FORCE)` then `DROP ROLE`, then `secrets/<app>`,
+  `job-secrets/<app>`, the deploy state and the app's local images. The secrets go last, so `new-db`'s preflight never
+  sees an object without its secret. Deletes under the deploy-owned directories run as `deploy`.
+- Every step is idempotent: a re-run after a failure at any step completes, and `platform new-db <app>` then works. A final
+  re-scan exits 1 naming anything that remains. Other apps are untouched (removing `foo` leaves `foo-bar` alone).
+- R2 snapshots keep the data until the backup retention prunes them.
+
 ## Connection contract
 
 A platform-wide, non-secret `connection.env` carries `PLATFORM_PG_HOST`, `PLATFORM_PG_PORT`, `PLATFORM_REDIS_HOST` and
@@ -125,5 +144,7 @@ Secrets are files, never values. The per-app secrets directory is `/var/lib/plat
 **Secrets mount rule (hard isolation requirement).** Every per-app secrets directory shares group 64323, so a
 container holding that group can read every app's credentials under any directory it mounts. An app may therefore
 mount only its own `/var/lib/platform/secrets/<app>/` files, never the secrets root or any parent of it.
-Enforcement belongs in the later deploy tooling that generates the compose file; `app.yaml` has no mounts key, so the
-registry validator cannot check it.
+Enforcement is `platform/deploy/deploy.sh`, the deploy helper: it builds the one `docker run` argv from the validated app
+name and `app.yaml` alone (no caller-supplied flag) and mounts only `/var/lib/platform/secrets/<app>` and
+`/var/lib/platform/job-secrets/<app>`, read-only. `app.yaml` has no mounts key, so the registry validator cannot check it.
+A stopped `app-<app>-old` keeps its `platform.app` label, so the app shows `exited` until the next deploy removes it.

@@ -2,7 +2,7 @@
 # Pre-merge run of the REAL data stack (the pinned Postgres and Redis from compose.yaml) with the real new-db.sh, the real
 # redis-entrypoint.sh, the real reserved-names list and the real install-data.sh verify checks.
 #
-# Needs docker; on a host without a usable docker daemon (CI has none) it skips with a loud notice and exits 0. Run it
+# Needs docker; on a host without a usable docker daemon it skips with a loud notice and exits 0. Run it
 # once un-skipped on a docker host before merge, with REQUIRE_DOCKER=1 so a missing docker or daemon is a failure instead
 # of a skip (a skip is otherwise indistinguishable from a pass):
 #   REQUIRE_DOCKER=1 bash platform/data/test_data_live.sh > /tmp/claude/data-live.txt 2>&1
@@ -567,5 +567,88 @@ docker stop -t 1 "$LSC" >/dev/null 2>&1
 lsout="$(bash "$here/../host/platform.sh" ls 2>&1)"
 expect_has "platform ls: exited for a stopped container" "$lsout" "$(printf '%s\t%s\t' "$ls_app" exited)"
 docker rm -fv "$LSC" >/dev/null 2>&1
+
+# ---- 10. rm-db.sh: a real removal, then a clean new-db ----
+
+# app_c is removed; app_d shares its name prefix and must survive untouched.
+app_c="$rid-rm"
+app_d="$rid-rm-x"
+role_c="${app_c//-/_}"
+role_d="${app_d//-/_}"
+rm_state="$T_TMP/rm-state"
+rm_registry="$T_TMP/rm-registry"
+rm_ns="$rid-ns"
+RMC="$rid-rmctr"
+mkdir -p "$rm_state" "$rm_registry"
+rmdb() { # <args...>: the real rm-db.sh against the live stack; no deploy user here, so deletes run as this user
+  RM_DB_TESTING=1 RM_DB_PG_CONTAINER="$PGC" RM_DB_REDIS_CONTAINER="$RDC" RM_DB_RESERVED_NAMES="$here/../registry/reserved-names.txt" \
+    RM_DB_SECRETS_ROOT="$secrets" RM_DB_JOB_SECRETS_ROOT="$jobsec" RM_DB_LOCK_DIR="$locks" RM_DB_STATE_ROOT="$rm_state" \
+    RM_DB_REGISTRY_ROOT="$rm_registry" RM_DB_IMAGE_NS="$rm_ns" RM_DB_AS_DEPLOY="" RM_DB_EXEC_TIMEOUT=60 bash "$here/rm-db.sh" "$@" 2>&1
+}
+for a in "$app_c" "$app_d"; do
+  out="$(newdb "$a")" || _fail "rm-db setup: new-db $a"
+  mkdir -p "$rm_state/$a/current" "$rm_registry/$a"
+  printf 'v1\n' > "$rm_state/$a/current/tag"
+  printf 'name: x\n' > "$rm_registry/$a/app.yaml"
+  docker tag "$rdimg" "$rm_ns/$a:v1" >/dev/null 2>&1 || _fail "cannot tag a local image for $a"
+done
+for a in "$app_c" "$app_d"; do
+  out="$(redis_as "$a" "$secrets/$a/redis-password" set "$a:k1" 1)"
+  expect_eq "rm-db setup: Redis $a can SET a key" "$out" OK
+  out="$(redis_as "$a" "$secrets/$a/redis-password" set "$a:k2" 2)"
+  expect_eq "rm-db setup: Redis $a can SET a second key" "$out" OK
+  out="$(pg_as "${a//-/_}" "$secrets/$a/db-password" "${a//-/_}" 'create table t (n int); insert into t values (1)')"
+  expect_has "rm-db setup: Postgres $a can write" "$out" "INSERT"
+done
+docker run -d --name "$RMC" --label "platform.app=$app_c" --entrypoint sleep "$rdimg" 300 >/dev/null 2>&1 || _fail "cannot start the labelled container for rm-db"
+
+out="$(rmdb "$app_c" --confirm "$app_d")"
+rc=$?
+expect_eq "rm-db with a wrong confirmation exits 1" "$rc" 1
+out="$(rmdb "$app_c" --confirm "$app_c")"
+rc=$?
+expect_eq "rm-db with a labelled container and no --stop exits 1" "$rc" 1
+expect_eq "the refused rm-db left the container running" "$(docker inspect --format '{{.State.Status}}' "$RMC" 2>/dev/null)" running
+expect_eq "the refused rm-db left the database" "$(pg_admin "select count(*) from pg_database where datname = '$role_c'")" 1
+
+out="$(rmdb "$app_c" --confirm "$app_c" --stop)"
+rc=$?
+expect_eq "rm-db --stop exits 0" "$rc" 0
+[ "$rc" -eq 0 ] || echo "$out"
+expect_eq "rm-db removed the labelled container" "$(docker ps -aq --filter "name=^${RMC}\$" | wc -l)" 0
+expect_eq "rm-db dropped the database" "$(pg_admin "select count(*) from pg_database where datname = '$role_c'")" 0
+expect_eq "rm-db dropped the role" "$(pg_admin "select count(*) from pg_roles where rolname = '$role_c'")" 0
+expect_eq "rm-db deleted the Redis keys" "$(rdadmin exists "$app_c:k1" "$app_c:k2")" 0
+expect_eq "rm-db deleted the Redis user" "$(rdadmin acl users | grep -cxF "$app_c")" 0
+expect_eq "rm-db removed secrets/<app>" "$([ -e "$secrets/$app_c" ] && echo present || echo gone)" gone
+expect_eq "rm-db removed job-secrets/<app>" "$([ -e "$jobsec/$app_c" ] && echo present || echo gone)" gone
+expect_eq "rm-db removed the deploy state" "$([ -e "$rm_state/$app_c" ] && echo present || echo gone)" gone
+expect_eq "rm-db removed the registry dir" "$([ -e "$rm_registry/$app_c" ] && echo present || echo gone)" gone
+expect_eq "rm-db removed the app's local image" "$(docker image ls -q "$rm_ns/$app_c" | wc -l)" 0
+# the sibling whose name starts with the removed name is untouched
+expect_eq "the sibling's database survives" "$(pg_admin "select count(*) from pg_database where datname = '$role_d'")" 1
+expect_eq "the sibling's role survives" "$(pg_admin "select count(*) from pg_roles where rolname = '$role_d'")" 1
+expect_eq "the sibling's rows survive" "$(pg_as "$role_d" "$secrets/$app_d/db-password" "$role_d" 'select count(*) from t')" 1
+expect_eq "the sibling's Redis keys survive" "$(redis_as "$app_d" "$secrets/$app_d/redis-password" get "$app_d:k2")" 2
+expect_has "the sibling's Redis user survives" "$(rdadmin acl users)" "$app_d"
+expect_eq "the sibling's secrets survive" "$([ -e "$secrets/$app_d/db-password" ] && echo present || echo gone)" present
+expect_eq "the sibling's state and registry survive" "$([ -e "$rm_state/$app_d/current/tag" ] && [ -e "$rm_registry/$app_d/app.yaml" ] && echo present || echo gone)" present
+expect_eq "the sibling's local image survives" "$(docker image ls -q "$rm_ns/$app_d" | wc -l)" 1
+
+out="$(rmdb "$app_c" --confirm "$app_c")"
+rc=$?
+expect_eq "a second rm-db is a clean no-op" "$rc" 0
+out="$(newdb "$app_c")"
+rc=$?
+expect_eq "new-db succeeds on the removed name" "$rc" 0
+expect_has "new-db recreates the role from scratch" "$out" "changed: postgres role and database $role_c"
+expect_has "new-db recreates the Redis user from scratch" "$out" "changed: redis user $app_c"
+out="$(rmdb "$app_c" --confirm "$app_c")"
+rc=$?
+expect_eq "rm-db removes the recreated app again" "$rc" 0
+out="$(rmdb "$app_d" --confirm "$app_d")"
+rc=$?
+expect_eq "rm-db removes the sibling too" "$rc" 0
+docker rmi "$rm_ns/$app_c:v1" "$rm_ns/$app_d:v1" >/dev/null 2>&1
 
 t_finish

@@ -463,6 +463,8 @@ expect_eq "redis-entrypoint.sh is mode 755" "$(/usr/bin/stat -c '%a' "$(D)/redis
 expect_eq "new-db.sh is mode 755" "$(/usr/bin/stat -c '%a' "$(D)/new-db.sh")" "755"
 expect_calls_has "new-db.sh is installed root-owned 755 in one step" "install -m 755 -o root -g root -- "
 if cmp -s "$(D)/new-db.sh" "$here/../data/new-db.sh"; then _pass; else _fail "the installed new-db.sh equals its tracked source"; fi
+expect_eq "rm-db.sh is mode 755" "$(/usr/bin/stat -c '%a' "$(D)/rm-db.sh")" "755"
+if cmp -s "$(D)/rm-db.sh" "$here/../data/rm-db.sh"; then _pass; else _fail "the installed rm-db.sh equals its tracked source"; fi
 expect_eq "the install directory is mode 755" "$(/usr/bin/stat -c '%a' "$(D)")" "755"
 expect_eq "the state directory is mode 755" "$(/usr/bin/stat -c '%a' "$R/var/lib/platform")" "755"
 expect_eq "the secrets root is mode 2710 (setgid)" "$(/usr/bin/stat -c '%a' "$(SECRETS)")" "2710"
@@ -501,6 +503,7 @@ expect_out_has "second install reports already: for the secrets root" "already: 
 expect_out_has "second install reports already: for the job-secrets root" "already: $(JOBSEC)/"
 expect_out_has "second install reports already: for the entrypoint" "already: $(D)/redis-entrypoint.sh"
 expect_out_has "second install reports already: for new-db.sh" "already: $(D)/new-db.sh"
+expect_out_has "second install reports already: for rm-db.sh" "already: $(D)/rm-db.sh"
 expect_out_has "second install reports already: for the sysctl drop-in" "already: $SYSCTL_DROPIN"
 expect_only_plain_up "second install makes no mutating docker call besides the plain up -d"
 expect_calls_has "second install runs a plain up -d (closes the stale-container window)" "up -d --remove-orphans"
@@ -552,6 +555,16 @@ expect_out_has "the changed new-db.sh is reported" "changed: $(D)/new-db.sh"
 expect_eq "install repairs the new-db.sh mode" "$(/usr/bin/stat -c '%a' "$(D)/new-db.sh")" "755"
 if cmp -s "$(D)/new-db.sh" "$here/../data/new-db.sh"; then _pass; else _fail "the repaired new-db.sh equals its tracked source"; fi
 expect_calls_lacks "a changed new-db.sh does not recreate the containers" "--force-recreate"
+# the same for rm-db.sh
+snap_restore
+echo "# changed" >> "$(D)/rm-db.sh"
+chmod 644 "$(D)/rm-db.sh"
+ins install
+expect_rc "install repairs a changed rm-db.sh" 0
+expect_out_has "the changed rm-db.sh is reported" "changed: $(D)/rm-db.sh"
+expect_eq "install repairs the rm-db.sh mode" "$(/usr/bin/stat -c '%a' "$(D)/rm-db.sh")" "755"
+if cmp -s "$(D)/rm-db.sh" "$here/../data/rm-db.sh"; then _pass; else _fail "the repaired rm-db.sh equals its tracked source"; fi
+expect_calls_lacks "a changed rm-db.sh does not recreate the containers" "--force-recreate"
 # a wrong entrypoint mode is repaired
 snap_restore
 chmod 644 "$(D)/redis-entrypoint.sh"
@@ -670,6 +683,9 @@ v_reserved_bytes() { echo extra >> "$(D)/reserved-names.txt"; }
 v_newdb_missing() { rm -f "$(D)/new-db.sh"; }
 v_newdb_mode() { chmod 644 "$(D)/new-db.sh"; }
 v_newdb_bytes() { echo "# x" >> "$(D)/new-db.sh"; }
+v_rmdb_missing() { rm -f "$(D)/rm-db.sh"; }
+v_rmdb_mode() { chmod 644 "$(D)/rm-db.sh"; }
+v_rmdb_bytes() { echo "# x" >> "$(D)/rm-db.sh"; }
 v_ep_missing() { rm -f "$(D)/redis-entrypoint.sh"; }
 v_ep_mode() { chmod 644 "$(D)/redis-entrypoint.sh"; }
 v_ep_bytes() { echo "# x" >> "$(D)/redis-entrypoint.sh"; }
@@ -761,6 +777,9 @@ vcase "reserved-names.txt altered" v_reserved_bytes "reserved-names.txt bytes di
 vcase "new-db.sh missing" v_newdb_missing "new-db.sh missing"
 vcase "new-db.sh not executable" v_newdb_mode "new-db.sh uid:gid/mode is '0:0 644', want '0:0 755'"
 vcase "new-db.sh altered" v_newdb_bytes "new-db.sh bytes differ from the embedded payload"
+vcase "rm-db.sh missing" v_rmdb_missing "rm-db.sh missing"
+vcase "rm-db.sh not executable" v_rmdb_mode "rm-db.sh uid:gid/mode is '0:0 644', want '0:0 755'"
+vcase "rm-db.sh altered" v_rmdb_bytes "rm-db.sh bytes differ from the embedded payload"
 vcase "redis-entrypoint.sh missing" v_ep_missing "redis-entrypoint.sh missing"
 vcase "redis-entrypoint.sh not executable" v_ep_mode "redis-entrypoint.sh uid:gid/mode is '0:0 644', want '0:0 755'"
 vcase "redis-entrypoint.sh altered" v_ep_bytes "redis-entrypoint.sh bytes differ from the embedded payload"
