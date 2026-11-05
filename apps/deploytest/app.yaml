@@ -5,5 +5,5 @@ purpose: Disposable CI deploy rollout proof, removed after Step 12
 template: node-hono
 memory_cap: 16m
 port: 8080
-health_path: /missing
+health_path: /healthz
 access: restricted
