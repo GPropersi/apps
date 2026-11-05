@@ -120,6 +120,11 @@ jobs:
             echo "deploy: the repository variable PLATFORM_DEPLOY_HOST is empty; set it before deploying" >&2
             exit 1
           fi
+      - name: TEMP secret presence diagnostic
+        env:
+          HAS_ID: ${{ secrets.TS_OAUTH_CLIENT_ID != '' }}
+          HAS_SECRET: ${{ secrets.TS_OAUTH_SECRET != '' }}
+        run: echo "TS_OAUTH_CLIENT_ID set=$HAS_ID TS_OAUTH_SECRET set=$HAS_SECRET"
       - name: Join the tailnet
         uses: tailscale/github-action@064b10558093f38325e838ddea35486bdc6b1d5c # v4.4.0
         with:
