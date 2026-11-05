@@ -69,6 +69,8 @@ jobs:
       contents: read
       packages: write
     uses: ./.github/workflows/app-deploy.yml
+    # Passes the environment secrets down to the deploy job (see app-deploy.yml); no repository-level secrets exist.
+    secrets: inherit
     with:
       apps: ${{ needs.detect.outputs.apps }}
 
