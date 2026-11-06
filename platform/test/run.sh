@@ -45,6 +45,8 @@
 # hostq's TimeoutStopSec=30) for their EXIT traps, KILLs what is left, and exits. PLATFORM_TEST_KILL_GRACE overrides the
 # grace for tests only. Children see PLATFORM_TEST_RUNNER=1.
 set -uo pipefail
+# $EPOCHREALTIME honors the locale radix; force "." so now_us can split it.
+export LC_NUMERIC=C
 
 here="$(cd "$(dirname "$0")" && pwd)"
 cd "$here/../.." || { echo "run.sh: cannot enter the repo root" >&2; exit 1; }

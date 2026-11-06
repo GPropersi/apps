@@ -10,6 +10,8 @@
 # reference or `go`). A failure is logged and never fails the run: prewarm always exits 0, so the tests' own pull, skip
 # or REQUIRE_DOCKER failure still decides.
 set -uo pipefail
+# $EPOCHREALTIME honors the locale radix; force "." so now_us can split it.
+export LC_NUMERIC=C
 
 here="$(cd "$(dirname "$0")" && pwd)"
 root="$(cd "$here/../.." && pwd)"
