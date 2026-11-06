@@ -91,6 +91,7 @@ new_root; put platform/x/test_a.sh "$hdr# test-class: docker\n$(pad 9)# test-cla
 expect_fail "a second marker after line 10 fails" "^platform/x/test_a\\.sh: line 12: test-class marker after line 10"
 
 # Probe command positions: each unmarked file must fail.
+# shellcheck disable=SC2016  # the 'v=$(' fragment is literal probe text
 for form in \
   "$d" "! $d" "x || $d" "x && $d" "x; $d" "x | $d" "($d)" "{ $d; }" 'v=$('"$d"')' \
   "if $d; then :; fi" "if x; then :; elif $d; then :; fi" "while $d; do :; done" "until $d; do :; done" \

@@ -9,6 +9,10 @@ here="$(cd "$(dirname "$0")" && pwd)"
 # shellcheck source=lib.sh
 . "$here/lib.sh"
 root="$(cd "$here/../.." && pwd)"
+# Scratch `make test-changed` runs start without the outer runner, hostq and knob variables.
+ENVU=(env -u PLATFORM_TEST_RUNNER -u HOSTQ_JOB_ID -u HOSTQ_SLOTS -u TEST_JOBS -u TEST_DOCKER_JOBS -u TEST_VERBOSE
+  -u TEST_LOG_DIR -u TEST_FILE_TIMEOUT -u PLATFORM_TEST_KILL_GRACE -u PLATFORM_TEST_NPROC -u PLATFORM_TEST_MEMINFO
+  -u PLATFORM_TEST_CGROUP_DIR -u PLATFORM_TEST_CGROUP_FILE -u PLATFORM_TEST_CGROUP_ROOT)
 
 t_init
 S="$T_TMP/repo"
@@ -147,7 +151,7 @@ expect_eq "an option-like base selects everything" "$sel" "$(want "${ALL[@]}")"
 expect_eq "an option-like base wrote nothing" "$(ls "$T_TMP/pwned" 2>/dev/null)" ""
 case "$err" in *"looks like an option"*) _pass ;; *) _fail "an option-like base is named" "stderr: $err" ;; esac
 
-run_cmd make -s -C "$S" test-changed BASE="main\"; touch $T_TMP/injected; \""
+run_cmd "${ENVU[@]}" make -s -C "$S" test-changed BASE="main\"; touch $T_TMP/injected; \""
 if [ -e "$T_TMP/injected" ]; then _fail "BASE is not shell-expanded by make" "injected file exists"; else _pass; fi
 
 map="$S/platform/test/areas.map"
@@ -190,13 +194,13 @@ expect_rc "select.sh without --base is a usage error" 2
 
 # make test-changed.
 branch_with README.md
-run_cmd make -s -C "$S" test-changed BASE=main
+run_cmd "${ENVU[@]}" make -s -C "$S" test-changed BASE=main
 expect_rc "test-changed with a docs-only change" 0
 expect_out_has "a docs-only change prints that nothing was selected" "no tests selected"
 expect_out_lacks "a docs-only change runs no test" "== "
 
 branch_with apps/foo/main.txt
-run_cmd make -s -C "$S" test-changed BASE=main
+run_cmd "${ENVU[@]}" make -s -C "$S" test-changed BASE=main
 expect_rc "test-changed with an app change" 0
 expect_out_has "test-changed runs the app's test" "== apps/foo/test_a.sh"
 expect_out_lacks "test-changed does not run another app's test" "foo-bar"
@@ -204,10 +208,10 @@ expect_out_lacks "test-changed does not run another app's test" "foo-bar"
 printf '#!/usr/bin/env bash\nexit 1\n' > "$S/apps/foo/test_a.sh"
 g add -A
 g commit -q -m "break foo's test"
-run_cmd make -s -C "$S" test-changed BASE=main
+run_cmd "${ENVU[@]}" make -s -C "$S" test-changed BASE=main
 if [ "$rc" -ne 0 ]; then _pass; else _fail "test-changed fails when a selected test fails" "rc=0"; fi
 
-run_cmd make -s -C "$S" test-changed
+run_cmd "${ENVU[@]}" make -s -C "$S" test-changed
 expect_rc "test-changed with the default BASE (no origin/main) runs everything and the broken test fails it" 2
 expect_out_has "the default BASE warns" "warning"
 expect_out_has "the default BASE ran another area's test" "== platform/lint/test_lint.sh"
