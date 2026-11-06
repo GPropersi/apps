@@ -276,9 +276,9 @@ func TestShortJobBeforeTheWindowRuns(t *testing.T) {
 func TestBadWindowFileRefusesEverythingAndAlertsOnce(t *testing.T) {
 	e := newEnv(t, laTime(6, 58, 0), "this is not a window file\n", oneJob("* * * * *", "5s", false))
 	e.run()
-	if r := e.runner(); len(r) != 6 || r[2] != "invalid" {
-		t.Fatalf("runner.tsv = %q", r)
-	}
+	// Ready only means the first runner.tsv line (window ok) is on disk; SetWindow("invalid") queues a second,
+	// asynchronous write, so wait for it instead of reading the file once.
+	waitFor(t, "window_state invalid", func() bool { r := e.runner(); return len(r) == 6 && r[2] == "invalid" })
 	e.advTo(laTime(7, 1, 0))
 	waitFor(t, "refused_config records", func() bool { return len(e.runsWhere("aa", "j", "refused_config")) >= 2 })
 	if e.fc.count() != 0 {
