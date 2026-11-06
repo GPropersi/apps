@@ -121,6 +121,19 @@ expect_calls_lacks "the go target makes no docker call" "docker"
 run_cmd "${ENVU[@]}" bash "$S/platform/test/prewarm.sh" bogus
 expect_rc "an unknown target exits 0" 0
 
+# Dockerfile FROM forms: a --platform flag is skipped, an alias is remembered, a later FROM of that alias and scratch are not images.
+printf '%s\n' 'FROM --platform=linux/amd64 fixture-base:1 AS build' 'RUN true' 'FROM build' 'FROM scratch' > "$S/platform/jobs/Dockerfile"
+printf '%s\n' 'FROM fixture-base:1' > "$S/platform/jobs/Dockerfile.testapp"
+t_reset_calls
+run_cmd "${ENVU[@]}" bash "$S/platform/test/prewarm.sh" images
+expect_rc "prewarm exits 0 with the alias fixture Dockerfile" 0
+expect_calls_has "the real image of a flagged, aliased FROM is pulled" "docker pull fixture-base:1"
+expect_eq "the image is pulled exactly once" "$(pulled | grep -cxF 'fixture-base:1')" "1"
+expect_calls_lacks "a FROM of an earlier alias is not pulled" "docker pull build"
+expect_calls_lacks "FROM scratch is not pulled" "docker pull scratch"
+expect_calls_lacks "the --platform flag is not taken as the image" "docker pull --platform"
+cp -- "$jobs_dir/Dockerfile" "$jobs_dir/Dockerfile.testapp" "$S/platform/jobs/"
+
 # --- run.sh with the real prewarm.sh: failures never stop the run ---
 clear_tests
 fake platform/test/test_dock.sh docker 'echo dock-ran' 'exit 0'
