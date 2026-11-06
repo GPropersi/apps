@@ -14,8 +14,9 @@ set -uo pipefail
 
 here="$(cd "$(dirname "$0")" && pwd)"
 installer="${INSTALLER:-$here/install-jobs.sh}"
-runner_tag="pjimg-$$-runner"
-testapp_tag="pjimg-$$-testapp"
+tag_prefix="pjimg-$$-$RANDOM"
+runner_tag="$tag_prefix-runner"
+testapp_tag="$tag_prefix-testapp"
 tmp=""
 rc=0
 
@@ -25,6 +26,11 @@ cleanup() {
   [ -z "$tmp" ] || rm -rf "$tmp"
 }
 trap cleanup EXIT
+# A signal must run the EXIT cleanup. A foreground docker build would defer the trap until it ends, so each build runs
+# in the background and is waited on (wait returns at once on a trapped signal).
+trap 'exit 130' INT
+trap 'exit 143' TERM
+trap 'exit 129' HUP
 
 if ! command -v docker > /dev/null 2>&1 || ! docker info > /dev/null 2>&1; then
   if [ "${REQUIRE_DOCKER:-0}" = 1 ]; then
@@ -59,7 +65,9 @@ for f in "$rctx/Dockerfile" "$rctx/go.mod" "$rctx/go.sum" "$tctx/Dockerfile.test
 done
 [ "$rc" = 0 ] || exit 1
 
-if docker build -f "$rctx/Dockerfile" --build-arg VERSION=test -t "$runner_tag" "$rctx" > "$tmp/build-runner.log" 2>&1; then
+docker build -f "$rctx/Dockerfile" --build-arg VERSION=test -t "$runner_tag" "$rctx" > "$tmp/build-runner.log" 2>&1 &
+build_pid=$!
+if wait "$build_pid"; then
   echo "PASS: runner image builds from the embedded payload alone"
 else
   echo "FAIL: runner image does not build from the embedded payload alone (a missing file means the payload, the input list or the Dockerfile COPY list lacks it; a pull error is a network problem)"
@@ -67,7 +75,9 @@ else
   rc=1
 fi
 
-if docker build -f "$tctx/Dockerfile.testapp" --build-arg VERSION=test -t "$testapp_tag" "$tctx" > "$tmp/build-testapp.log" 2>&1; then
+docker build -f "$tctx/Dockerfile.testapp" --build-arg VERSION=test -t "$testapp_tag" "$tctx" > "$tmp/build-testapp.log" 2>&1 &
+build_pid=$!
+if wait "$build_pid"; then
   echo "PASS: testapp image builds from the embedded payload alone"
 else
   echo "FAIL: testapp image does not build from the embedded payload alone (a missing file means the payload, the input list or the Dockerfile.testapp COPY list lacks it; a pull error is a network problem)"

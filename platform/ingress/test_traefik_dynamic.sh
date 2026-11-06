@@ -74,16 +74,20 @@ sockgid="$(stat -c %g "$sock")"
 # Traefik's Docker provider watches every container on the daemon, so two copies of this test at once see each other's
 # containers and both fail. Runs queue on one lock instead (released when this process exits, on every exit path). The
 # wait is bounded and logged, so a holder that never finishes shows up here and not as a silent hang.
+# The lock stays global on purpose: it guards against a second copy started by another worktree's gate, which per-run
+# container names cannot fix (the provider sees every container on the daemon). Within one run there is only one copy,
+# so the lock costs nothing. The wait bound is under the runner's default per-file timeout (30 minutes), so a contended lock
+# fails with this named message instead of a bare timeout.
 lock="${INGRESS_TEST_LOCK:-/tmp/platform-traefik-dynamic-test-lock}"
 command -v flock >/dev/null 2>&1 || skip "flock is not installed"
 exec 8>>"$lock" || { echo "FAIL: cannot open the run lock $lock"; exit 1; }
 if ! flock -n 8; then
-  echo "$(date -u +%FT%TZ) waiting for another run of this test to finish (lock $lock, up to 1800s)"
-  flock -w 1800 8 || { echo "FAIL: another run still held $lock after 1800s"; exit 1; }
+  echo "$(date -u +%FT%TZ) waiting for another run of this test to finish (lock $lock, up to 900s)"
+  flock -w 900 8 || { echo "FAIL: another run still held $lock after 900s"; exit 1; }
   echo "$(date -u +%FT%TZ) got the run lock"
 fi
 
-rid="ingt-$$"
+rid="ingt-$$-$RANDOM"
 net="$rid-net"
 fake_domain="example.test"
 friendly="This app is down or does not exist"
@@ -179,6 +183,59 @@ backend_hits() { docker logs "$aname" 2>&1 | grep -c 'url:' || true; }
 
 ip_of() { docker inspect -f "{{(index .NetworkSettings.Networks \"$net\").IPAddress}}" "$1"; }
 
+# dump_logs: the Traefik and socket-proxy log tails printed when a readiness wait times out.
+dump_logs() {
+  # The 404 access-log lines would fill the tail and hide the provider error, so drop them and add the socket-proxy's log.
+  echo "-- traefik (access-log lines dropped):"
+  docker logs "$tname" 2>&1 | grep -v '"RequestAddr"' | tail -n 20
+  echo "-- socket-proxy:"
+  docker logs "$sname" 2>&1 | tail -n 10
+}
+
+# wait_route <host> <path> <want-code> [secs]: poll until Traefik answers <want-code>; exit 1 with a named failure.
+wait_route() {
+  local host="$1" path="$2" want="$3" secs="${4:-30}" end
+  end=$(( $(date +%s) + secs ))
+  while :; do
+    req "$host" "$path"
+    [ "$req_code" = "$want" ] && return 0
+    [ "$(date +%s)" -lt "$end" ] || break
+    sleep 0.3
+  done
+  echo "FAIL: route $host never answered $want (last ${req_code:-none})"
+  dump_logs
+  exit 1
+}
+
+# wait_direct <container> <port> <substring> [secs]: poll the container's own address until its body has <substring>.
+wait_direct() {
+  local c="$1" port="$2" want="$3" secs="${4:-30}" ip end body
+  ip="$(ip_of "$c")"
+  end=$(( $(date +%s) + secs ))
+  while :; do
+    body="$(curl -s --max-time 3 "http://$ip:$port/" 2>/dev/null || true)"
+    [[ "$body" == *"$want"* ]] && return 0
+    [ "$(date +%s)" -lt "$end" ] || break
+    sleep 0.3
+  done
+  echo "FAIL: backend $c never served a body containing '$want' on $ip:$port within ${secs}s (last: ${body:-nothing})"
+  exit 1
+}
+
+# wait_log <pattern> <what> [secs]: poll Traefik's log until it has a line matching the grep -E <pattern>.
+wait_log() {
+  local pat="$1" what="$2" secs="${3:-30}" end
+  end=$(( $(date +%s) + secs ))
+  while :; do
+    docker logs "$tname" 2>&1 | grep -qE "$pat" && return 0
+    [ "$(date +%s)" -lt "$end" ] || break
+    sleep 0.3
+  done
+  echo "FAIL: Traefik log never showed $what within ${secs}s"
+  dump_logs
+  exit 1
+}
+
 start_traefik() {
   local dyn="$1" k
   shift
@@ -197,11 +254,7 @@ start_traefik() {
     sleep 0.5
   done
   echo "positive control did not reach the backend: Traefik not routing, check the provider network"
-  # The 404 access-log lines would fill the tail and hide the provider error, so drop them and add the socket-proxy's log.
-  echo "-- traefik (access-log lines dropped):"
-  docker logs "$tname" 2>&1 | grep -v '"RequestAddr"' | tail -n 20
-  echo "-- socket-proxy:"
-  docker logs "$sname" 2>&1 | tail -n 10
+  dump_logs
   return 1
 }
 
@@ -373,6 +426,7 @@ if ! start_traefik "$dyn_plain"; then
 fi
 _pass
 
+wait_direct "$dname" 8080 "$friendly"
 reasons=()
 deny_table_check
 variant_check
@@ -417,11 +471,26 @@ for p in / /x/y /_jobs /api/rawdata; do
 done
 
 # App-originated failures keep their status and get the friendly body.
+# Through Traefik the app's 503 and the unmatched-host 503 look the same (both bodies become the friendly page), so
+# readiness is proven in two stages: the backend itself answers 'nope', then Traefik's access log shows a request for
+# the host served by the discovered docker route ($fname@docker) and not by the unmatched router.
+wait_direct "$fname" 8080 nope
+fails_end=$(( $(date +%s) + 30 ))
+until docker logs "$tname" 2>&1 | grep -F "\"RequestHost\":\"fails.$fake_domain\"" | grep -qF "\"RouterName\":\"$fname@docker\""; do
+  if [ "$(date +%s)" -ge "$fails_end" ]; then
+    echo "FAIL: route fails.$fake_domain never reached the discovered router $fname@docker within 30s"
+    dump_logs
+    exit 1
+  fi
+  req "fails.$fake_domain" /
+  sleep 0.3
+done
 req "fails.$fake_domain" /
 expect_eq "app 503: status preserved" "$req_code" 503
 [[ "$req_body" == *"$friendly"* && "$req_body" != *nope* ]] && _pass || _fail "app 503: body not replaced by the friendly page"
+wait_route "gone.$fake_domain" / 200
 docker exec "$gname" pkill -x httpd
-sleep 1
+wait_route "gone.$fake_domain" / 502
 req "gone.$fake_domain" /
 expect_eq "stopped listener: Traefik 502 preserved" "$req_code" 502
 [[ "$req_body" == *"$friendly"* ]] && _pass || _fail "stopped listener: friendly body missing"
@@ -455,7 +524,12 @@ cookie_val="session$(printf '%s' abc123 | tr '[:lower:]' '[:upper:]')"
 query_val="qs$(printf '%s' xyz789)"
 client_val="client-$$-marker"
 req "$apphost" "/ok?token=$query_val" -H "Cookie: sid=$cookie_val" -H "Cf-Connecting-Ip: $client_val"
-sleep 1
+# The access log is written after the response, so poll for this request's marker instead of sleeping.
+log_end=$(( $(date +%s) + 30 ))
+until docker logs "$tname" 2>&1 | grep -qF "$client_val"; do
+  [ "$(date +%s)" -lt "$log_end" ] || break
+  sleep 0.3
+done
 docker logs "$tname" > "$T_TMP/traefik-log" 2>&1
 grep -qF "$cookie_val" "$T_TMP/traefik-log" && _fail "access log leaks the Cookie value" || _pass
 grep -qF "$query_val" "$T_TMP/traefik-log" && _fail "access log leaks the query string" || _pass
