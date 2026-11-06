@@ -27,7 +27,7 @@ lint: ## Public-repo hygiene, embedded-payload drift check, app.yaml registry va
 	@platform/lint/check-go.sh
 	@want=$$(cat platform/lint/SHELLCHECK_VERSION); have=$$(shellcheck --version 2>/dev/null | sed -n 's/^version: //p'); \
 	[ "$$have" = "$$want" ] || { echo "lint: shellcheck $$want required (platform/lint/SHELLCHECK_VERSION), found $${have:-none}" >&2; exit 1; }
-	@git ls-files -z -- '*.sh' | xargs -0 -r -P "$$(nproc)" -n 16 shellcheck
+	@git ls-files -z -- '*.sh' | xargs -0 -r -P "$$(nproc 2>/dev/null || echo 4)" -n 16 shellcheck
 
 test: ## Run every platform/**/test_*.sh and apps/<name>/test_*.sh (discovered on disk; zero found is an error; knobs TEST_JOBS, TEST_DOCKER_JOBS, TEST_VERBOSE, TEST_FILE_TIMEOUT)
 	@platform/test/run.sh

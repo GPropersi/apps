@@ -283,7 +283,7 @@ auto_case "a non-numeric meminfo value" "jobs=1 docker_jobs=1 cpus=4 mem_usable=
 auto_case "an unreadable nproc" "jobs=1 docker_jobs=1 cpus=n/a mem_usable=10444MiB binding=probe-failed files=6 unreadable=PLATFORM_TEST_NPROC" 1 PLATFORM_TEST_NPROC=abc PLATFORM_TEST_MEMINFO="$mem16"
 auto_case "an explicit TEST_JOBS wins over auto" "jobs=2 docker_jobs=2 $base16 binding=override files=6" 2 PLATFORM_TEST_NPROC=4 PLATFORM_TEST_MEMINFO="$mem16" TEST_JOBS=2
 auto_case "an explicit docker cap above an auto job count is clamped and printed" "jobs=2 docker_jobs=2 cpus=2 mem_usable=10444MiB binding=cpu files=6 docker_clamped=3->2" 2 PLATFORM_TEST_NPROC=2 PLATFORM_TEST_MEMINFO="$mem16" TEST_DOCKER_JOBS=3
-# The Step 4 outer-environment case: runner and hostq variables set outside, an explicit TEST_JOBS still wins.
+# The outer-environment case: runner and hostq variables set outside, an explicit TEST_JOBS still wins.
 auto_case "outer runner/hostq variables with an explicit TEST_JOBS" "jobs=3 docker_jobs=1 cpus=2 mem_usable=10444MiB binding=override files=6" 3 PLATFORM_TEST_NPROC=4 PLATFORM_TEST_MEMINFO="$mem16" PLATFORM_TEST_RUNNER=1 HOSTQ_JOB_ID=x HOSTQ_SLOTS=2 TEST_JOBS=3
 # An invalid HOSTQ_SLOTS is probe-failed (1 job) before the nested and override rules.
 for bad in abc 0 -1 ""; do
