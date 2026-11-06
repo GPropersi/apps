@@ -54,8 +54,8 @@ Design and phases live in the stronghold: `~/code/plans/stronghold/open/app-host
   |---|---|
   | Help | `make help` |
   | Lint (public-repo hygiene + embed drift + app.yaml registry validation + per-app contract + shellcheck) | `make lint` |
-  | Tests (every `platform/**/test_*.sh` and `apps/<name>/test_*.sh`) | `make test` |
-  | Tests the change since `BASE` needs, per `platform/test/areas.map` (default `BASE=origin/main`) | `make test-changed` |
+  | Tests (every `platform/**/test_*.sh` and `apps/<name>/test_*.sh`; knobs `TEST_JOBS`, `TEST_DOCKER_JOBS`, `TEST_VERBOSE`, `TEST_FILE_TIMEOUT`; `TEST_JOBS` and `TEST_DOCKER_JOBS` default to `auto`: sized from CPUs and memory, a hostq job takes `nproc / HOSTQ_SLOTS` CPUs (`HOSTQ_SLOTS` defaults to 2, mirroring hostq's configured slot count; update the default in `platform/test/run.sh` if hostq's changes), new files are held while memory is low, and the first output line names the decision) | `make test` |
+  | Tests the change since `BASE` needs, per `platform/test/areas.map` (default `BASE=origin/main`; same `TEST_*` knobs as `make test`; a `.github/**`-only change runs just the lint and ci tests, and the selected files' images and Go toolchain are prewarmed once before the run) | `make test-changed` |
   | One app's tests | `make test-app APP=<name>` |
   | Regenerate embedded installer payloads | `make embed` |
   | List registered apps (registry only, offline) | `make app-ls` |

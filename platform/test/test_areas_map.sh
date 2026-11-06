@@ -33,8 +33,8 @@ check_map() {
   while IFS= read -r f; do
     area="${f#"$root"/platform/}"
     area="${area%%/*}"
-    # platform/test/** maps to all, so its tests always run; their ../<dir>/ mentions are fixtures, not reads.
-    [ "$area" != "test" ] || continue
+    # Tests in platform/test/ are checked like any other area: a read of another area's files needs that row to list test
+    # (a fixture mention is rewritten, not skipped). A ../test/ mention is the area itself and is ignored below.
     while IFS= read -r ref; do
       dep="${ref#../}"
       dep="${dep%/}"
@@ -82,7 +82,8 @@ case "$violations" in
 esac
 
 # Dropping lib's ingress entry is caught (ingress tests source ../lib/).
-sed -E 's#,ingress,deploy,apps$#,deploy,apps#' "$real_map" > "$mutant"
+sed -E 's#,ingress,deploy,apps(,test)?$#,deploy,apps\1#' "$real_map" > "$mutant"
+cmp -s "$real_map" "$mutant" && _fail "mutation 2 changed nothing" "sed did not match"
 violations="$(check_map "$mutant")"
 case "$violations" in
   *"reads ../lib/ but the row for platform/lib/** does not list ingress"*) _pass ;;
@@ -90,12 +91,21 @@ case "$violations" in
 esac
 
 # Dropping deploy from the registry row is caught (the deploy tests run the registry validator from ../registry/).
-sed -E 's#^(platform/registry/\*\*\t.*),deploy,apps$#\1,apps#' "$real_map" > "$mutant"
+sed -E 's#^(platform/registry/\*\*\t.*),deploy,apps(,test)?$#\1,apps\2#' "$real_map" > "$mutant"
 cmp -s "$real_map" "$mutant" && _fail "mutation 3 changed nothing" "sed did not match"
 violations="$(check_map "$mutant")"
 case "$violations" in
   *"reads ../registry/ but the row for platform/registry/** does not list deploy"*) _pass ;;
   *) _fail "dropping deploy from the registry row is caught" "got: $violations" ;;
+esac
+
+# Dropping test from the data row is caught (test_prewarm.sh, an area-test file, reads ../data/).
+sed -E 's#^(platform/data/\*\*\t.*),test$#\1#' "$real_map" > "$mutant"
+cmp -s "$real_map" "$mutant" && _fail "mutation 4 changed nothing" "sed did not match"
+violations="$(check_map "$mutant")"
+case "$violations" in
+  *"reads ../data/ but the row for platform/data/** does not list test"*) _pass ;;
+  *) _fail "dropping test from the data row is caught" "got: $violations" ;;
 esac
 
 # Removing a directory's row is caught.

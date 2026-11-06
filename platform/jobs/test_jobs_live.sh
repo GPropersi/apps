@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# test-class: docker
 # Pre-merge run of the jobs runner's queue consumer against a REAL Redis: the pinned image from
 # platform/data/compose.yaml, started with the same command flags (noeviction, AOF, --aclfile,
 # --proto-max-bulk-len 1mb), with the real runner user (RUNNER_ACL_RULE from install-data.sh) and a real app user

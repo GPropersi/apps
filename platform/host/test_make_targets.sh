@@ -11,6 +11,7 @@ here="$(cd "$(dirname "$0")" && pwd)"
 # shellcheck source=../test/lib.sh
 . "$here/../test/lib.sh"
 root="$(cd "$here/../.." && pwd)"
+# Scratch `make test*` runs use ENVU (from lib.sh), so they start without the outer runner, hostq and knob variables.
 
 t_init
 t_stub ssh 0
@@ -185,14 +186,14 @@ scratch_make() {
 scratch="$T_TMP/scratch-pass"
 scratch_make "$scratch"
 printf '#!/usr/bin/env bash\nexit 0\n' > "$scratch/platform/test_ok.sh"
-run_cmd make -s -C "$scratch" test
+run_cmd "${ENVU[@]}" make -s -C "$scratch" test
 expect_rc "make test with only a passing test" 0
 
 scratch="$T_TMP/scratch-mixed"
 scratch_make "$scratch"
 printf '#!/usr/bin/env bash\nexit 0\n' > "$scratch/platform/test_ok.sh"
 printf '#!/usr/bin/env bash\nexit 1\n' > "$scratch/platform/test_bad.sh"
-run_cmd make -s -C "$scratch" test
+run_cmd "${ENVU[@]}" make -s -C "$scratch" test
 # make reports a failed recipe as status 2
 expect_rc "make test with one failing test fails" 2
 expect_out_has "the failing test was run" "test_bad.sh"
@@ -200,7 +201,7 @@ expect_out_has "the passing test was run too" "test_ok.sh"
 
 scratch="$T_TMP/scratch-empty"
 scratch_make "$scratch"
-run_cmd make -s -C "$scratch" test
+run_cmd "${ENVU[@]}" make -s -C "$scratch" test
 expect_rc "make test with no tests is an error" 2
 expect_out_has "the empty tree names what is missing" "no test_*.sh found"
 
@@ -210,29 +211,39 @@ scratch_make "$scratch"
 mkdir -p "$scratch/apps/foo" "$scratch/apps/foo-bar"
 printf '#!/usr/bin/env bash\nexit 0\n' > "$scratch/apps/foo/test_a.sh"
 printf '#!/usr/bin/env bash\nexit 1\n' > "$scratch/apps/foo-bar/test_b.sh"
-run_cmd make -s -C "$scratch" test
+run_cmd "${ENVU[@]}" make -s -C "$scratch" test
 expect_rc "make test runs app tests and fails on a failing app test" 2
 expect_out_has "make test ran apps/foo-bar" "== apps/foo-bar/test_b.sh"
-run_cmd make -s -C "$scratch" test-app APP=foo
+run_cmd "${ENVU[@]}" make -s -C "$scratch" test-app APP=foo
 expect_rc "make test-app runs one app" 0
 expect_out_has "test-app ran foo's test" "== apps/foo/test_a.sh"
 expect_out_lacks "test-app did not run foo-bar's test" "foo-bar"
-run_cmd make -s -C "$scratch" test-app APP=foo-bar
+run_cmd "${ENVU[@]}" make -s -C "$scratch" test-app APP=foo-bar
 expect_rc "make test-app fails on a failing app test" 2
 expect_out_has "test-app ran foo-bar's failing test" "== apps/foo-bar/test_b.sh"
 printf '#!/usr/bin/env bash\nexit 0\n' > "$scratch/apps/foo-bar/test_b.sh"
-run_cmd make -s -C "$scratch" test
+run_cmd "${ENVU[@]}" make -s -C "$scratch" test
 expect_rc "make test passes once every app test passes" 0
-run_cmd make -s -C "$scratch" test-app APP=foo-bar
+run_cmd "${ENVU[@]}" make -s -C "$scratch" test-app APP=foo-bar
 expect_rc "make test-app passes once the app test passes" 0
-run_cmd make -s -C "$scratch" test-app APP=nope
+run_cmd "${ENVU[@]}" make -s -C "$scratch" test-app APP=nope
 expect_rc "make test-app with an app without tests is an error" 2
-run_cmd make -s -C "$scratch" test-app APP='../x'
+run_cmd "${ENVU[@]}" make -s -C "$scratch" test-app APP='../x'
 expect_rc "make test-app with an invalid name is an error" 2
-run_cmd make -s -C "$scratch" test-app
+run_cmd "${ENVU[@]}" make -s -C "$scratch" test-app
 expect_rc "make test-app without APP is an error" 2
-run_cmd make -s -C "$scratch" test-app APP=$'foo\n../x'
+run_cmd "${ENVU[@]}" make -s -C "$scratch" test-app APP=$'foo\n../x'
 expect_rc "make test-app with a multi-line APP is an error" 2
+
+# The same pass/fail meaning with TEST_JOBS=8.
+run_cmd "${ENVU[@]}" env TEST_JOBS=8 make -s -C "$scratch" test
+expect_rc "make test passes with TEST_JOBS=8" 0
+printf '#!/usr/bin/env bash\nexit 1\n' > "$scratch/apps/foo-bar/test_b.sh"
+run_cmd "${ENVU[@]}" env TEST_JOBS=8 make -s -C "$scratch" test
+expect_rc "make test fails with TEST_JOBS=8 on a failing app test" 2
+run_cmd "${ENVU[@]}" env TEST_JOBS=8 make -s -C "$scratch" test-app APP=foo
+expect_rc "make test-app passes with TEST_JOBS=8" 0
+expect_out_lacks "test-app with TEST_JOBS=8 did not run foo-bar's test" "foo-bar"
 
 # No live-host target may be offered in a worktree: the allowed list in CLAUDE.md is help, lint, test, test-changed, test-app, embed, app-ls only.
 allowed=$(grep -E '^- \*\*Worktree allowed targets:\*\*' "$root/CLAUDE.md" || true)

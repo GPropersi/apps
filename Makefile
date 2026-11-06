@@ -22,21 +22,22 @@ lint: ## Public-repo hygiene, embedded-payload drift check, app.yaml registry va
 	@platform/lint/embed-payloads.sh --check
 	@platform/registry/validate-tracked.sh
 	@platform/lint/check-apps.sh
+	@platform/lint/check-test-classes.sh
 	@platform/lint/check-workflows.sh
 	@platform/lint/check-go.sh
 	@want=$$(cat platform/lint/SHELLCHECK_VERSION); have=$$(shellcheck --version 2>/dev/null | sed -n 's/^version: //p'); \
 	[ "$$have" = "$$want" ] || { echo "lint: shellcheck $$want required (platform/lint/SHELLCHECK_VERSION), found $${have:-none}" >&2; exit 1; }
-	@git ls-files -z -- '*.sh' | xargs -0 -r shellcheck
+	@git ls-files -z -- '*.sh' | xargs -0 -r -P "$$(nproc 2>/dev/null || echo 4)" -n 16 shellcheck
 
-test: ## Run every platform/**/test_*.sh and apps/<name>/test_*.sh (discovered on disk; zero found is an error)
+test: ## Run every platform/**/test_*.sh and apps/<name>/test_*.sh (discovered on disk; zero found is an error; knobs TEST_JOBS, TEST_DOCKER_JOBS, TEST_VERBOSE, TEST_FILE_TIMEOUT)
 	@platform/test/run.sh
 
-test-changed: ## Run only the tests the change since BASE needs (platform/test/areas.map); unclear or failing selection runs all
+test-changed: ## Run only the tests the change since BASE needs (platform/test/areas.map); unclear or failing selection runs all (knobs TEST_JOBS, TEST_DOCKER_JOBS, TEST_VERBOSE, TEST_FILE_TIMEOUT)
 	@sel=$$(platform/test/select.sh --base "$$BASE") || exit 1; \
 	[ -n "$$sel" ] || { echo "no tests selected"; exit 0; }; \
 	printf '%s\n' "$$sel" | xargs -d '\n' platform/test/run.sh
 
-test-app: ## Run one app's apps/<name>/test_*.sh (APP=<name>; an invalid name or an app with no tests is an error)
+test-app: ## Run one app's apps/<name>/test_*.sh (APP=<name>; an invalid name or an app with no tests is an error; knobs TEST_JOBS, TEST_DOCKER_JOBS, TEST_VERBOSE, TEST_FILE_TIMEOUT)
 	@bad() { echo 'usage: make test-app APP=<name> (lowercase letters, digits, hyphens; 2-31 characters, starting with a letter)' >&2; exit 2; }; \
 	case "$$APP" in [a-z]*) ;; *) bad ;; esac; \
 	case "$$APP" in *[!a-z0-9-]*) bad ;; esac; \

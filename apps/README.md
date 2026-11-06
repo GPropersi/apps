@@ -13,7 +13,11 @@ Tests are a requirement of being an app. `make lint` (`platform/lint/check-apps.
 
 - **Tests:** at least one tracked `apps/<name>/test_*.sh`. A test file exits non-zero on failure, needs no platform
   host, runs from the repo root, wraps the app's native runner, and sets up its own exact-pinned toolchain. Docker tests
-  honour `REQUIRE_DOCKER`.
+  honour `REQUIRE_DOCKER`. An app test that starts real containers must carry `# test-class: docker` within its first
+  10 lines, use per-run names (app tests run side by side with platform tests), and open with the standard skip
+  preamble (`docker info ... || skip ...`, as the platform live tests do): `make lint`
+  (`platform/lint/check-test-classes.sh`) detects live tests through that preamble, so a live test written without it
+  escapes detection and runs uncapped.
 - **A `Dockerfile`** with every `FROM` pinned as `@sha256:<64 hex>` (a `FROM` of an earlier stage alias, or `scratch`, is
   allowed).
 - **A numeric non-zero runtime user:** the last `USER` of the final stage is a literal uid such as `USER 1000` or

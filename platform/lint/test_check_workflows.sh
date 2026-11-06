@@ -264,6 +264,40 @@ expect_fail "deploy without the main guard" "job deploy has environment: but no 
 real_root; mut app-deploy-one.yml "s#run: make test-app APP=\"[\$]APP\"#run: make test-app APP=\${{ inputs.app }}#"; run_check
 expect_fail "the real test step interpolating the app" "interpolates an inputs, matrix or needs output"
 
+# Rule 13: the Go cache. The real ci.yml passes (the first real_root case above); each violation fails.
+save_cond_pat="needs exactly if: github.event_name == 'push' && github.ref == 'refs/heads/main'"
+real_root; mut ci.yml "s#^(        if: )github.event_name == 'push' && github.ref == 'refs/heads/main'\$#\1github.ref == 'refs/heads/main'#"; run_check
+expect_fail "cache/save without the push condition" "$save_cond_pat"
+
+real_root; mut ci.yml "s#^(        if: )github.event_name == 'push' && github.ref == 'refs/heads/main'\$#\1github.event_name != 'pull_request'#"; run_check
+expect_fail "cache/save on any non-PR event" "$save_cond_pat"
+
+real_root; mut ci.yml "/^        if: github.event_name == 'push' && github.ref == 'refs\\/heads\\/main'\$/d"; run_check
+expect_fail "cache/save with no condition at all" "$save_cond_pat"
+
+real_root; mut ci.yml "s#^(        if: github.event_name == 'push' && github.ref == 'refs/heads/main')\$#\1 || true#"; run_check
+expect_fail "cache/save widened with || true" "$save_cond_pat"
+
+# Alternate step shapes the awk parser must also read: `- if:` as the first key, `- uses:` first with if: after it, and a
+# `- uses:` save step at EOF (the last step of ci.yml) with no condition at all.
+real_root; mut ci.yml "/^      - name: Save Go cache\$/d; s#^        if: github.event_name == 'push' && github.ref == 'refs/heads/main'\$#      - if: github.event_name != 'pull_request'#"; run_check
+expect_fail "cache/save with '- if:' as the first key" "$save_cond_pat"
+
+real_root; mut ci.yml "/^      - name: Save Go cache\$/{N;N;s#^[^\\n]*\\n[^\\n]*\\n *uses: (.*)\$#      - uses: \\1\\n        if: github.event_name != 'pull_request'#}"; run_check
+expect_fail "cache/save with '- uses:' first and a widened if: after it" "$save_cond_pat"
+
+real_root; mut ci.yml "/^      - name: Save Go cache\$/{N;N;s#^[^\\n]*\\n[^\\n]*\\n *uses: (.*)\$#      - uses: \\1#}"; run_check
+expect_fail "a '- uses:' cache/save step at EOF with no condition" "$save_cond_pat"
+
+real_root; mut ci.yml "s#actions/cache/save@#actions/cache@#"; run_check
+expect_fail "the combined actions/cache action" "the combined actions/cache action is forbidden"
+
+real_root; mut ci.yml "s#actions/cache/restore@#actions/cache@#"; run_check
+expect_fail "the combined actions/cache action as the restore" "the combined actions/cache action is forbidden"
+
+real_root; run_check
+if grep -q 'actions/cache/save@' "$root/.github/workflows/ci.yml" && [ "$rc" -eq 0 ]; then passed=$((passed + 1)); else failed=$((failed + 1)); echo "FAIL: the real ci.yml has the guarded cache/save step and passes (rc=$rc)"; echo "$out"; fi
+
 # CLI behaviour.
 rc=0; out="$("$check" --bogus 2>&1)" || rc=$?
 if [ "$rc" -eq 2 ]; then passed=$((passed + 1)); else failed=$((failed + 1)); echo "FAIL: unknown argument exits 2 (rc=$rc)"; fi

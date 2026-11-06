@@ -4771,6 +4771,10 @@ type runJob struct {
 type Scheduler struct {
 	cfg Config
 
+	// decideMu orders window decisions: the tick and every starting run each re-read window.env, and a decision that
+	// read the file earlier must not apply its (stale) state after a later decision already did. It is taken before mu.
+	decideMu sync.Mutex
+
 	mu        sync.Mutex
 	jobs      map[jobKey]*jobState
 	invalid   map[string]string // app directory -> reason it is disabled_invalid_config
@@ -4926,6 +4930,8 @@ func (s *Scheduler) nextFire(js *jobState, after time.Time) time.Time {
 // windowDecision re-reads window.env by name. It updates runner.tsv window_state, the schedule zone and, on a
 // change of state, alerts once and rewrites jobs.tsv.
 func (s *Scheduler) windowDecision() (window.Window, error) {
+	s.decideMu.Lock()
+	defer s.decideMu.Unlock()
 	w, err := window.Load(s.cfg.WindowPath)
 	state := "ok"
 	if err != nil {

@@ -1067,7 +1067,8 @@ export INSTALL_INGRESS_HOLD_TIMEOUT=60
 "$script" verify --live --hold > "$T_TMP/bg.out" 2>&1 &
 BGPID=$!
 waited=0
-while ! grep -q 'HOLD:' "$T_TMP/bg.out" && [ "$waited" -lt 100 ]; do sleep 0.1; waited=$((waited + 1)); done
+while ! grep -q 'HOLD:' "$T_TMP/bg.out" && [ "$waited" -lt 600 ]; do sleep 0.1; waited=$((waited + 1)); done
+if grep -q 'HOLD:' "$T_TMP/bg.out"; then _pass; else _fail "the hold was reached before the signal (readiness poll, 60 s bound under parallel load)"; fi
 start=$SECONDS
 kill -TERM "$BGPID"
 wait "$BGPID"
@@ -1084,7 +1085,8 @@ export INSTALL_INGRESS_HOLD_TIMEOUT=60
 "$script" verify --live --hold > "$T_TMP/bg.out" 2>&1 &
 BGPID=$!
 waited=0
-while ! grep -q 'HOLD:' "$T_TMP/bg.out" && [ "$waited" -lt 100 ]; do sleep 0.1; waited=$((waited + 1)); done
+while ! grep -q 'HOLD:' "$T_TMP/bg.out" && [ "$waited" -lt 600 ]; do sleep 0.1; waited=$((waited + 1)); done
+if grep -q 'HOLD:' "$T_TMP/bg.out"; then _pass; else _fail "the hold was reached before the signal (readiness poll, 60 s bound under parallel load)"; fi
 kill -HUP "$BGPID"
 wait "$BGPID"
 rc=$?
