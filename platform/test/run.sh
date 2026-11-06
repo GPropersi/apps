@@ -17,8 +17,8 @@
 #                     auto-resolved TEST_JOBS it is clamped to it and the decision line shows `docker_clamped=<asked>-><n>`.
 # `auto` sizes the counts from the host and prints one decision line before any file starts:
 #   run.sh: jobs=<n> docker_jobs=<d> cpus=<c> mem_usable=<m>MiB binding=<cpu|memory|override|nested|hostq|probe-failed> files=<N>
-# cpus is nproc, or max(1, nproc / HOSTQ_SLOTS) (HOSTQ_SLOTS default 2) inside a hostq job (HOSTQ_JOB_ID set; binding=hostq
-# when that share limits the count). Usable memory is min(MemTotal * 0.70, min(MemAvailable, cgroup headroom) * 0.90) minus a
+# cpus is nproc, or max(1, nproc / HOSTQ_SLOTS) (HOSTQ_SLOTS default 2, mirroring hostq's configured slot count: update it
+# here if hostq's slot count changes) inside a hostq job (HOSTQ_JOB_ID set; binding=hostq when that share limits the count). Usable memory is min(MemTotal * 0.70, min(MemAvailable, cgroup headroom) * 0.90) minus a
 # 1024 MiB reserve. The cgroup v2 limit is the minimum numeric memory.max and memory.high over the own cgroup (from
 # /proc/self/cgroup) and every ancestor up to the cgroup root, so the app.slice cap above a hostq unit is seen; headroom is
 # that limit minus the own memory.current (no 0:: line = cgroup v1 = no limit; `max` or a missing file = no limit at that
