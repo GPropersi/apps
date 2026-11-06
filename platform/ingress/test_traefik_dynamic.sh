@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# test-class: docker
 # Pre-merge run of the pinned Traefik against dynamic.yml and the Traefik settings in compose.yaml.
 #
 # Needs docker; on a host without a usable docker daemon it skips with a loud notice and exits 0. Run it

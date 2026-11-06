@@ -1,0 +1,3 @@
+# Files that stub or wrap a docker info / go test probe but are not live or heavy tests.
+# One entry per line: <path relative to the repo root> <one-line reason>. check-test-classes.sh fails an entry whose
+# file is missing or no longer contains a probe.

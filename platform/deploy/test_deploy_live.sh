@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# test-class: docker
 # Pre-merge run of deploy.sh against the REAL docker daemon: it builds a tiny local image (no GHCR) and deploys it with
 # DEPLOY_SKIP_REGISTRY=1 (the local image has no registry, so login and pull are bypassed; the token line is still sent).
 # It catches run-contract combinations a stub cannot: --read-only with --tmpfs, --group-add, the container IP lookup for

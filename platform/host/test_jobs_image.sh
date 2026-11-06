@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# test-class: docker
 # Embedded-sources image build (Docker-gated). Writes the build inputs exactly as install-jobs.sh does (its own
 # runner_inputs / testapp_inputs lists and payload_* functions, sourced with INSTALL_JOBS_SOURCE_ONLY=1) into two temp
 # directories, then runs `docker build` for the runner Dockerfile (context = group 1's build inputs only) and for

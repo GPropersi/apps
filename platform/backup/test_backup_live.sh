@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# test-class: docker
 # Pre-merge round trip of the REAL backup.sh and restore.sh against the REAL pinned Postgres and Redis (compose.yaml of the
 # data stack), the real new-db.sh, the real restic and a local-directory restic repository.
 #

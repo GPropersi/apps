@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# test-class: docker
 # Pre-merge run of the REAL data stack (the pinned Postgres and Redis from compose.yaml) with the real new-db.sh, the real
 # redis-entrypoint.sh, the real reserved-names list and the real install-data.sh verify checks.
 #

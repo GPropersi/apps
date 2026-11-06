@@ -22,6 +22,7 @@ lint: ## Public-repo hygiene, embedded-payload drift check, app.yaml registry va
 	@platform/lint/embed-payloads.sh --check
 	@platform/registry/validate-tracked.sh
 	@platform/lint/check-apps.sh
+	@platform/lint/check-test-classes.sh
 	@platform/lint/check-workflows.sh
 	@platform/lint/check-go.sh
 	@want=$$(cat platform/lint/SHELLCHECK_VERSION); have=$$(shellcheck --version 2>/dev/null | sed -n 's/^version: //p'); \

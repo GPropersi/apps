@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# test-class: heavy
 # test_go.sh: run the jobs runner's Go unit tests (no -tags live; the live test runs only via test_jobs_live.sh).
 #
 # Forces the pinned toolchain (GOTOOLCHAIN=go<GO_VERSION>, via go-env.sh), sets CGO_ENABLED=1 (-race needs cgo; the
