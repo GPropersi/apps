@@ -671,6 +671,83 @@ func TestRealDispatcherOutcomesAreRecordedWithoutLeakingTheSecret(t *testing.T) 
 	assertNoSecretAnywhere(t, e)
 }
 
+// windowDecision runs from the tick and from every starting run; decideMu must keep concurrent decisions ordered so
+// the last file contents win. Meaningful under go test -race.
+func TestConcurrentWindowDecisionsSettleOnTheLastFileContents(t *testing.T) {
+	for _, tc := range []struct{ name, last, want string }{
+		{"last write invalid", "this is not a window file\n", "invalid"},
+		{"last write valid", goodWindow, "ok"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			e := newEnv(t, laTime(6, 58, 0), goodWindow, oneJob("0 7 * * *", "5s", false))
+			e.run()
+			rewrite := func(text string) error {
+				tmp := e.win + ".tmp"
+				if err := os.WriteFile(tmp, []byte(text), 0o644); err != nil {
+					return err
+				}
+				return os.Rename(tmp, e.win)
+			}
+			stop := make(chan struct{})
+			var writer, deciders sync.WaitGroup
+			var werr atomic.Value
+			writer.Add(1)
+			go func() {
+				defer writer.Done()
+				for i := 0; ; i++ {
+					select {
+					case <-stop:
+						return
+					default:
+					}
+					text := goodWindow
+					if i%2 == 0 {
+						text = "this is not a window file\n"
+					}
+					if err := rewrite(text); err != nil {
+						werr.Store(err)
+						return
+					}
+				}
+			}()
+			for g := 0; g < 8; g++ {
+				deciders.Add(1)
+				go func() {
+					defer deciders.Done()
+					for i := 0; i < 50; i++ {
+						_, _ = e.s.windowDecision()
+					}
+				}()
+			}
+			deciders.Wait()
+			close(stop)
+			writer.Wait()
+			if err, _ := werr.Load().(error); err != nil {
+				t.Fatal(err)
+			}
+			if err := rewrite(tc.last); err != nil {
+				t.Fatal(err)
+			}
+			var settle sync.WaitGroup
+			for g := 0; g < 8; g++ {
+				settle.Add(1)
+				go func() {
+					defer settle.Done()
+					_, _ = e.s.windowDecision()
+				}()
+			}
+			settle.Wait()
+			e.s.mu.Lock()
+			got := e.s.winState
+			e.s.mu.Unlock()
+			if got != tc.want {
+				t.Fatalf("window_state = %q after the last file contents, want %q", got, tc.want)
+			}
+			waitFor(t, "runner.tsv window_state "+tc.want, func() bool { r := e.runner(); return len(r) == 6 && r[2] == tc.want })
+		})
+	}
+}
+
 func TestHeartbeatAdvancesWhileRedisIsDownAndTheWindowIsInvalid(t *testing.T) {
 	e := newEnv(t, laTime(6, 58, 0), "garbage\n", oneJob("0 9 * * *", "30s", false))
 	e.run()
