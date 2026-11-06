@@ -155,6 +155,7 @@ MIB=1048576
 cg="$T_TMP/cg"
 mem16="$T_TMP/mem16" mem4="$T_TMP/mem4"
 mk_mem() { printf 'MemTotal:       %d kB\nMemFree:        1 kB\nMemAvailable:   %d kB\n' $(($1 * 1024)) $(($2 * 1024)) > "$3"; }
+printf '1:name=systemd:/g\n' > "$T_TMP/no-cgroup"
 mk_mem 16384 16384 "$mem16"
 mk_mem 4096 4096 "$mem4"
 newcg() { rm -rf "$cg"; mkdir -p "$cg/root"; }
@@ -168,7 +169,9 @@ auto_case() {
   clear_tests
   reset_probe
   for n in 1 2 3 4 5 6; do probe_fake "platform/a/test_m$n.sh" - 0.4; done
-  run_cmd "${ENVU[@]}" env "$@" bash "$R"
+  # Default to a cgroup file with no `0::` line (no limit) so a cgroup-limited host (a hostq unit) cannot change the
+  # expected usable memory; a case that sets its own PLATFORM_TEST_CGROUP_FILE comes later in "$@" and wins.
+  run_cmd "${ENVU[@]}" env PLATFORM_TEST_CGROUP_FILE="$T_TMP/no-cgroup" "$@" bash "$R"
   expect_rc "$label: the run passes" 0
   expect_eq "$label: decision line" "$(grep -m1 '^run.sh: jobs=' <<<"$out")" "run.sh: $want"
   pk="$(peak all)"
