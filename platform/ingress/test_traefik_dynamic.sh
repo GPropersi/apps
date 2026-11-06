@@ -79,6 +79,7 @@ sockgid="$(stat -c %g "$sock")"
 # container names cannot fix (the provider sees every container on the daemon). Within one run there is only one copy,
 # so the lock costs nothing. The wait bound is under the runner's default per-file timeout (30 minutes), so a contended lock
 # fails with this named message instead of a bare timeout.
+# The /tmp lock path is trusted: these hosts are single-tenant, so no other user can plant a symlink there.
 lock="${INGRESS_TEST_LOCK:-/tmp/platform-traefik-dynamic-test-lock}"
 command -v flock >/dev/null 2>&1 || skip "flock is not installed"
 exec 8>>"$lock" || { echo "FAIL: cannot open the run lock $lock"; exit 1; }

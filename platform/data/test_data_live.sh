@@ -565,6 +565,7 @@ cap "docker ps --format (platform.app state status)" "$(docker ps -a --filter "l
 # platform ls fails closed on any labelled container whose app name is not valid, and test_traefik_dynamic.sh runs one
 # on this daemon (a deliberately long app name) while it holds its host-wide run lock. When files run side by side the
 # two overlap, so take the same lock for each ls call (bounded wait; without flock the call runs unserialized).
+# The /tmp lock path is trusted: these hosts are single-tenant, so no other user can plant a symlink there.
 ls_lock="${INGRESS_TEST_LOCK:-/tmp/platform-traefik-dynamic-test-lock}"
 ls_serialized() {
   if command -v flock >/dev/null 2>&1; then
