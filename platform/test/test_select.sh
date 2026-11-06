@@ -76,26 +76,32 @@ case_sel() { # label, "changed paths", expected files...
 
 # Each map row, in the order of the file.
 case_sel "docs-only selects nothing" "README.md docs/x.md apps/foo/README.md"
-case_sel "Makefile selects all" "Makefile" "${ALL[@]}"
-case_sel ".github selects all" ".github/workflows/ci.yml" "${ALL[@]}"
-case_sel "platform/test selects all" "platform/test/lib.sh" "${ALL[@]}"
+case_sel "Makefile selects test, host, lint and registry" "Makefile" platform/test/test_t.sh platform/host/test_host.sh \
+  platform/lint/test_lint.sh platform/registry/test_registry.sh
+case_sel ".github selects lint and ci" ".github/workflows/ci.yml" platform/lint/test_lint.sh platform/ci/test_ci.sh
+case_sel "platform/test/lib.sh selects all" "platform/test/lib.sh" "${ALL[@]}"
+case_sel "platform/test/prewarm.sh selects all (the all row beats platform/test/**)" "platform/test/prewarm.sh" "${ALL[@]}"
+case_sel "platform/test/run.sh selects all (the all row beats platform/test/**)" "platform/test/run.sh" "${ALL[@]}"
+case_sel "another platform/test file selects test, host and lint" "platform/test/test_t.sh" platform/test/test_t.sh \
+  platform/host/test_host.sh platform/lint/test_lint.sh
 case_sel "CLAUDE.md selects host" "CLAUDE.md" platform/host/test_host.sh
 case_sel "platform/lib row" "platform/lib/l.sh" platform/registry/test_registry.sh platform/data/test_data.sh platform/host/test_host.sh \
-  platform/backup/test_backup.sh platform/jobs/test_jobs.sh platform/ingress/test_ingress.sh platform/deploy/test_deploy.sh "${APPS[@]}"
+  platform/backup/test_backup.sh platform/jobs/test_jobs.sh platform/ingress/test_ingress.sh platform/deploy/test_deploy.sh platform/test/test_t.sh "${APPS[@]}"
 case_sel "platform/registry row" "platform/registry/r.txt" platform/registry/test_registry.sh platform/data/test_data.sh \
   platform/host/test_host.sh platform/backup/test_backup.sh platform/jobs/test_jobs.sh platform/lint/test_lint.sh \
-  platform/deploy/test_deploy.sh "${APPS[@]}"
+  platform/deploy/test_deploy.sh platform/test/test_t.sh "${APPS[@]}"
 case_sel "platform/data row" "platform/data/d.txt" platform/data/test_data.sh platform/host/test_host.sh \
-  platform/backup/test_backup.sh platform/jobs/test_jobs.sh platform/lint/test_lint.sh platform/deploy/test_deploy.sh "${APPS[@]}"
+  platform/backup/test_backup.sh platform/jobs/test_jobs.sh platform/lint/test_lint.sh platform/deploy/test_deploy.sh \
+  platform/test/test_t.sh "${APPS[@]}"
 case_sel "platform/deploy row: deploy, host, lint and data (the removal tests run in data), no apps" "platform/deploy/d.txt" \
   platform/data/test_data.sh platform/deploy/test_deploy.sh platform/host/test_host.sh platform/lint/test_lint.sh
 case_sel "platform/ci row: ci only" "platform/ci/c.txt" platform/ci/test_ci.sh
 case_sel "platform/jobs row: jobs, host, lint and every app" "platform/jobs/j.txt" platform/jobs/test_jobs.sh \
-  platform/host/test_host.sh platform/lint/test_lint.sh "${APPS[@]}"
+  platform/host/test_host.sh platform/lint/test_lint.sh platform/test/test_t.sh "${APPS[@]}"
 case_sel "platform/backup row" "platform/backup/b.txt" platform/backup/test_backup.sh platform/host/test_host.sh \
   platform/data/test_data.sh platform/lint/test_lint.sh "${APPS[@]}"
 case_sel "platform/ingress row" "platform/ingress/i.txt" platform/ingress/test_ingress.sh platform/host/test_host.sh \
-  platform/lint/test_lint.sh "${APPS[@]}"
+  platform/lint/test_lint.sh platform/test/test_t.sh "${APPS[@]}"
 case_sel "platform/host row" "platform/host/h.txt" platform/host/test_host.sh platform/data/test_data.sh \
   platform/backup/test_backup.sh platform/jobs/test_jobs.sh platform/lint/test_lint.sh "${APPS[@]}"
 case_sel "platform/lint row is lint only" "platform/lint/l.txt" platform/lint/test_lint.sh
@@ -108,7 +114,7 @@ case_sel "an app plus a platform change" "apps/foo/main.txt platform/lint/l.txt"
 case_sel "an app README selects nothing" "apps/foo/README.md"
 case_sel "a new app without tests selects nothing" "apps/newapp/main.txt"
 
-# First match wins: platform/test/** (all) sits above the catch-all, and README.md above everything.
+# First match wins: README.md sits above everything (a README under platform/lint is docs).
 case_sel "first match wins: README.md under platform/lint is docs" "platform/lint/README.md"
 
 # A rename lists both sides: moving platform/lint/m.txt to docs/m.txt still selects lint.
@@ -134,7 +140,7 @@ g checkout -q -B base3 work
 g mv platform/lint/m2.txt platform/ingress/m2.txt
 g commit -q -m "rename m2"
 run_select work
-expect_eq "a rename between areas selects both areas" "$sel" "$(want platform/lint/test_lint.sh platform/ingress/test_ingress.sh platform/host/test_host.sh "${APPS[@]}")"
+expect_eq "a rename between areas selects both areas" "$sel" "$(want platform/lint/test_lint.sh platform/ingress/test_ingress.sh platform/host/test_host.sh platform/test/test_t.sh "${APPS[@]}")"
 
 # Fail toward more tests: a bad ref, an unreadable map, a malformed row, an unknown area, a path no row matches.
 branch_with README.md

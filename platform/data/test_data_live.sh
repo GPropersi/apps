@@ -562,10 +562,25 @@ for _ in $(seq 1 20); do
   sleep 1
 done
 cap "docker ps --format (platform.app state status)" "$(docker ps -a --filter "label=platform.app=$ls_app" --format '{{.Label "platform.app"}}	{{.State}}	{{.Status}}')"
-lsout="$(bash "$here/../host/platform.sh" ls 2>&1)"
+# platform ls fails closed on any labelled container whose app name is not valid, and test_traefik_dynamic.sh runs one
+# on this daemon (a deliberately long app name) while it holds its host-wide run lock. When files run side by side the
+# two overlap, so take the same lock for each ls call (bounded wait; without flock the call runs unserialized).
+ls_lock="${INGRESS_TEST_LOCK:-/tmp/platform-traefik-dynamic-test-lock}"
+ls_serialized() {
+  if command -v flock >/dev/null 2>&1; then
+    (
+      exec 7>>"$ls_lock" || exit 98
+      flock -w 900 7 || { echo "ls_serialized: still locked after 900s ($ls_lock)"; exit 99; }
+      bash "$here/../host/platform.sh" ls 2>&1
+    )
+  else
+    bash "$here/../host/platform.sh" ls 2>&1
+  fi
+}
+lsout="$(ls_serialized)"
 expect_has "platform ls: running + healthy for a live healthy container" "$lsout" "$(printf '%s\t%s\t%s' "$ls_app" running healthy)"
 docker stop -t 1 "$LSC" >/dev/null 2>&1
-lsout="$(bash "$here/../host/platform.sh" ls 2>&1)"
+lsout="$(ls_serialized)"
 expect_has "platform ls: exited for a stopped container" "$lsout" "$(printf '%s\t%s\t' "$ls_app" exited)"
 docker rm -fv "$LSC" >/dev/null 2>&1
 

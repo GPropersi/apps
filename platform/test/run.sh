@@ -38,6 +38,9 @@
 # value is an error naming the file). Docker and heavy files are queued ahead of mocked ones, each group in the given
 # order, so TEST_JOBS=1 runs unmarked files in the given order, after any docker/heavy-marked files (themselves in the
 # given order).
+# Before any file starts (and not inside a nested runner) it calls platform/test/prewarm.sh, when that exists, with `images`
+# (any selected file is class docker) and/or `go` (any docker or heavy file, or any file that mentions go-env.sh or
+# check-go.sh); no docker file and no Go use means no call. The summary then has a `-- prewarm <secs>s (<targets>)` line.
 # INT, TERM or HUP sends TERM to every running file's process group, waits up to the kill grace (20 s, shorter than
 # hostq's TimeoutStopSec=30) for their EXIT traps, KILLs what is left, and exits. PLATFORM_TEST_KILL_GRACE overrides the
 # grace for tests only. Children see PLATFORM_TEST_RUNNER=1.
@@ -331,6 +334,29 @@ trap 'rm -rf -- "$statedir"' EXIT
 
 export PLATFORM_TEST_RUNNER=1
 
+# Prewarm, once, before the fan-out (a nested runner skips it: the outer run already warmed). `images` when any selected
+# file is class docker; `go` when any is docker or heavy, or (any class) mentions go-env.sh or check-go.sh. No docker file
+# and no Go use means no call. Only when prewarm.sh exists (scratch trees have none). It never fails the run.
+prewarm_secs=""
+prewarm_targets=()
+if [ "$nested" -eq 0 ] && [ -f "$here/prewarm.sh" ]; then
+  want_images=0 want_go=0
+  for i in "${!files[@]}"; do
+    case "${classes[$i]}" in
+      docker) want_images=1 want_go=1 ;;
+      heavy) want_go=1 ;;
+      *) if grep -qE 'go-env\.sh|check-go\.sh' -- "${files[$i]}" 2> /dev/null; then want_go=1; fi ;;
+    esac
+  done
+  [ "$want_images" -eq 1 ] && prewarm_targets+=(images)
+  [ "$want_go" -eq 1 ] && prewarm_targets+=(go)
+  if [ "${#prewarm_targets[@]}" -gt 0 ]; then
+    pw_start="$(now_us)"
+    bash "$here/prewarm.sh" "${prewarm_targets[@]}"
+    prewarm_secs="$(us_to_secs $(($(now_us) - pw_start)))"
+  fi
+fi
+
 # Queue: docker/heavy files first, then mocked, each group in the given order.
 queue=()
 for i in "${!files[@]}"; do [ "${classes[$i]}" != mocked ] && queue+=("$i"); done
@@ -491,6 +517,7 @@ done
 total="$(us_to_secs $(($(now_us) - run_start)))"
 echo "-- timings (slowest first)"
 printf '%s\n' "${timings[@]}" | sort -rn -k1,1 | while read -r secs f; do echo "${secs}s $f"; done
+if [ -n "$prewarm_secs" ]; then echo "-- prewarm ${prewarm_secs}s (${prewarm_targets[*]})"; fi
 echo "-- total ${total}s wall, ${#files[@]} files, $nfailed failed"
 for f in "${fails[@]}"; do echo "FAILED: $f"; done
 

@@ -6,15 +6,32 @@
 # Targets (comma-separated): a platform/<area> directory name, apps (every app), none, or all.
 # A test that reads another area (../<area>/ or ../lib/) needs that area's row to list the test's own area;
 # test_areas_map.sh enforces it.
+# Why each row is what it is:
+#   platform/test/lib.sh, prewarm.sh, run.sh -> all: lib.sh is sourced by every test, run.sh is the runner of every test,
+#     and its marker parsing, group kill, admission and prewarm selection only show their defects on real docker and
+#     heavy files; prewarm.sh is called by run.sh. They sit above the platform/test/** row (first match wins).
+#   platform/test/** -> test,host,lint: the other test-directory files. `host` holds test_make_targets.sh; `lint` holds
+#     test_check_test_classes.sh, which guards the marker grammar that run.sh reads; `test` holds test_select.sh,
+#     test_areas_map.sh and test_prewarm.sh.
+#   .github/** -> lint,ci: `lint` holds test_check_workflows.sh, which reads the real workflows; `ci` holds the ci tests.
+#   Makefile -> test,host,lint,registry: `test` holds test_select.sh (runs make test-changed on a copy of it), `host`
+#     holds test_make_targets.sh, `lint` holds test_check_test_classes.sh (greps the real `lint:` recipe for the
+#     check-test-classes.sh line), `registry` holds test_validate_app_yaml.sh (greps it for the validate-tracked.sh line).
+#   lib, registry, data, jobs, ingress also list `test`: test_prewarm.sh reads platform/lib/yaml-subset.sh, the data, jobs
+#     and ingress compose files and the jobs Dockerfiles, and test_areas_map.sh mentions ../data/, ../lib/ and ../registry/.
+#   A push to main still runs everything (CI runs `make test` there), which catches a wrong map.
 README.md **/README.md docs/** .claude/**	none
-Makefile .github/** platform/test/**	all
 CLAUDE.md	host
-platform/lib/**	registry,data,host,backup,jobs,ingress,deploy,apps
-platform/registry/**	registry,data,host,backup,jobs,lint,deploy,apps
-platform/data/**	data,host,backup,jobs,lint,deploy,apps
-platform/jobs/**	jobs,host,lint,apps
+platform/test/lib.sh platform/test/prewarm.sh platform/test/run.sh	all
+platform/test/**	test,host,lint
+.github/**	lint,ci
+Makefile	test,host,lint,registry
+platform/lib/**	registry,data,host,backup,jobs,ingress,deploy,apps,test
+platform/registry/**	registry,data,host,backup,jobs,lint,deploy,apps,test
+platform/data/**	data,host,backup,jobs,lint,deploy,apps,test
+platform/jobs/**	jobs,host,lint,apps,test
 platform/backup/**	backup,host,data,lint,apps
-platform/ingress/**	ingress,host,lint,apps
+platform/ingress/**	ingress,host,lint,apps,test
 platform/host/**	host,data,backup,jobs,lint,apps
 platform/deploy/**	deploy,host,lint,data
 platform/lint/**	lint

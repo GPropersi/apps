@@ -30,6 +30,8 @@
 #      caller's grants cover the grants of every job it reaches, recursively;
 #  12. every `environment:` job in app-deploy-one.yml and app-rollback.yml has a `deploy-` concurrency group with
 #      `queue: max` and `cancel-in-progress: false`.
+#  13. no step uses the combined `actions/cache` action, and every `actions/cache/save` step carries exactly
+#      `if: github.event_name == 'push' && github.ref == 'refs/heads/main'` (only main writes the cache, never a PR).
 # Comment lines are ignored. The parse is line-based and assumes the repo's 2-space YAML (jobs at 2 spaces, job keys
 # at 4); a job with `environment:` it cannot pair with a guard fails closed.
 set -uo pipefail
@@ -38,7 +40,7 @@ root=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --root) [ $# -ge 2 ] || { echo "missing value for --root" >&2; exit 2; }; root="$2"; shift 2 ;;
-    -h | --help) sed -n '2,34p' "$0"; exit 0 ;;
+    -h | --help) sed -n '2,36p' "$0"; exit 0 ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac
 done
@@ -85,6 +87,12 @@ while IFS= read -r wf; do
       if (text ~ /\$\{\{/)
         print path ": a run: block holds a ${{ }} expression (line " n "); pass every value through env: and read it as a shell variable"
     }
+    # evalsave: a pending actions/cache/save step runs only on a push to main (no pull-request code ever writes the cache).
+    function evalsave() {
+      if (savepending && stepif != "github.event_name == push && github.ref == refs/heads/main")
+        print path ": the actions/cache/save step (line " saveline ") needs exactly if: github.event_name == \047push\047 && github.ref == \047refs/heads/main\047"
+      savepending = 0
+    }
     function addtrig(t) { trig = trig " " t " " }
     function checktrig(   n, a, i, bad, allowed, t) {
       bad = " workflow_run issue_comment issues pull_request_review pull_request_review_comment discussion discussion_comment repository_dispatch fork watch "
@@ -117,7 +125,7 @@ while IFS= read -r wf; do
       }
       reset()
     }
-    BEGIN { reset(); trig = ""; usehost = 0; hasmask = 0; runcol = -1; wpr = 0; wperm = ""; whas = 0; inon = 0; inwperm = 0 }
+    BEGIN { reset(); savepending = 0; saveline = 0; stepif = ""; trig = ""; usehost = 0; hasmask = 0; runcol = -1; wpr = 0; wperm = ""; whas = 0; inon = 0; inwperm = 0 }
     /^[ ]*#/ { next }
     {
       line = $0
@@ -130,6 +138,11 @@ while IFS= read -r wf; do
         if (v !~ /^\.\// && v !~ /@[0-9a-f]{40}$/) print path ": uses " v " is not pinned to a 40-hex commit SHA (line " NR ")"
       }
       ind = indent(line)
+      # Rule 13: a step boundary evaluates the pending cache/save step; then this line may carry the step if: or uses:.
+      if (ind <= 4 || (ind == 6 && line ~ /^[ ]*-[ ]/)) { evalsave(); stepif = "" }
+      if (ind >= 6 && line ~ /^[ ]*(-[ ]+)?if:[ ]/) { stepif = unq(value(line, "if")); sub(/^[ ]*-[ ]+/, "", stepif); sub(/^if:[ ]*/, "", stepif); stepif = trim(stepif) }
+      if (line ~ /^[ ]*-?[ ]*uses:[ ]*["\047]?actions\/cache@/) print path ": the combined actions/cache action is forbidden (line " NR "); use actions/cache/restore and actions/cache/save"
+      if (line ~ /^[ ]*-?[ ]*uses:[ ]*["\047]?actions\/cache\/save@/) { savepending = 1; saveline = NR }
       # run: blocks (any depth): content lines are indented past the key.
       if (runcol >= 0) {
         if (line ~ /^[ ]*$/) { }
@@ -197,6 +210,7 @@ while IFS= read -r wf; do
       if (instrat && inmatrix && ind == 8 && line ~ /^[ ]*app:/) matrix = 1
     }
     END {
+      evalsave()
       flush()
       checktrig()
       if (usehost && !hasmask) print path ": uses vars.PLATFORM_DEPLOY_HOST but never masks it (echo \"::add-mask::$DEPLOY_HOST\"); a variable is not masked in public logs"
