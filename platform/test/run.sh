@@ -354,7 +354,28 @@ if [ "$nested" -eq 0 ] && [ -f "$here/prewarm.sh" ]; then
   [ "$want_go" -eq 1 ] && prewarm_targets+=(go)
   if [ "${#prewarm_targets[@]}" -gt 0 ]; then
     pw_start="$(now_us)"
-    bash "$here/prewarm.sh" "${prewarm_targets[@]}"
+    # Prewarm runs in its own session in the background so INT/TERM/HUP during it stop its whole process group
+    # (the normal file-stopping traps below are not installed yet); `wait` is interruptible by the trap.
+    # shellcheck disable=SC2329  # invoked through the signal traps below
+    on_prewarm_signal() {
+      local code="$1" pg=""
+      trap '' INT TERM HUP
+      if [ -s "$statedir/prewarm.pid" ]; then pg="$(cat -- "$statedir/prewarm.pid")"; fi
+      if [ -n "$pg" ]; then
+        kill -TERM -- "-$pg" 2> /dev/null
+        sleep 0.5
+        kill -KILL -- "-$pg" 2> /dev/null
+      fi
+      echo "run.sh: interrupted during prewarm" >&2
+      exit "$code"
+    }
+    trap 'on_prewarm_signal 130' INT
+    trap 'on_prewarm_signal 143' TERM
+    trap 'on_prewarm_signal 129' HUP
+    # shellcheck disable=SC2016  # the wrapper's own $$ and positional parameters, expanded by the inner bash
+    setsid bash -c 'echo "$$" > "$1"; shift; exec bash "$@"' _ "$statedir/prewarm.pid" "$here/prewarm.sh" "${prewarm_targets[@]}" &
+    wait "$!"
+    trap - INT TERM HUP
     prewarm_secs="$(us_to_secs $(($(now_us) - pw_start)))"
   fi
 fi

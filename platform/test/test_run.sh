@@ -408,6 +408,26 @@ expect_eq "a TERM to the runner exits 143 after escalation" "$rrc" "143"
 ign="$(cat "$C/ign.pid" 2>/dev/null)"
 if [ -n "$ign" ] && gone "$ign"; then _pass; else _fail "the TERM-ignoring file is KILLed on the signal path" "pid=$ign"; fi
 
+# --- Signals during prewarm: a TERM stops prewarm's whole process group (child included) and exits 143 ---
+clear_tests
+rm -f "$C/pw.started" "$C/pw.pid" "$C/pw.child" "$C/ran"
+fake platform/a/test_d.sh docker 'touch "$C/ran"'
+printf '%s\n' '#!/usr/bin/env bash' 'echo $$ > "$C/pw.pid"' 'sleep 30 &' 'echo $! > "$C/pw.child"' 'touch "$C/pw.started"' 'wait' \
+  > "$S/platform/test/prewarm.sh"
+"${ENVU[@]}" bash "$R" > "$T_TMP/pw.out" 2>&1 &
+rpid=$!
+if wait_file "$C/pw.started"; then _pass; else _fail "the fake prewarm started"; fi
+kill -TERM "$rpid"
+wait "$rpid"
+rrc=$?
+expect_eq "a TERM during prewarm exits 143" "$rrc" "143"
+pwp="$(cat "$C/pw.pid" 2>/dev/null)"
+pwc="$(cat "$C/pw.child" 2>/dev/null)"
+if [ -n "$pwp" ] && gone "$pwp"; then _pass; else _fail "the prewarm process is gone after TERM" "pid=$pwp"; fi
+if [ -n "$pwc" ] && gone "$pwc"; then _pass; else _fail "prewarm's child is gone after TERM" "pid=$pwc"; fi
+if [ ! -e "$C/ran" ]; then _pass; else _fail "no test file ran after a TERM during prewarm"; fi
+rm -f "$S/platform/test/prewarm.sh"
+
 # --- Log dir ---
 clear_tests
 fake platform/a/test_a.sh - 'exit 0'
