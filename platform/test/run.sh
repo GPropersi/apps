@@ -11,10 +11,26 @@
 # `no test_*.sh found` to stderr and exits 1.
 #
 # Knobs (environment):
-#   TEST_JOBS         files run at once, integer 1-64 (default 1)
-#   TEST_DOCKER_JOBS  at most this many files of class `docker`, and separately of class `heavy`, at once; integer 1-64
-#                     (default 1). Explicitly above an explicit TEST_JOBS is an error; above a defaulted TEST_JOBS it is
-#                     clamped to it.
+#   TEST_JOBS         files run at once: `auto` (default) or an integer 1-64
+#   TEST_DOCKER_JOBS  at most this many files of class `docker`, and separately of class `heavy`, at once: `auto`
+#                     (default) or an integer 1-64. An explicit value above an explicit TEST_JOBS is an error; above an
+#                     auto-resolved TEST_JOBS it is clamped to it and the decision line shows `docker_clamped=<asked>-><n>`.
+# `auto` sizes the counts from the host and prints one decision line before any file starts:
+#   run.sh: jobs=<n> docker_jobs=<d> cpus=<c> mem_usable=<m>MiB binding=<cpu|memory|override|nested|hostq|probe-failed> files=<N>
+# cpus is nproc, or max(1, nproc / HOSTQ_SLOTS) (HOSTQ_SLOTS default 2) inside a hostq job (HOSTQ_JOB_ID set; binding=hostq
+# when that share limits the count). Usable memory is min(MemTotal * 0.70, min(MemAvailable, cgroup headroom) * 0.90) minus a
+# 1024 MiB reserve. The cgroup v2 limit is the minimum numeric memory.max and memory.high over the own cgroup (from
+# /proc/self/cgroup) and every ancestor up to the cgroup root, so the app.slice cap above a hostq unit is seen; headroom is
+# that limit minus the own memory.current (no 0:: line = cgroup v1 = no limit; `max` or a missing file = no limit at that
+# level). TEST_JOBS=auto is clamp(1, min(cpus, usable / 256 MiB), 32); TEST_DOCKER_JOBS=auto is
+# clamp(1, min(jobs, usable / 1536 MiB), 3). Inside a runner (PLATFORM_TEST_RUNNER=1) both are 1 (binding=nested). An
+# unreadable nproc or meminfo, a garbage cgroup value, or an invalid HOSTQ_SLOTS (checked first whenever HOSTQ_JOB_ID is
+# set, even under an explicit TEST_JOBS) gives 1 job, binding=probe-failed and ` unreadable=<path>`.
+# Memory admission: while a file is running, a file whose class weight (mocked 256, heavy 1024, docker 1536 MiB) plus the
+# reserve exceeds the current MemAvailable is held (`run.sh: memory low (<n> MiB available), holding <file>`, once) until a
+# running file finishes; with nothing running a file always starts, so a run cannot deadlock.
+# Test-only probe overrides: PLATFORM_TEST_NPROC, PLATFORM_TEST_MEMINFO, PLATFORM_TEST_CGROUP_FILE, PLATFORM_TEST_CGROUP_ROOT,
+# PLATFORM_TEST_CGROUP_DIR (the own-cgroup start directory; the walk still climbs to the root).
 #   TEST_VERBOSE      1: print every file's buffered output, not only failures'
 #   TEST_FILE_TIMEOUT per-file limit in seconds, 1-3600 (default 1800): TERM, then KILL after the 20 s kill grace
 #   TEST_LOG_DIR      keep the per-file logs there (default: a temp dir, removed after an all-pass run)
@@ -34,21 +50,28 @@ die() { echo "run.sh: $*" >&2; exit 2; }
 # valid_int <v> <min> <max>
 valid_int() { [[ "$1" =~ ^[1-9][0-9]{0,3}$ ]] && [ "$1" -ge "$2" ] && [ "$1" -le "$3" ]; }
 
-jobs=1
-jobs_explicit=0
+# Test-only probe overrides and the nesting flag, read once here and nowhere else.
+nested=0
+[ "${PLATFORM_TEST_RUNNER:-}" = "1" ] && nested=1
+nproc_set=0 nproc_ov=""
+if [ -n "${PLATFORM_TEST_NPROC+x}" ]; then nproc_set=1 nproc_ov="$PLATFORM_TEST_NPROC"; fi
+meminfo_file="${PLATFORM_TEST_MEMINFO:-/proc/meminfo}"
+cg_file="${PLATFORM_TEST_CGROUP_FILE:-/proc/self/cgroup}"
+cg_root="${PLATFORM_TEST_CGROUP_ROOT:-/sys/fs/cgroup}"
+cg_dir_set=0 cg_dir=""
+if [ -n "${PLATFORM_TEST_CGROUP_DIR:-}" ]; then cg_dir_set=1 cg_dir="$PLATFORM_TEST_CGROUP_DIR"; fi
+
+jobs_req=auto
 if [ -n "${TEST_JOBS+x}" ]; then
-  valid_int "$TEST_JOBS" 1 64 || die "TEST_JOBS must be 1-64, got '$TEST_JOBS'"
-  jobs="$TEST_JOBS"
-  jobs_explicit=1
+  if [ "$TEST_JOBS" != auto ]; then valid_int "$TEST_JOBS" 1 64 || die "TEST_JOBS must be auto or 1-64, got '$TEST_JOBS'"; fi
+  jobs_req="$TEST_JOBS"
 fi
-djobs=1
+djobs_req=auto
 if [ -n "${TEST_DOCKER_JOBS+x}" ]; then
-  valid_int "$TEST_DOCKER_JOBS" 1 64 || die "TEST_DOCKER_JOBS must be 1-64, got '$TEST_DOCKER_JOBS'"
-  djobs="$TEST_DOCKER_JOBS"
-  if [ "$djobs" -gt "$jobs" ]; then
-    [ "$jobs_explicit" -eq 1 ] && die "TEST_DOCKER_JOBS ($djobs) must not exceed TEST_JOBS ($jobs)"
-    djobs="$jobs"
+  if [ "$TEST_DOCKER_JOBS" != auto ]; then
+    valid_int "$TEST_DOCKER_JOBS" 1 64 || die "TEST_DOCKER_JOBS must be auto or 1-64, got '$TEST_DOCKER_JOBS'"
   fi
+  djobs_req="$TEST_DOCKER_JOBS"
 fi
 file_timeout=1800
 if [ -n "${TEST_FILE_TIMEOUT+x}" ]; then
@@ -94,6 +117,202 @@ for f in "${files[@]}"; do
   classes+=("$cls")
 done
 
+# --- Job counts from the host (TEST_JOBS / TEST_DOCKER_JOBS = auto) ---
+mem_reserve=1024 # MiB kept free for the rest of the host
+# class_weight <class>: MiB one file of that class is assumed to need.
+class_weight() {
+  case "$1" in
+    docker) echo 1536 ;;
+    heavy) echo 1024 ;;
+    *) echo 256 ;;
+  esac
+}
+# read_meminfo: sets MI_TOTAL and MI_AVAIL (MiB); returns 1 and sets MI_ERR (the path) when unreadable.
+MI_TOTAL="" MI_AVAIL="" MI_ERR=""
+read_meminfo() {
+  local k v total="" avail=""
+  MI_ERR="$meminfo_file"
+  [ -r "$meminfo_file" ] || return 1
+  while read -r k v _ || [ -n "$k" ]; do
+    case "$k" in
+      MemTotal:) total="$v" ;;
+      MemAvailable:) avail="$v" ;;
+    esac
+  done < "$meminfo_file"
+  [[ "$total" =~ ^[0-9]{1,15}$ ]] && [[ "$avail" =~ ^[0-9]{1,15}$ ]] || return 1
+  MI_TOTAL=$((10#$total / 1024))
+  MI_AVAIL=$((10#$avail / 1024))
+  MI_ERR=""
+}
+# cg_limit: the cgroup v2 memory ceiling. Sets CG_LIMIT (bytes, empty = none) and CG_CUR (own memory.current); returns 1
+# and sets CG_ERR (the path) when a present file holds garbage. The own cgroup comes from the `0::<path>` line of
+# /proc/self/cgroup (none = cgroup v1 = no limit); the limit is the minimum numeric memory.max and memory.high at the own
+# cgroup and every ancestor up to the cgroup root (`max` or a missing file = no limit at that level); memory.current is read
+# from the own cgroup only (missing = no limit).
+CG_LIMIT="" CG_CUR="" CG_ERR=""
+cg_limit() {
+  local start="" root line path d f v
+  CG_LIMIT="" CG_CUR="" CG_ERR=""
+  root="${cg_root%/}"
+  [ -z "$root" ] && root=/
+  if [ "$cg_dir_set" -eq 1 ]; then
+    start="$cg_dir"
+  else
+    [ -r "$cg_file" ] || return 0
+    while IFS= read -r line || [ -n "$line" ]; do
+      if [[ "$line" == 0::* ]]; then
+        path="${line#0::}"
+        path="${path%" (deleted)"}"
+        start="${root%/}/${path#/}"
+        break
+      fi
+    done < "$cg_file"
+    [ -n "$start" ] || return 0
+  fi
+  start="${start%/}"
+  [ -z "$start" ] && start=/
+  d="$start"
+  while :; do
+    for f in memory.max memory.high; do
+      [ -e "$d/$f" ] || continue
+      v=""
+      read -r v < "$d/$f" 2> /dev/null
+      v="${v//[[:space:]]/}"
+      if [ "$v" = max ]; then
+        continue
+      elif [[ "$v" =~ ^[0-9]{1,19}$ ]]; then
+        v=$((10#$v))
+        if [ -z "$CG_LIMIT" ] || [ "$v" -lt "$CG_LIMIT" ]; then CG_LIMIT="$v"; fi
+      else
+        CG_ERR="$d/$f"
+        return 1
+      fi
+    done
+    [ "$d" = "$root" ] && break
+    [ "$d" = / ] && break
+    d="${d%/*}"
+    [ -z "$d" ] && d=/
+  done
+  [ -n "$CG_LIMIT" ] || return 0
+  if [ ! -e "$start/memory.current" ]; then
+    CG_LIMIT=""
+    return 0
+  fi
+  v=""
+  read -r v < "$start/memory.current" 2> /dev/null
+  v="${v//[[:space:]]/}"
+  if [[ "$v" =~ ^[0-9]{1,19}$ ]]; then
+    CG_CUR=$((10#$v))
+  else
+    CG_ERR="$start/memory.current"
+    return 1
+  fi
+}
+
+# resolve_jobs: sets jobs, djobs, binding, cpus_s, mem_s, clamp_note, unreadable from the knobs and the host.
+jobs=1 djobs=1 binding=override cpus_s="n/a" mem_s="n/a" clamp_note="" unreadable=""
+resolve_jobs() {
+  local slots=1 hostq=0 nproc_raw probe_err="" cpus=0 usable=0 avail_eff headroom jb db mem_n j
+  if [ -n "${HOSTQ_JOB_ID+x}" ]; then
+    hostq=1
+    slots=2
+    if [ -n "${HOSTQ_SLOTS+x}" ]; then slots="$HOSTQ_SLOTS"; fi
+    if ! valid_int "$slots" 1 9999; then
+      jobs=1 djobs=1 binding=probe-failed unreadable=HOSTQ_SLOTS
+      return 0
+    fi
+  fi
+
+  # Probes (best effort; a failure only matters when an `auto` value needs them).
+  if [ "$nproc_set" -eq 1 ]; then
+    nproc_raw="$nproc_ov"
+    [[ "$nproc_raw" =~ ^[1-9][0-9]{0,5}$ ]] || { probe_err="PLATFORM_TEST_NPROC"; nproc_raw=""; }
+  else
+    nproc_raw="$(nproc 2> /dev/null)"
+    [[ "$nproc_raw" =~ ^[1-9][0-9]{0,5}$ ]] || { probe_err="nproc"; nproc_raw=""; }
+  fi
+  if [ -n "$nproc_raw" ]; then
+    cpus="$nproc_raw"
+    if [ "$hostq" -eq 1 ]; then
+      cpus=$((cpus / slots))
+      [ "$cpus" -lt 1 ] && cpus=1
+    fi
+    cpus_s="$cpus"
+  fi
+  if read_meminfo; then
+    avail_eff="$MI_AVAIL"
+    if cg_limit; then
+      if [ -n "$CG_LIMIT" ]; then
+        headroom=$(((CG_LIMIT - CG_CUR) / 1048576))
+        [ "$headroom" -lt 0 ] && headroom=0
+        [ "$headroom" -lt "$avail_eff" ] && avail_eff="$headroom"
+      fi
+      usable=$((MI_TOTAL * 70 / 100))
+      [ $((avail_eff * 90 / 100)) -lt "$usable" ] && usable=$((avail_eff * 90 / 100))
+      usable=$((usable - mem_reserve))
+      [ "$usable" -lt 0 ] && usable=0
+      mem_s="$usable"
+    else
+      [ -z "$probe_err" ] && probe_err="$CG_ERR"
+    fi
+  else
+    [ -z "$probe_err" ] && probe_err="$MI_ERR"
+  fi
+
+  # TEST_JOBS
+  if [ "$jobs_req" != auto ]; then
+    jobs="$jobs_req"
+    jb=override
+  elif [ "$nested" -eq 1 ]; then
+    jobs=1
+    jb=nested
+  elif [ -n "$probe_err" ]; then
+    jobs=1
+    jb=probe-failed
+  else
+    mem_n=$((usable / 256))
+    j="$cpus"
+    jb=cpu
+    [ "$hostq" -eq 1 ] && jb=hostq
+    if [ "$mem_n" -lt "$j" ]; then
+      j="$mem_n"
+      jb=memory
+    fi
+    [ "$j" -gt 32 ] && j=32
+    [ "$j" -lt 1 ] && j=1
+    jobs="$j"
+  fi
+  # TEST_DOCKER_JOBS
+  db=""
+  if [ "$djobs_req" != auto ]; then
+    djobs="$djobs_req"
+    if [ "$djobs" -gt "$jobs" ]; then
+      [ "$jobs_req" != auto ] && die "TEST_DOCKER_JOBS ($djobs) must not exceed TEST_JOBS ($jobs)"
+      clamp_note=" docker_clamped=$djobs->$jobs"
+      djobs="$jobs"
+    fi
+  elif [ "$nested" -eq 1 ]; then
+    djobs=1
+  elif [ -n "$probe_err" ]; then
+    djobs=1
+    db=probe-failed
+  else
+    j=$((usable / 1536))
+    [ "$jobs" -lt "$j" ] && j="$jobs"
+    [ "$j" -gt 3 ] && j=3
+    [ "$j" -lt 1 ] && j=1
+    djobs="$j"
+  fi
+  binding="$jb"
+  [ "$jobs_req" != auto ] && [ -n "$db" ] && binding="$db"
+  [ -n "$probe_err" ] && [ "$binding" = probe-failed ] && unreadable="$probe_err"
+  return 0
+}
+resolve_jobs
+mem_field="n/a"
+[ "$mem_s" != "n/a" ] && mem_field="${mem_s}MiB"
+echo "run.sh: jobs=$jobs docker_jobs=$djobs cpus=$cpus_s mem_usable=$mem_field binding=$binding files=${#files[@]}$clamp_note${unreadable:+ unreadable=$unreadable}"
+
 # us_to_secs <microseconds>: seconds with one decimal.
 us_to_secs() { printf '%d.%d' "$(($1 / 1000000))" "$(($1 % 1000000 / 100000))"; }
 # now_us: the clock in microseconds ($EPOCHREALTIME is "<s>.<us>").
@@ -117,7 +336,7 @@ queue=()
 for i in "${!files[@]}"; do [ "${classes[$i]}" != mocked ] && queue+=("$i"); done
 for i in "${!files[@]}"; do [ "${classes[$i]}" = mocked ] && queue+=("$i"); done
 
-declare -A r_sub r_start r_pgid r_termat r_killed r_timeout
+declare -A r_sub r_start r_pgid r_termat r_killed r_timeout r_held
 running=()
 fails=()
 timings=()
@@ -222,6 +441,15 @@ while [ "${#queue[@]}" -gt 0 ] || [ "${#running[@]}" -gt 0 ]; do
       i="${queue[$qi]}"
       cls="${classes[$i]}"
       if [ "$cls" != mocked ] && [ "$(count_class "$cls")" -ge "$djobs" ]; then continue; fi
+      # Admission: with something already running, hold a file the free memory cannot take. With nothing running it
+      # starts anyway, so a run cannot deadlock. An unreadable meminfo never holds.
+      if [ "${#running[@]}" -gt 0 ] && read_meminfo && [ "$MI_AVAIL" -lt $(($(class_weight "$cls") + mem_reserve)) ]; then
+        if [ -z "${r_held[$i]:-}" ]; then
+          r_held[$i]=1
+          echo "run.sh: memory low (${MI_AVAIL} MiB available), holding ${files[$i]}"
+        fi
+        continue
+      fi
       queue=("${queue[@]:0:$qi}" "${queue[@]:$((qi + 1))}")
       start_file "$i"
       started=1
