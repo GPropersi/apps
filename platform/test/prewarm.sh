@@ -75,7 +75,7 @@ pull_one() { # <ref>: pull unless present
 }
 
 prewarm_images() {
-  local errf ref refs
+  local errf ref refs pid pulls=() live=()
   errf="$work/images.err"
   if ! docker info > "$errf" 2>&1; then
     echo "prewarm: images rc=0 0.0s skipped, docker info failed: $(tr '\n' ' ' < "$errf" | cut -c 1-200)"
@@ -83,10 +83,19 @@ prewarm_images() {
   fi
   refs="$(image_refs 2> "$work/refs.err" | grep -v '[$]' | LC_ALL=C sort -u)"
   if [ -s "$work/refs.err" ]; then cat -- "$work/refs.err"; fi
-  # At most 3 pulls at a time.
+  # At most 3 pulls at a time. Count only the pull PIDs (not `jobs -rp`), so the background go prewarm never takes a slot.
   for ref in $refs; do
-    while [ "$(jobs -rp | wc -l)" -ge 3 ]; do wait -n; done
+    while :; do
+      live=()
+      for pid in "${pulls[@]}"; do
+        if kill -0 "$pid" 2> /dev/null; then live+=("$pid"); fi
+      done
+      pulls=("${live[@]}")
+      [ "${#pulls[@]}" -lt 3 ] && break
+      wait -n || true
+    done
     pull_one "$ref" &
+    pulls+=("$!")
   done
   wait
 }
