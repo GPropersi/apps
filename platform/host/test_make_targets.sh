@@ -11,10 +11,7 @@ here="$(cd "$(dirname "$0")" && pwd)"
 # shellcheck source=../test/lib.sh
 . "$here/../test/lib.sh"
 root="$(cd "$here/../.." && pwd)"
-# Scratch `make test*` runs start without the outer runner, hostq and knob variables.
-ENVU=(env -u PLATFORM_TEST_RUNNER -u HOSTQ_JOB_ID -u HOSTQ_SLOTS -u TEST_JOBS -u TEST_DOCKER_JOBS -u TEST_VERBOSE
-  -u TEST_LOG_DIR -u TEST_FILE_TIMEOUT -u PLATFORM_TEST_KILL_GRACE -u PLATFORM_TEST_NPROC -u PLATFORM_TEST_MEMINFO
-  -u PLATFORM_TEST_CGROUP_DIR -u PLATFORM_TEST_CGROUP_FILE -u PLATFORM_TEST_CGROUP_ROOT)
+# Scratch `make test*` runs use ENVU (from lib.sh), so they start without the outer runner, hostq and knob variables.
 
 t_init
 t_stub ssh 0

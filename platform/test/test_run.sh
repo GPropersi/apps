@@ -18,10 +18,7 @@ cp -- "$here/run.sh" "$S/platform/test/run.sh"
 R="$S/platform/test/run.sh"
 export C
 
-# Every scratch run starts from a clean slate of outer runner/hostq/knob variables; each case sets only what it needs.
-ENVU=(env -u PLATFORM_TEST_RUNNER -u HOSTQ_JOB_ID -u HOSTQ_SLOTS -u TEST_JOBS -u TEST_DOCKER_JOBS -u TEST_VERBOSE
-  -u TEST_LOG_DIR -u TEST_FILE_TIMEOUT -u PLATFORM_TEST_KILL_GRACE -u PLATFORM_TEST_NPROC -u PLATFORM_TEST_MEMINFO
-  -u PLATFORM_TEST_CGROUP_DIR -u PLATFORM_TEST_CGROUP_FILE -u PLATFORM_TEST_CGROUP_ROOT)
+# ENVU (from lib.sh) gives every scratch run a clean slate of outer runner/hostq/knob variables; each case sets only what it needs.
 
 # The probe records how many files (overall and of its class) run at this moment, then sleeps.
 cat > "$C/probe.sh" <<'EOF'

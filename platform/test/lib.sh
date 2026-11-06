@@ -19,6 +19,13 @@ if [ -z "${PLATFORM_TEST_SIGRESET:-}" ] && [ -f "$0" ]; then
   exec /usr/bin/env --default-signal=INT,HUP,QUIT "$BASH" "$0" "$@"
 fi
 
+# ENVU: prefix that unsets every runner knob, so an outer environment never leaks into a suite. Add a new knob here once.
+# Used as: run_cmd "${ENVU[@]}" [env VAR=val] cmd...
+# shellcheck disable=SC2034
+ENVU=(env -u PLATFORM_TEST_RUNNER -u HOSTQ_JOB_ID -u HOSTQ_SLOTS -u TEST_JOBS -u TEST_DOCKER_JOBS -u TEST_VERBOSE
+  -u TEST_LOG_DIR -u TEST_FILE_TIMEOUT -u PLATFORM_TEST_KILL_GRACE -u PLATFORM_TEST_NPROC -u PLATFORM_TEST_MEMINFO
+  -u PLATFORM_TEST_CGROUP_DIR -u PLATFORM_TEST_CGROUP_FILE -u PLATFORM_TEST_CGROUP_ROOT)
+
 passed=0
 failed=0
 rc=0
