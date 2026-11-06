@@ -278,6 +278,17 @@ expect_fail "cache/save with no condition at all" "$save_cond_pat"
 real_root; mut ci.yml "s#^(        if: github.event_name == 'push' && github.ref == 'refs/heads/main')\$#\1 || true#"; run_check
 expect_fail "cache/save widened with || true" "$save_cond_pat"
 
+# Alternate step shapes the awk parser must also read: `- if:` as the first key, `- uses:` first with if: after it, and a
+# `- uses:` save step at EOF (the last step of ci.yml) with no condition at all.
+real_root; mut ci.yml "/^      - name: Save Go cache\$/d; s#^        if: github.event_name == 'push' && github.ref == 'refs/heads/main'\$#      - if: github.event_name != 'pull_request'#"; run_check
+expect_fail "cache/save with '- if:' as the first key" "$save_cond_pat"
+
+real_root; mut ci.yml "/^      - name: Save Go cache\$/{N;N;s#^[^\\n]*\\n[^\\n]*\\n *uses: (.*)\$#      - uses: \\1\\n        if: github.event_name != 'pull_request'#}"; run_check
+expect_fail "cache/save with '- uses:' first and a widened if: after it" "$save_cond_pat"
+
+real_root; mut ci.yml "/^      - name: Save Go cache\$/{N;N;s#^[^\\n]*\\n[^\\n]*\\n *uses: (.*)\$#      - uses: \\1#}"; run_check
+expect_fail "a '- uses:' cache/save step at EOF with no condition" "$save_cond_pat"
+
 real_root; mut ci.yml "s#actions/cache/save@#actions/cache@#"; run_check
 expect_fail "the combined actions/cache action" "the combined actions/cache action is forbidden"
 
