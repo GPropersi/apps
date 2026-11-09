@@ -30,7 +30,8 @@ done
 platform_tests() { [ -d "$root/platform/$1" ] && (cd "$root" && find "platform/$1" -name 'test_*.sh'); return 0; }
 app_tests() { [ -d "$root/apps/$1" ] && (cd "$root" && find "apps/$1" -maxdepth 1 -name 'test_*.sh'); return 0; }
 all_apps_tests() { [ -d "$root/apps" ] && (cd "$root" && find apps -mindepth 2 -maxdepth 2 -name 'test_*.sh'); return 0; }
-all_tests() { platform_tests ""; all_apps_tests; }
+template_tests() { [ -d "$root/templates" ] && (cd "$root" && find templates -mindepth 2 -maxdepth 2 -name 'test_*.sh'); return 0; }
+all_tests() { platform_tests ""; all_apps_tests; template_tests; }
 
 fallback() {
   echo "select.sh: warning: $1; selecting every test" >&2
@@ -58,6 +59,7 @@ while IFS= read -r p; do
       none) ;;
       all) selected+="$(all_tests)"$'\n' ;;
       apps) selected+="$(all_apps_tests)"$'\n' ;;
+      templates) selected+="$(template_tests)"$'\n' ;;
       *)
         [ -d "$root/platform/$t" ] || fallback "areas.map names unknown area '$t' for '$p'"
         selected+="$(platform_tests "$t")"$'\n'

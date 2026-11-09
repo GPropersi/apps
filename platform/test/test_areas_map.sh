@@ -23,7 +23,7 @@ listed() {
 
 # check_map <map-file>: prints one violation per line, nothing when the map is sound.
 check_map() {
-  local map="$1" f area dep ref t
+  local map="$1" f area dep ref t i
   if ! am_load "$map"; then
     echo "map unusable: $AM_ERR"
     return 0
@@ -45,6 +45,25 @@ check_map() {
     done < <(grep -oE '\.\./[a-z][a-z0-9_-]*/' "$f" | sort -u)
   done < <(find "$root/platform" -mindepth 2 -name 'test_*.sh' | LC_ALL=C sort)
 
+  # 1a. A template test reading platform/<dep>/ needs dep's row to list templates.
+  while IFS= read -r f; do
+    while IFS= read -r ref; do
+      dep="${ref#platform/}"
+      dep="${dep%/}"
+      [ -d "$root/platform/$dep" ] || continue
+      if ! am_lookup "platform/$dep/x" || ! listed "$AM_RESULT" templates; then
+        echo "${f#"$root"/} reads platform/$dep/ but the row for platform/$dep/** does not list templates"
+      fi
+    done < <(grep -oE 'platform/[a-z][a-z0-9_-]*/' "$f" | sort -u)
+  done < <(find "$root/templates" -mindepth 2 -maxdepth 2 -name 'test_*.sh' 2> /dev/null | LC_ALL=C sort)
+
+  # 1b. Every row that lists scaffold also lists templates (the template tests read the same inputs as the scaffold tests).
+  for i in "${!AM_TARGETS[@]}"; do
+    if listed "${AM_TARGETS[$i]}" scaffold && ! listed "${AM_TARGETS[$i]}" templates; then
+      echo "row '${AM_GLOBS[$i]}' lists scaffold but not templates"
+    fi
+  done
+
   # 2. A platform/<dir> with any file needs a row of its own (not just the catch-all).
   for d in "$root"/platform/*/; do
     d="$(basename "$d")"
@@ -55,12 +74,11 @@ check_map() {
   done
 
   # 3. Every target names a platform/<area> directory or a keyword.
-  local i
   for i in "${!AM_TARGETS[@]}"; do
     IFS=, read -ra ts <<<"${AM_TARGETS[$i]}"
     for t in "${ts[@]}"; do
       case "$t" in
-        apps | none | all) ;;
+        apps | templates | none | all) ;;
         *) [ -d "$root/platform/$t" ] || echo "row '${AM_GLOBS[$i]}' names '$t', which is not a platform/ directory" ;;
       esac
     done
@@ -106,6 +124,24 @@ violations="$(check_map "$mutant")"
 case "$violations" in
   *"reads ../data/ but the row for platform/data/** does not list test"*) _pass ;;
   *) _fail "dropping test from the data row is caught" "got: $violations" ;;
+esac
+
+# Dropping templates from a row that lists scaffold is caught.
+sed -E 's#^(platform/lint/\*\*\t.*),templates$#\1#' "$real_map" > "$mutant"
+cmp -s "$real_map" "$mutant" && _fail "mutation 5 changed nothing" "sed did not match"
+violations="$(check_map "$mutant")"
+case "$violations" in
+  *"row 'platform/lint/**' lists scaffold but not templates"*) _pass ;;
+  *) _fail "dropping templates from a scaffold row is caught" "got: $violations" ;;
+esac
+
+# Dropping templates from a row a template test reads is caught (test_go.sh sources platform/jobs/go-env.sh).
+sed -E 's#^(platform/jobs/\*\*\t.*),templates(,.*)$#\1\2#' "$real_map" > "$mutant"
+cmp -s "$real_map" "$mutant" && _fail "mutation 6 changed nothing" "sed did not match"
+violations="$(check_map "$mutant")"
+case "$violations" in
+  *"reads platform/jobs/ but the row for platform/jobs/** does not list templates"*) _pass ;;
+  *) _fail "dropping templates from the jobs row is caught" "got: $violations" ;;
 esac
 
 # Removing a directory's row is caught.

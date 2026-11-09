@@ -6,7 +6,8 @@ order: `~/code/plans/apps/open/jobs-runner/jobs-runner.md`.
 
 This file covers the Go packages under `internal/`, the runner binary, the image and compose service, and the
 installer (`platform/host/install-jobs.sh`, `make host-jobs`). The app-side contract (`enqueue()`, `/_jobs`) is
-[`CONTRACT.md`](CONTRACT.md); `internal/contractdoc` tests it against the runner's constants.
+[`CONTRACT.md`](CONTRACT.md); `internal/contractdoc` tests it against the runner's constants. The Go helper for it
+(`JobsHandler`, `Enqueuer`) is `templates/go-react/internal/platform`, copied into each Go app by `make app-new`.
 
 ## Files
 

@@ -1,6 +1,7 @@
 # Jobs contract: `enqueue()` and `POST /_jobs/<name>`
 
-The language-neutral, normative spec that the Go, Python and Node helpers in `templates/` implement. The runner
+The language-neutral, normative spec that the Go, Python and Node helpers in `templates/` implement. The Go helper is
+`templates/go-react/internal/platform` (`JobsHandler`, `Enqueuer`, `VerifyJobs`), tested against section 5. The runner
 (`platform/jobs`) is the other side of every rule here. `internal/contractdoc/contractdoc_test.go` greps this file for
 the runner's constants, so a limit changed in code but not here fails `platform/jobs/test_go.sh`.
 
