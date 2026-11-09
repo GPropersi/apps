@@ -83,6 +83,7 @@ case "$1" in
   backup)
     find "$PLATFORM_BACKUP_ROOT/staging" -type f 2> /dev/null | sed "s#^$PLATFORM_BACKUP_ROOT/staging/##" | sort > "$CASE_DIR/staging-at-backup"
     stat -c %a "$PLATFORM_BACKUP_ROOT" "$PLATFORM_BACKUP_ROOT/staging" > "$CASE_DIR/staging-mode" 2> /dev/null
+    cp "$PLATFORM_BACKUP_ROOT/staging/volumes.tsv" "$CASE_DIR/staging-volumes-manifest" 2> /dev/null
     : > "$CASE_DIR/backup_ran"
     if [ -f "$CASE_DIR/adv_after_backup" ]; then cp "$CASE_DIR/adv_after_backup" "$CLK"; fi
     if [ ! -f "$CASE_DIR/no_summary" ]; then
@@ -137,8 +138,27 @@ case "$1" in
     exit 0
     ;;
   volume)
-    inject volumes
-    cat "$CASE_DIR/volumes"
+    case "$2" in
+      inspect)
+        # <name>'s mountpoint; $CASE_DIR/gone_<name> makes it a "No such volume" (rc 1), fail_inspect_<name> any other failure.
+        vn="${*: -1}"
+        inject "inspect_$vn"
+        if [ -f "$CASE_DIR/gone_$vn" ]; then echo "Error response from daemon: get $vn: no such volume" >&2; exit 1; fi
+        echo "/var/lib/docker/volumes/$vn/_data"
+        exit 0
+        ;;
+      ls)
+        # with --filter: the app volumes ("<name> <platform.app label>" lines of $CASE_DIR/app_volumes, none by default)
+        if [[ "$all" == *" --filter "* ]]; then
+          inject app_volumes
+          cat "$CASE_DIR/app_volumes" 2> /dev/null
+          exit 0
+        fi
+        inject volumes
+        cat "$CASE_DIR/volumes"
+        exit 0
+        ;;
+    esac
     exit 0
     ;;
   exec) ;;
@@ -865,9 +885,11 @@ expect_lt "order: pg_dumpall before the first pg_dump" "$l_all" "$l_d1"
 expect_lt "order: every pg_dump before restic backup" "$l_d2" "$l_rb"
 expect_lt "order: pg_dumpall before restic backup" "$l_all" "$l_rb"
 rl="$(grep -F 'restic backup' "$CALL_LOG")"
-for want in "$C/secrets" "$C/job-secrets" "$C/jobs-redis.pw" "$C/pg.pw" "$C/redis.pw" "$C/root/staging" "--exclude .*.lock" "--exclude .tmp.*" "--host platform" "--tag platform --tag nightly" "--json"; do
+for want in "$C/secrets" "$C/job-secrets" "$C/jobs-redis.pw" "$C/pg.pw" "$C/redis.pw" "$C/root/staging" "--exclude $C/secrets/**/.*.lock" "--exclude $C/secrets/**/.tmp.*" "--exclude $C/job-secrets/**/.*.lock" "--exclude $C/job-secrets/**/.tmp.*" "--exclude $C/root/staging/**/.*.lock" "--host platform" "--tag platform --tag nightly" "--json"; do
   expect_text_has "restic backup argv has: $want" "$rl" "$want"
 done
+expect_text_lacks "lock/temp excludes are anchored to the platform roots (a bare basename pattern would drop app volume files)" "$rl" "--exclude .*.lock"
+expect_text_lacks "no bare .tmp.* exclude either" "$rl" "--exclude .tmp.*"
 expect_calls_has "positive control: manual tag path not used on nightly" "--tag nightly"
 expect_calls_has "forget runs with the retention flags" "restic forget --prune --host platform --tag platform --group-by host --keep-daily 7 --keep-weekly 4 --keep-monthly 6"
 expect_calls_has "check runs" "restic check"
@@ -1162,8 +1184,8 @@ new_case
 export PLATFORM_BACKUP_DEADLINE_SECS=100
 printf '1100' > "$C/adv_after_cp"
 run_real 'main nightly'
-expect_rc "deadline reached before restic-backup" 1
-expect_eq "deadline: failed_phase=restic-backup" "$(state 5)" "restic-backup"
+expect_rc "deadline reached before the phases after redis" 1
+expect_eq "deadline: failed_phase=app-volumes (the first phase after redis)" "$(state 5)" "app-volumes"
 expect_out_has "deadline exceeded text" "deadline exceeded"
 expect_calls_has "positive control: the redis copy before it ran" "docker cp"
 expect_calls_lacks "deadline: restic backup never started" "restic backup"
@@ -1206,6 +1228,73 @@ printf '1' > "$C/fail_volumes"
 run_real 'main nightly'
 expect_rc "a failing volume listing is only a warning" 0
 expect_text_has "volume listing failure is warned" "$(payload)" "volume inventory failed"
+
+# 13i. App volumes: backed up by mountpoint, no longer a warn-only inventory
+new_case
+run_real 'main nightly'
+expect_rc "no app volumes: the run succeeds" 0
+expect_out_has "no app volumes: the phase ran" "phase=app-volumes-ls end rc=0"
+expect_out_has "no app volumes: the count is logged" "state app_volumes=0"
+expect_calls_lacks "no app volumes: nothing is inspected" "docker volume inspect"
+expect_present "no app volumes: the (empty) manifest is staged" "$C/staging-volumes-manifest"
+expect_absent_or_empty "no app volumes: the manifest is empty" "$C/staging-volumes-manifest"
+new_case
+printf 'app_alpha_files alpha\napp_alpha_cache alpha\napp_beta_data beta\n' > "$C/app_volumes"
+printf 'platform-data-postgres\nplatform-data-redis\napp_alpha_files\napp_alpha_cache\napp_beta_data\n' > "$C/volumes"
+run_real 'main nightly'
+expect_rc "app volumes: the run succeeds" 0
+expect_calls_has "app volumes: the listing filters on the platform.app label" "docker volume ls --filter label=platform.app"
+expect_calls_has "app volumes: each mountpoint comes from docker volume inspect" "docker volume inspect --format {{.Mountpoint}} app_alpha_files"
+expect_calls_has "app volumes: restic backs up the first mountpoint" "/var/lib/docker/volumes/app_alpha_files/_data"
+expect_calls_has "app volumes: restic backs up the second mountpoint" "/var/lib/docker/volumes/app_alpha_cache/_data"
+expect_calls_has "app volumes: the third volume too" "/var/lib/docker/volumes/app_beta_data/_data"
+expect_out_has "app volumes: the count is logged" "state app_volumes=3"
+expect_text_lacks "app volumes: backed-up volumes are not reported as not backed up" "$(payload)" "not backed up"
+expect_eq "app volumes: the manifest holds name, app and mountpoint" "$(grep -c "^app_alpha_files	alpha	/var/lib/docker/volumes/app_alpha_files/_data\$" "$C/staging-volumes-manifest")" "1"
+new_case
+printf 'app_alpha_files beta\nnotapp_x alpha\napp_Bad_x bad\napp_alpha_files\n' > "$C/app_volumes"
+printf 'platform-data-postgres\nplatform-data-redis\napp_alpha_files\n' > "$C/volumes"
+run_real 'main nightly'
+expect_rc "a mismatching label or name is skipped, not fatal" 0
+expect_out_has "mismatches are logged" "app-volumes: skipping"
+expect_calls_lacks "mismatching volumes are never inspected" "docker volume inspect"
+expect_out_has "mismatches count zero" "state app_volumes=0"
+expect_text_has "a mismatching volume is still reported as not backed up" "$(payload)" "not backed up: app_alpha_files"
+new_case
+printf 'app_alpha_files alpha\n' > "$C/app_volumes"
+printf '1' > "$C/fail_app_volumes"
+run_real 'main nightly'
+expect_rc "a failing app-volume listing fails the run" 1
+expect_eq "listing failure: failed_phase=app-volumes" "$(state 5)" "app-volumes"
+expect_text_has "listing failure: the failure notice goes to Discord" "$(payload)" "FAILED at phase app-volumes"
+expect_calls_lacks "listing failure: restic backup never ran" "restic backup"
+new_case
+printf 'app_alpha_files alpha\napp_alpha_cache alpha\n' > "$C/app_volumes"
+: > "$C/gone_app_alpha_files"
+run_real 'main nightly'
+expect_rc "a volume removed between listing and inspect is skipped" 0
+expect_out_has "the removed volume is logged" "app-volumes: app_alpha_files was removed before it could be inspected; skipped"
+expect_calls_has "the surviving volume is backed up" "/var/lib/docker/volumes/app_alpha_cache/_data"
+expect_calls_lacks "the removed volume is not on the restic line" "/var/lib/docker/volumes/app_alpha_files/_data"
+expect_out_has "only the surviving volume is counted" "state app_volumes=1"
+new_case
+printf 'app_alpha_files alpha\napp_alpha_cache alpha\n' > "$C/app_volumes"
+printf '1' > "$C/fail_inspect_app_alpha_files"
+run_real 'main nightly'
+expect_rc "any other inspect failure fails the run" 1
+expect_eq "inspect failure: failed_phase=app-volumes" "$(state 5)" "app-volumes"
+expect_calls_lacks "inspect failure: restic backup never ran" "restic backup"
+new_case
+printf 'app_alpha_files alpha\n' > "$C/app_volumes"
+: > "$C/gone_app_alpha_files"
+printf 'platform-data-postgres\nplatform-data-redis\napp_alpha_files\n' > "$C/volumes"
+run_real 'main nightly'
+expect_text_has "a removed volume that is still listed is reported not backed up" "$(payload)" "not backed up: app_alpha_files"
+
+# 13j. Retention keeps working across a changed path set: the forget grouping is by host only
+new_case
+run_real 'main nightly'
+expect_calls_has "forget keeps --group-by host" "restic forget --prune --host platform --tag platform --group-by host --keep-daily 7 --keep-weekly 4 --keep-monthly 6"
 
 # ---------------------------------------------------------------------------------------------------------------
 # 15. Drift between the backup defaults and the data stack (compose.yaml, install-data.sh): a rename on either side must
