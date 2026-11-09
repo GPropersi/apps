@@ -1,0 +1,6 @@
+**/node_modules
+web/dist
+internal/app/static
+test_*.sh
+Dockerfile
+.dockerignore

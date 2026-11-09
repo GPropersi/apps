@@ -32,8 +32,11 @@ for d in "$data_dir" "$jobs_dir" "$ingress_dir"; do
     case "$ref" in *'$'*) ;; *) printf '%s\n' "$ref" >> "$expected" ;; esac
   done
 done
-grep -h '^FROM ' "$jobs_dir/Dockerfile" "$jobs_dir/Dockerfile.testapp" | awk '{print $2}' >> "$expected"
+tmpl_dir="$here/../../templates/go-react"
+grep -h '^FROM ' "$jobs_dir/Dockerfile" "$jobs_dir/Dockerfile.testapp" "$tmpl_dir/Dockerfile" | awk '$2 != "web" {print $2}' >> "$expected"
 LC_ALL=C sort -u -o "$expected" "$expected"
+# The template's node and sqlc images are in the set (its FROM web is a stage alias, never an image).
+if grep -q '^node:' "$expected" && grep -q '^sqlc/sqlc:' "$expected"; then _pass; else _fail "the template's node and sqlc images are in the expected set" "got: $(cat "$expected")"; fi
 if [ "$(wc -l < "$expected")" -ge 5 ]; then _pass; else _fail "the expected image set was read" "got: $(cat "$expected")"; fi
 
 # --- A scratch tree with the real prewarm.sh, run.sh and the files prewarm reads ---
@@ -44,6 +47,8 @@ cp -- "$here/../lib/yaml-subset.sh" "$S/platform/lib/"
 cp -- "$data_dir/compose.yaml" "$S/platform/data/"
 cp -- "$ingress_dir/compose.yaml" "$S/platform/ingress/"
 cp -- "$jobs_dir/compose.yaml" "$jobs_dir/Dockerfile" "$jobs_dir/Dockerfile.testapp" "$jobs_dir/go-env.sh" "$jobs_dir/GO_VERSION" "$S/platform/jobs/"
+mkdir -p "$S/templates/go-react"
+cp -- "$tmpl_dir/Dockerfile" "$S/templates/go-react/"
 R="$S/platform/test/run.sh"
 
 PRESENT="$T_TMP/present"
