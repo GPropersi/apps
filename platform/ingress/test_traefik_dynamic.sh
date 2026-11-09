@@ -69,7 +69,8 @@ command -v curl >/dev/null 2>&1 || skip "curl is not installed"
 t_init
 
 # No run lock: with no Docker provider, Traefik sees only its own route files, so two copies of this test (each with
-# its own network, containers and route directory) cannot see each other.
+# its own network, containers and route directory) cannot see each other. Every platform.app label this test sets is a
+# valid app name, so a concurrent `platform ls` (the data live test) never meets a malformed row from here.
 
 rid="ingt-$$-$RANDOM"
 net="$rid-net"
@@ -81,7 +82,11 @@ aname="$rid-app"
 fname="$rid-fail503"
 gname="$rid-gone"
 dname="$rid-down"
-long_app="a-very-long-application-name-used-to-outrank-small-priorities"
+# The app name must be a valid platform app name (^[a-z][a-z0-9-]{1,30}$): `platform ls` fails closed on any
+# platform.app-labelled container with an invalid name, so an invalid one here would break any other test that runs
+# `platform ls` on this daemon at the same time. Length no longer matters: routes are files and the deny router has a
+# fixed maximum priority, so no rule length decides precedence. Long but valid keeps the hostname non-trivial.
+long_app="long-application-name-for-tests"
 apphost="$long_app.$fake_domain"
 
 cleanup() {
