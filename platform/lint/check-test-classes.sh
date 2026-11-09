@@ -6,7 +6,7 @@
 #
 # `platform/test/run.sh` reads a `# test-class: docker|heavy` marker from the first 10 lines of a test file to cap
 # real-container and CPU-heavy files separately; an unmarked file is mocked. Over every platform/**/test_*.sh and
-# apps/*/test_*.sh (comment lines ignored):
+# apps/*/test_*.sh and templates/*/test_*.sh (comment lines ignored):
 #   1. a file with a real-Docker or Go probe must carry a marker. The probes are `docker info` and `go test` (a whole
 #      word) at command position: line start, or after `!` `||` `&&` `;` `|` `(` `{` `$(` `then` `else` `do` `if`
 #      `elif` `while` `until`. Prose such as `check-go tests:` or `main.go testapp/` does not match;
@@ -65,6 +65,7 @@ files="$(
   {
     [ -d "$root/platform" ] && find "$root/platform" -type f -name 'test_*.sh'
     [ -d "$root/apps" ] && find "$root/apps" -mindepth 2 -maxdepth 2 -type f -name 'test_*.sh'
+    [ -d "$root/templates" ] && find "$root/templates" -mindepth 2 -maxdepth 2 -type f -name 'test_*.sh'
   } | sed "s|^$root/||" | sort
 )"
 

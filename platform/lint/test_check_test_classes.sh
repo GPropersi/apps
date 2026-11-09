@@ -125,6 +125,12 @@ if grep -q 'test_stub' <<< "$out"; then failed=$((failed + 1)); echo "FAIL: the 
 new_root; put apps/foo/test_app.sh "$hdr$d\n"; run_check
 expect_fail "an app test is scanned" "^apps/foo/test_app\\.sh: "
 
+# Template tests are scanned too, one level deep only (run.sh discovers templates/<name>/test_*.sh).
+new_root; put templates/foo/test_tpl.sh "$hdr$d\n"; run_check
+expect_fail "a template test is scanned" "^templates/foo/test_tpl\\.sh: "
+new_root; put templates/foo/sub/test_deep.sh "$hdr$d\n"; run_check
+expect_pass "a template test nested deeper is not scanned"
+
 # The Makefile lint recipe runs the check (deleting the line must fail this test).
 if grep -A8 '^lint:' "$repo/Makefile" | grep -q 'check-test-classes\.sh'; then
   passed=$((passed + 1))

@@ -130,6 +130,34 @@ expect_pass "uppercase AS keyword with a lowercase alias use"
 new_root; mkdir -p "$root/apps/loose"; printf 'name: loose\n' > "$root/apps/loose/app.yaml"; run_check
 expect_pass "untracked app is ignored"
 
+# Access scope of template go-react: only an absent access key or `family` passes.
+set_yaml() { # <app> <extra lines...>: app.yaml = name + template go-react + the extra lines
+  local app="$1"
+  shift
+  { printf 'name: %s\ntemplate: go-react\n' "$app"; printf '%s\n' "$@"; } > "$root/apps/$app/app.yaml"
+  git -C "$root" add -A
+}
+new_root; add_app gr "$good"; set_yaml gr; run_check
+expect_pass "go-react app without access passes"
+
+new_root; add_app gr "$good"; set_yaml gr "access: family"; run_check
+expect_pass "go-react app with access family passes"
+
+new_root; add_app gr "$good"; set_yaml gr "access: public"; run_check
+expect_fail "go-react app with access public" "^apps/gr/app\\.yaml: access 'public' is not supported by template go-react"
+
+new_root; add_app gr "$good"; set_yaml gr "access: restricted"; run_check
+expect_fail "go-react app with access restricted" "^apps/gr/app\\.yaml: access 'restricted' is not supported by template go-react"
+
+new_root; add_app gr "$good"; set_yaml gr "access: \"public\""; run_check
+expect_fail "a quoted access value is read too" "access 'public' is not supported"
+
+new_root; add_app gr "$good"; set_yaml gr "access:"; run_check
+expect_fail "an empty access value fails closed" "access '' is not supported"
+
+new_root; add_app other "$good"; printf 'name: other\ntemplate: go-htmx\naccess: public\n' > "$root/apps/other/app.yaml"; git -C "$root" add -A; run_check
+expect_pass "access is only restricted for template go-react"
+
 # CLI behaviour.
 rc=0; out="$("$check" --bogus 2>&1)" || rc=$?
 if [ "$rc" -eq 2 ]; then passed=$((passed + 1)); else failed=$((failed + 1)); echo "FAIL: unknown argument exits 2 (rc=$rc)"; fi
