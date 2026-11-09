@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # install-ingress.sh: install, check and live-test the ingress stack on the app host (run yourself, not Claude).
 #
-# The stack (cloudflared, Traefik behind a read-only Docker socket proxy, the "app is down" page) is described by
+# The stack (cloudflared, Traefik routing from files only, the "app is down" page) is described by
 # platform/ingress/compose.yaml and platform/ingress/dynamic.yml. It runs as the Compose project platform-ingress
 # from /opt/platform/ingress and joins the `platform` Docker network, which this script creates if absent (bridge,
 # IPv6 off, default br- bridge name). No port is published and no firewall rule is touched.
@@ -9,10 +9,13 @@
 # Host-side inputs (you create them; the installer never writes secrets and never edits /etc/group):
 #   /etc/platform/cloudflared.token   the tunnel token: regular file, owner root, group gid 64321, mode exactly 0640
 #   /etc/platform/ingress.env         PLATFORM_DOMAIN=<your domain>: root-owned, not group/world writable
+#   /etc/platform/access.env          ACCESS_TEAM_DOMAIN= and ACCESS_AUD= (read by platform deploy): checked by status/verify
+#   the `deploy` group (install-deploy-user.sh creates it): the dynamic/ directory is root:deploy 1775 so the deploy user
+#   can write its own app-<app>.yml route files but cannot replace or delete root's dynamic.yml
 #   a group with gid 64321 that has no members, is no account's primary group and is not the Docker socket's group
 #   (cloudflared gets that gid through group_add in compose.yaml and so can read the token; nobody else can)
-# The Docker socket's group id is derived here with stat (never a docker call) and stored in
-# /opt/platform/ingress/docker-gid.env, which is passed to Compose as a second --env-file.
+# Traefik has no Docker provider and no Docker socket: routes come only from files in the dynamic/ directory. The
+# Docker socket's group id is still read with stat (never a docker call), only to refuse a token group that equals it.
 #
 # The three payload files (compose.yaml, dynamic.yml, down-page/index.html) are embedded below
 # (BEGIN-PAYLOAD/END-PAYLOAD) because the host has no checkout: `platform/lint/embed-payloads.sh` regenerates them
@@ -20,15 +23,17 @@
 #
 # Usage: install-ingress.sh [install|status|verify] [--host ALIAS]
 #        install-ingress.sh verify --live [--hold] --host ALIAS
-#   install   checks every precondition first (token file, domain, Docker socket, token group) and runs no docker
-#             command until they all pass; then places the files root-owned under /opt/platform/ingress, creates the
-#             network, brings the stack up and waits (bounded) for every container to be healthy. Idempotent: a second
-#             run with unchanged inputs reports "already:" for every item and makes no mutating docker call.
+#   install   checks every precondition first (token file, domain, token group) and runs no docker
+#             command until they all pass; then places the files root-owned under /opt/platform/ingress, removes the
+#             retired ingress-proxy network and docker-gid.env if present, creates the network, brings the stack up
+#             (--remove-orphans drops a live socket-proxy container) and waits (bounded) for every container to be
+#             healthy. Idempotent: a second run with unchanged inputs reports "already:" for every item and makes no
+#             mutating docker call.
 #   status    report every check (PASS/FAIL), exit 0
 #   verify    the same checks, exit 1 on any FAIL
 #   verify --live   client-driven end-to-end probe set; nothing is created without this flag. Over ssh (sudo docker)
-#             it starts four disposable, hardened containers (a labelled test app, an unlabelled sibling, a curl client,
-#             and a hostile app whose own traefik.* labels compete with the /_jobs deny, which must still answer 503),
+#             it starts four disposable, hardened containers (a test app with a route file, an unrouted sibling, a curl
+#             client, and a hostile app that carries traefik.* labels but no route file and so must not be routed),
 #             sends every probe straight to traefik:80 from the curl client and ALWAYS removes the containers (EXIT
 #             plus INT/TERM/HUP traps). It refuses to run when a container named ingress-livetest* or labelled
 #             platform.app=ingress-livetest already exists. The per-variant /_jobs codes are read from the
@@ -47,7 +52,7 @@
 # privilege prefix; "sudo -n" by default, none when already root), INSTALL_INGRESS_SOCKET (the Docker socket path),
 # INSTALL_INGRESS_HEALTH_TIMEOUT / INSTALL_INGRESS_POLL (seconds), INSTALL_INGRESS_LIVE_LOCAL (run the live docker
 # commands locally instead of over ssh), INSTALL_INGRESS_LIVE_SLEEP, INSTALL_INGRESS_HOLD_TTY,
-# INSTALL_INGRESS_HOLD_TIMEOUT. The docker, stat and getent commands are the ones on PATH, so a test puts stubs there.
+# INSTALL_INGRESS_HOLD_TIMEOUT, INSTALL_INGRESS_AS_DEPLOY (the prefix that runs a command as the deploy user). The docker, stat and getent commands are the ones on PATH, so a test puts stubs there.
 set -euo pipefail
 
 export LC_ALL=C
@@ -60,10 +65,17 @@ readonly TOKEN_GID=64321
 readonly INSTALL_DIR="/opt/platform/ingress"
 readonly ENV_FILE="/etc/platform/ingress.env"
 readonly TOKEN_FILE="/etc/platform/cloudflared.token"
+readonly ACCESS_FILE="/etc/platform/access.env"
 readonly GID_FILE="/opt/platform/ingress/docker-gid.env"
+# The old compose file declared the network without a name:, so compose created it as <project>_<key>.
+readonly OLD_NETWORK_BARE="ingress-proxy"
+readonly OLD_NETWORK="platform-ingress_ingress-proxy"
+readonly DEPLOY_GROUP="deploy"
+readonly TEAM_RE='^[a-z0-9-]+\.cloudflareaccess\.com$'
+readonly AUD_RE='^[0-9a-f]{64}$'
 readonly PROJECT="platform-ingress"
 readonly NETWORK="platform"
-readonly SERVICES=(cloudflared traefik socket-proxy down-page)
+readonly SERVICES=(cloudflared traefik down-page)
 readonly EDGE_NAME="region1.v2.argotunnel.com"
 readonly DOMAIN_RE='^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]([a-z0-9-]{0,61}[a-z0-9])?$'
 ROOT="${INSTALL_INGRESS_ROOT:-}"
@@ -79,6 +91,14 @@ else
   SUDO=(sudo -n)
 fi
 
+# The prefix that runs a command as the deploy user (tests substitute a stub through INSTALL_INGRESS_AS_DEPLOY).
+if [ -n "${INSTALL_INGRESS_AS_DEPLOY+set}" ]; then
+  read -r -a AS_DEPLOY <<<"$INSTALL_INGRESS_AS_DEPLOY"
+else
+  AS_DEPLOY=(sudo -n -u "$DEPLOY_GROUP")
+fi
+
+PERM_CTX=local
 FAILURES=0
 CHANGED=0
 TMP=""
@@ -112,18 +132,19 @@ payload_compose_yaml() {
 # Ingress stack: the single front door of the app host (no published ports; traffic arrives over the tunnel).
 #
 #   cloudflared  -> traefik -> app containers on the `platform` network
-#   traefik      -> socket-proxy (read-only, allowlisted Docker API) on the internal `ingress-proxy` network
+#   traefik      -> reads routes from files only (no Docker access of any kind)
 #   down-page    -> supplies the friendly "app is down" body that the errors middleware shows
 #
-# Host-side inputs (never written here): PLATFORM_DOMAIN (the env file), DOCKER_GID (derived by the installer
-# from the Docker socket's group), the tunnel token file mounted into cloudflared.
+# Host-side inputs (never written here): PLATFORM_DOMAIN (the env file), the tunnel token file mounted into
+# cloudflared.
 #
 # Rules this file keeps (platform/ingress/test_ingress_stack.sh enforces them):
 # - It stays inside a small YAML subset (block style only) so the tests can read it without a YAML library.
 # - Traefik is configured ONLY through TRAEFIK_* environment variables, and has no `command:`. Traefik ignores
 #   its environment as soon as any command-line flag is present, and `traefik healthcheck` (no --ping flag) reads
 #   the same environment, so the server and its healthcheck cannot drift apart.
-# - Apps carry the single label platform.app=<name> and no traefik.* labels. No service in this file has it.
+# - Apps carry the single label platform.app=<name> (for `platform ls` and scoping, not routing). No service in this
+#   file has it. Routes live in app-<app>.yml files in the dynamic directory.
 # - Every service drops all capabilities, cannot gain privileges, has a memory limit and restarts unless stopped.
 name: platform-ingress
 
@@ -187,12 +208,8 @@ services:
       TRAEFIK_PING: "true"
       TRAEFIK_PING_ENTRYPOINT: ping
       TRAEFIK_ENTRYPOINTS_PING_ADDRESS: 127.0.0.1:8082
-      # Routing comes from the single platform.app label: only labelled containers become routers.
-      TRAEFIK_PROVIDERS_DOCKER_ENDPOINT: tcp://socket-proxy:2375
-      TRAEFIK_PROVIDERS_DOCKER_NETWORK: platform
-      TRAEFIK_PROVIDERS_DOCKER_EXPOSEDBYDEFAULT: "true"
-      TRAEFIK_PROVIDERS_DOCKER_CONSTRAINTS: LabelRegex(`platform.app`, `.+`)
-      TRAEFIK_PROVIDERS_DOCKER_DEFAULTRULE: Host(`{{ index .Labels "platform.app" }}.${PLATFORM_DOMAIN}`)
+      # Routing comes only from files: dynamic.yml plus one app-<app>.yml per app, written by platform deploy.
+      # There is no Docker provider, so Traefik has no Docker API access and cannot read any container's environment.
       TRAEFIK_PROVIDERS_FILE_DIRECTORY: /etc/traefik/dynamic
       TRAEFIK_PROVIDERS_FILE_WATCH: "true"
       # Access log: JSON on stdout, no query strings, no headers except the client address Cloudflare sets.
@@ -206,7 +223,6 @@ services:
     user: "65532:65532"
     networks:
       - platform
-      - ingress-proxy
     restart: unless-stopped
     mem_limit: 256m
     cap_drop:
@@ -223,41 +239,6 @@ services:
       timeout: 5s
       retries: 3
       start_period: 10s
-
-  socket-proxy:
-    image: docker.io/wollomatic/socket-proxy:1.13.1@sha256:3935b709275e4ec35d6ed5a5c4a1f0d01ed31eec5e7234efc3357ecd47689002
-    # GET on /version, /containers/json, /containers/<id>/json and /events, HEAD on /_ping, each with an
-    # optional API version prefix (v and a number pair); every other method and path is denied. $$ is a literal $
-    # for Compose.
-    command:
-      - -listenip=0.0.0.0
-      - -allowfrom=traefik
-      - -allowGET=^(/v[0-9]+\.[0-9]+)?/(version|containers/json|containers/[a-zA-Z0-9]+/json|events)$$
-      - -allowHEAD=^(/v[0-9]+\.[0-9]+)?/_ping$$
-      - -allowhealthcheck
-      - -watchdoginterval=10
-    volumes:
-      - /var/run/docker.sock:/var/run/docker.sock:ro
-    user: "65534:65534"
-    group_add:
-      - "${DOCKER_GID}"
-    networks:
-      - ingress-proxy
-    restart: unless-stopped
-    mem_limit: 64m
-    cap_drop:
-      - ALL
-    security_opt:
-      - no-new-privileges:true
-    read_only: true
-    healthcheck:
-      test:
-        - CMD
-        - /healthcheck
-      interval: 15s
-      timeout: 5s
-      retries: 3
-      start_period: 5s
 
   down-page:
     image: docker.io/library/busybox:1.37.0@sha256:bdf57e528e45e4433820e045b29b4597825a1c9e38353532d90a01445013f82e
@@ -295,8 +276,6 @@ services:
 networks:
   platform:
     external: true
-  ingress-proxy:
-    internal: true
 PLATFORM_PAYLOAD_EOF
 }
 # END-PAYLOAD platform/ingress/compose.yaml
@@ -453,12 +432,135 @@ chk_env_file() {
   fi
 }
 
-chk_socket() {
-  local gid
-  if [ ! -e "$SOCKET" ]; then echo "Docker socket missing: $SOCKET"; return 0; fi
-  gid="$(socket_gid)" || { echo "cannot stat the Docker socket"; return 0; }
-  [[ "$gid" =~ ^[0-9]+$ ]] || { echo "Docker socket group is not numeric ('$gid')"; return 0; }
-  [ "$gid" -ne 0 ] || echo "Docker socket group is root (gid 0); refusing to grant it to the socket proxy"
+# access_value <key>: the lines KEY=VALUE of the access env file, values only, one per line.
+# shellcheck disable=SC2329 # invoked by name
+access_values() {
+  priv grep "^$1=" -- "$ROOT$ACCESS_FILE" | sed "s/^$1=//" || true
+}
+
+# chk_access_file: the same file rules as chk_env_file, plus exactly one valid ACCESS_TEAM_DOMAIN and ACCESS_AUD. Never
+# prints a value.
+# shellcheck disable=SC2329 # invoked by name through run_check
+chk_access_file() {
+  local p="$ROOT$ACCESS_FILE" meta mode g o vals
+  if ! priv test -e "$p"; then echo "access env file missing: $ACCESS_FILE (see platform/ingress/README.md, Host files you create by hand)"; return 0; fi
+  if priv test -L "$p"; then echo "access env file is a symlink: $ACCESS_FILE"; return 0; fi
+  if ! priv test -f "$p"; then echo "access env file is not a regular file: $ACCESS_FILE"; return 0; fi
+  meta="$(priv stat -c '%u:%g %a' -- "$p")" || { echo "cannot stat the access env file"; return 0; }
+  mode="${meta##* }"
+  if [ "${meta%%:*}" != "0" ]; then echo "access env file is not owned by root (uid:gid/mode '$meta')"; fi
+  if [[ "$mode" =~ ^[0-7]{3,4}$ ]]; then
+    g="${mode: -2:1}"
+    o="${mode: -1}"
+    if [ $((g & 2)) -ne 0 ] || [ $((o & 2)) -ne 0 ]; then echo "access env file is group or world writable (mode $mode)"; fi
+  else
+    echo "access env file mode is not octal ('$mode')"
+  fi
+  vals="$(access_values ACCESS_TEAM_DOMAIN)"
+  if [ -z "$vals" ] || [ "$(wc -l <<<"$vals")" -ne 1 ] || ! [[ "$vals" =~ $TEAM_RE ]]; then
+    echo "access env file must hold exactly one valid ACCESS_TEAM_DOMAIN= line (<team>.cloudflareaccess.com)"
+  fi
+  vals="$(access_values ACCESS_AUD)"
+  if [ -z "$vals" ] || [ "$(wc -l <<<"$vals")" -ne 1 ] || ! [[ "$vals" =~ $AUD_RE ]]; then
+    echo "access env file must hold exactly one valid ACCESS_AUD= line (64 lowercase hex characters)"
+  fi
+}
+
+# deploy_gid: prints the numeric gid of the deploy group; returns 1 when it does not exist.
+deploy_gid() {
+  local entry gid
+  entry="$(getent group "$DEPLOY_GROUP" || true)"
+  [ -n "$entry" ] || return 1
+  IFS=: read -r _ _ gid _ <<<"$entry"
+  [[ "$gid" =~ ^[0-9]+$ ]] || return 1
+  printf '%s\n' "$gid"
+}
+
+# perm_run <root|deploy> <cmd...>: run a command for the dynamic-directory probe, as root or as the deploy user, locally
+# (PERM_CTX=local) or on the host over ssh (PERM_CTX=live).
+# shellcheck disable=SC2329 # invoked by name
+perm_run() {
+  local who="$1"
+  shift
+  if [ "$who" = deploy ]; then set -- "${AS_DEPLOY[@]}" "$@"; fi
+  if [ "$PERM_CTX" = live ]; then live_run "$@"; else priv "$@"; fi
+}
+
+# chk_deploy_dir: the sticky-directory property, proved as the deploy user (a second uid; mocks cannot): it creates and
+# deletes its own app-<probe>.yml, and cannot replace or delete root's dynamic.yml, which must be unchanged afterwards.
+# shellcheck disable=SC2329 # invoked by name through run_check
+chk_deploy_dir() {
+  local d="$ROOT$INSTALL_DIR/dynamic" probe before after meta
+  probe="$d/app-zz-perm-probe-$$.yml"
+  before="$(perm_run root cat -- "$d/dynamic.yml" 2>/dev/null)" || { echo "cannot read $d/dynamic.yml to probe the deploy user's permissions"; return 0; }
+  if ! perm_run deploy touch -- "$probe" >/dev/null 2>&1; then
+    echo "the deploy user cannot create a route file in $d (operation: create)"
+    return 0
+  fi
+  # The replace/delete attempts touch the live dynamic.yml, so they run only when the directory is already root-owned
+  # and sticky (1775); a misconfigured directory is reported by check_owned, never risked here.
+  meta="$(perm_run root stat -c '%u:%g %a' -- "$d" 2>/dev/null)" || meta=""
+  if [ "${meta%%:*}" = "0" ] && [ "${meta##* }" = "1775" ]; then
+    if perm_run deploy mv -f -- "$probe" "$d/dynamic.yml" >/dev/null 2>&1; then
+      echo "the deploy user could replace dynamic.yml (operation: mv over it succeeded)"
+    fi
+    if perm_run deploy rm -f -- "$d/dynamic.yml" >/dev/null 2>&1; then
+      echo "the deploy user could delete dynamic.yml (operation: rm succeeded)"
+    fi
+  else
+    echo "skipped the replace/delete probes of dynamic.yml: the dynamic directory is not root-owned and sticky (1775)"
+  fi
+  if ! perm_run deploy rm -f -- "$probe" >/dev/null 2>&1; then
+    echo "the deploy user cannot delete its own route file (operation: delete)"
+    perm_run root rm -f -- "$probe" >/dev/null 2>&1 || true
+  fi
+  after="$(perm_run root cat -- "$d/dynamic.yml" 2>/dev/null)" || after="<unreadable>"
+  if [ "$after" != "$before" ]; then
+    echo "dynamic.yml changed while probing as the deploy user"
+    # Restore as root from the captured content: temp file, then rename, mode 0644 root:root.
+    # shellcheck disable=SC2016 # the $1..$3 expand in the inner sh, by design
+    if perm_run root sh -c 'printf "%s\n" "$1" > "$2" && chmod 644 "$2" && chown root:root "$2" && mv -f "$2" "$3"' _ "$before" "$d/.zz-perm-restore-$$" "$d/dynamic.yml" >/dev/null 2>&1; then
+      echo "dynamic.yml was restored from its content before the probe"
+    else
+      perm_run root rm -f -- "$d/.zz-perm-restore-$$" >/dev/null 2>&1 || true
+      echo "dynamic.yml could NOT be restored; reinstall it with install-ingress install"
+    fi
+  fi
+}
+
+# chk_dynamic_files: the deploy login can create any file in dynamic/, so every file but root's dynamic.yml must be named
+# app-<valid-name>.yml and have exactly the shape platform/deploy/deploy.sh renders (render_route): no priority, middlewares
+# or other key, only that app's own router and service. Prints one line per problem; never a file's content.
+# shellcheck disable=SC2329 # invoked by name through run_check
+chk_dynamic_files() {
+  local d="$ROOT$INSTALL_DIR/dynamic" names f app body line ln
+  local name_re='^app-([a-z][a-z0-9-]{1,30})\.yml$'
+  local dom='[a-z0-9-]+(\.[a-z0-9-]+)+'
+  names="$(perm_run root find "$d" -mindepth 1 -maxdepth 1 -printf '%f\n' 2>/dev/null)" || { echo "cannot list $d"; return 0; }
+  while IFS= read -r f; do
+    [ -n "$f" ] && [ "$f" != "dynamic.yml" ] || continue
+    if ! [[ "$f" =~ $name_re ]]; then
+      echo "unexpected file in the dynamic directory: '$f' is not dynamic.yml or app-<valid-name>.yml"
+      continue
+    fi
+    app="${BASH_REMATCH[1]}"
+    body="$(perm_run root cat -- "$d/$f" 2>/dev/null)" || { echo "cannot read $f in the dynamic directory"; continue; }
+    ln=0
+    while IFS= read -r line || [ -n "$line" ]; do
+      ln=$((ln + 1))
+      case "$line" in
+        "# Generated by platform deploy for $app. Do not edit; removed by platform rm-db.") [ "$ln" -eq 1 ] && continue ;;
+        "http:" | "  routers:" | "    app-$app:" | "      entryPoints: [web]" | "      service: app-$app" | \
+          "  services:" | "      loadBalancer:" | "        servers:") continue ;;
+      esac
+      # shellcheck disable=SC2016 # the backticks are literal Traefik rule quoting
+      if [[ "$line" =~ ^\ \ \ \ \ \ rule:\ Host\(\`$app\.$dom\`\)$ || "$line" =~ ^\ \ \ \ \ \ \ \ \ \ -\ url:\ http://$app:[0-9]{1,5}$ ]]; then
+        continue
+      fi
+      echo "$f line $ln is not part of the shape platform deploy renders (a route file may only hold the app's own router and service)"
+      break
+    done <<<"$body"
+  done <<<"$names"
 }
 
 chk_token_group() {
@@ -524,16 +626,17 @@ place_file() {
   CHANGED=1
 }
 
+# place_dir <dir> <mode> [gid]: a root-owned directory; the group is gid (default 0).
 place_dir() {
-  local dir="$1" mode="$2"
-  if [ -d "$dir" ] && [ ! -L "$dir" ] && [ "$(file_meta "$dir")" = "0:0 $mode" ]; then
+  local dir="$1" mode="$2" gid="${3:-0}"
+  if [ -d "$dir" ] && [ ! -L "$dir" ] && [ "$(file_meta "$dir")" = "0:$gid $mode" ]; then
     info "already: $dir/"
     return 0
   fi
   # A symlink in place of the directory is removed (the link only, never its target) and replaced by a real directory.
   if [ -L "$dir" ]; then priv rm -f -- "$dir"; fi
   priv mkdir -p -- "$dir"
-  priv chown root:root "$dir"
+  priv chown "root:$gid" "$dir"
   priv chmod "$mode" "$dir"
   info "changed: $dir/"
   CHANGED=1
@@ -542,7 +645,45 @@ place_dir() {
 # ---- compose helpers ----
 
 compose() {
-  dk compose -p "$PROJECT" -f "$ROOT$INSTALL_DIR/compose.yaml" --env-file "$ROOT$ENV_FILE" --env-file "$ROOT$GID_FILE" "$@"
+  dk compose -p "$PROJECT" -f "$ROOT$INSTALL_DIR/compose.yaml" --env-file "$ROOT$ENV_FILE" "$@"
+}
+
+# legacy_containers: ids of any leftover socket-proxy container of this project (retired in favour of file routes).
+legacy_containers() {
+  dk ps -a -q --filter "label=com.docker.compose.project=$PROJECT" --filter "label=com.docker.compose.service=socket-proxy"
+}
+
+# legacy_network_exists: true when the retired ingress-proxy network is still present.
+legacy_networks() {
+  local names
+  names="$(dk network ls --filter "name=${OLD_NETWORK_BARE}" --format '{{.Name}}')" || return 2
+  grep -xF -e "$OLD_NETWORK" -e "$OLD_NETWORK_BARE" <<<"$names" || true
+}
+
+# retire_gid_file: remove the retired docker-gid.env (idempotent, logged).
+retire_gid_file() {
+  if [ -e "$ROOT$GID_FILE" ] || [ -L "$ROOT$GID_FILE" ]; then
+    priv rm -f -- "$ROOT$GID_FILE"
+    info "changed: removed retired $GID_FILE"
+    CHANGED=1
+  else
+    info "already: no $GID_FILE"
+  fi
+}
+
+# retire_old_network: remove the retired ingress-proxy network once the socket-proxy container is gone.
+retire_old_network() {
+  local found n
+  found="$(legacy_networks)" || die "cannot list docker networks to look for the retired $OLD_NETWORK network"
+  if [ -n "$found" ]; then
+    while IFS= read -r n; do
+      dk network rm "$n" >/dev/null || die "could not remove the retired $n network (is a container still attached?)"
+      info "changed: removed retired network $n"
+    done <<<"$found"
+    CHANGED=1
+  else
+    info "already: no $OLD_NETWORK network"
+  fi
 }
 
 # stack_ps: one "<name>|<service>|<state>|<health>" line per container of the project.
@@ -601,51 +742,55 @@ wait_healthy() {
 # ---- install ----
 
 do_install() {
-  local problems line gid ps
+  local problems line ps dgid legacy
   require_privilege
   TMP="$(mktemp -d)"
 
-  problems="$(chk_token_file; chk_env_file; chk_socket; chk_token_group)"
+  problems="$(chk_token_file; chk_env_file; chk_token_group)"
   if [ -n "$problems" ]; then
     while IFS= read -r line; do err "install-ingress: $line"; done <<<"$problems"
     print_instructions
     die "preconditions failed; nothing was installed and no docker command was run"
   fi
-  gid="$(socket_gid)"
+  dgid="$(deploy_gid)" || die "the $DEPLOY_GROUP group does not exist; run \`make host-deploy-user HOST=<alias> ARGS=\"install --pubkey-file PATH\"\` first. Nothing was installed and no docker command was run"
 
   payload_compose_yaml > "$TMP/compose.yaml"
   payload_dynamic_yml > "$TMP/dynamic.yml"
   payload_index_html > "$TMP/index.html"
-  printf 'DOCKER_GID=%s\n' "$gid" > "$TMP/docker-gid.env"
 
   place_dir "$ROOT$INSTALL_DIR" 755
-  place_dir "$ROOT$INSTALL_DIR/dynamic" 755
+  place_dir "$ROOT$INSTALL_DIR/dynamic" 1775 "$dgid"
   place_dir "$ROOT$INSTALL_DIR/down-page" 755
   place_file "$TMP/compose.yaml" "$ROOT$INSTALL_DIR/compose.yaml" 644
   place_file "$TMP/dynamic.yml" "$ROOT$INSTALL_DIR/dynamic/dynamic.yml" 644
   place_file "$TMP/index.html" "$ROOT$INSTALL_DIR/down-page/index.html" 644
-  place_file "$TMP/docker-gid.env" "$ROOT$GID_FILE" 644
+  retire_gid_file
   ensure_network
 
   ps="$(stack_ps 2>/dev/null)" || ps=""
-  if [ "$CHANGED" -eq 1 ] || [ -n "$(stack_problems "$ps" run)" ]; then
+  legacy="$(legacy_containers)" || die "cannot list docker containers to look for a retired socket-proxy container"
+  if [ "$CHANGED" -eq 1 ] || [ -n "$legacy" ] || [ -n "$(stack_problems "$ps" run)" ]; then
     compose up -d --remove-orphans || die "docker compose up failed"
     info "changed: stack started"
   else
     info "already: stack running"
   fi
+  legacy="$(legacy_containers)" || die "cannot list docker containers to look for a retired socket-proxy container"
+  [ -z "$legacy" ] || die "a socket-proxy container still exists after compose up --remove-orphans: remove it by hand (docker rm -f $legacy)"
+  retire_old_network
   wait_healthy
   info "install-ingress: done"
 }
 
 # ---- status / verify ----
 
+# check_owned <label> <path> <mode> [gid]: root-owned, group gid (default 0), exactly this mode.
 check_owned() {
-  local label="$1" path="$2" mode="$3" meta
+  local label="$1" path="$2" mode="$3" gid="${4:-0}" meta
   if [ ! -e "$path" ]; then fail "$label missing: $path"; return 1; fi
   if [ -L "$path" ]; then fail "$label is a symlink: $path"; return 1; fi
   meta="$(file_meta "$path")"
-  if [ "$meta" = "0:0 $mode" ]; then pass "$label owner/mode ($meta)"; else fail "$label uid:gid/mode is '$meta', want '0:0 $mode'"; return 1; fi
+  if [ "$meta" = "0:$gid $mode" ]; then pass "$label owner/mode ($meta)"; else fail "$label uid:gid/mode is '$meta', want '0:$gid $mode'"; return 1; fi
 }
 
 check_payload() {
@@ -665,11 +810,19 @@ run_check() {
 }
 
 # shellcheck disable=SC2329 # invoked by name through run_check
-chk_stored_gid() {
-  local cur
-  if [ ! -f "$ROOT$GID_FILE" ]; then echo "stored DOCKER_GID file missing: $GID_FILE"; return 0; fi
-  cur="$(socket_gid 2>/dev/null)" || { echo "cannot read the Docker socket group"; return 0; }
-  [ "$(cat -- "$ROOT$GID_FILE")" = "DOCKER_GID=$cur" ] || echo "stored DOCKER_GID differs from the Docker socket's current group (re-run install)"
+chk_no_legacy() {
+  local ids nets
+  if [ -e "$ROOT$GID_FILE" ] || [ -L "$ROOT$GID_FILE" ]; then echo "retired file still present: $GID_FILE (re-run install)"; fi
+  if nets="$(legacy_networks)"; then
+    if [ -n "$nets" ]; then echo "retired network still present: ${nets//$'\n'/, } (re-run install)"; fi
+  else
+    echo "cannot list docker networks to check for the retired network"
+  fi
+  if ids="$(legacy_containers 2>/dev/null)"; then
+    if [ -n "$ids" ]; then echo "a socket-proxy container still exists (re-run install)"; fi
+  else
+    echo "cannot list docker containers to check for a socket-proxy container"
+  fi
 }
 
 # shellcheck disable=SC2329 # invoked by name through run_check
@@ -696,10 +849,8 @@ container_checks() {
     out="$(dk inspect --format '{{range .Mounts}}{{.Source}}{{"\n"}}{{end}}' "$name" 2>/dev/null || echo "inspect-failed")"
     if [ "$out" = "inspect-failed" ]; then
       fail "cannot inspect the mounts of $name"
-    elif [ "$service" = "socket-proxy" ]; then
-      if grep -qF "docker.sock" <<<"$out"; then pass "socket-proxy mounts the Docker socket"; else fail "socket-proxy does not mount the Docker socket"; fi
     elif grep -qF "docker.sock" <<<"$out"; then
-      fail "$name mounts the Docker socket (only socket-proxy may)"
+      fail "$name mounts the Docker socket (no stack container may)"
     else
       pass "$name does not mount the Docker socket"
     fi
@@ -708,6 +859,11 @@ container_checks() {
       traefik)
         out="$(dk inspect --format '{{range $k, $v := .NetworkSettings.Networks}}{{$k}}{{"\n"}}{{end}}' "$name" 2>/dev/null || true)"
         if grep -qxF "$NETWORK" <<<"$out"; then pass "traefik is on the $NETWORK network"; else fail "traefik is not on the $NETWORK network"; fi
+        # No Docker provider: no TRAEFIK_PROVIDERS_DOCKER_* variable may exist in the running container.
+        envcmd="$(dk inspect --format '{{range .Config.Env}}{{println .}}{{end}}' "$name" 2>/dev/null || echo "inspect-failed")"
+        if [ "$envcmd" = "inspect-failed" ]; then fail "cannot inspect the environment of $name"
+        elif grep -q '^TRAEFIK_PROVIDERS_DOCKER' <<<"$envcmd"; then fail "$name has a TRAEFIK_PROVIDERS_DOCKER_* variable"
+        else pass "$name has no Docker provider variable"; fi
         ;;
       cloudflared)
         # The token is compared inside this shell only: never printed, never passed in an argv.
@@ -734,9 +890,18 @@ container_checks() {
 }
 
 do_checks() {
-  local ps problems line
+  local ps problems line dgid
   check_owned "install directory" "$ROOT$INSTALL_DIR" 755 || true
-  check_owned "dynamic directory" "$ROOT$INSTALL_DIR/dynamic" 755 || true
+  if dgid="$(deploy_gid)"; then
+    check_owned "dynamic directory" "$ROOT$INSTALL_DIR/dynamic" 1775 "$dgid" || true
+    if [ -d "$ROOT$INSTALL_DIR/dynamic" ] && [ -f "$ROOT$INSTALL_DIR/dynamic/dynamic.yml" ]; then
+      PERM_CTX=local
+      run_check "deploy user permissions on the dynamic directory" chk_deploy_dir
+      run_check "dynamic directory holds only rendered route files" chk_dynamic_files
+    fi
+  else
+    fail "the $DEPLOY_GROUP group does not exist (run install-deploy-user first)"
+  fi
   check_owned "down-page directory" "$ROOT$INSTALL_DIR/down-page" 755 || true
   check_owned "compose.yaml" "$ROOT$INSTALL_DIR/compose.yaml" 644 || true
   check_payload "compose.yaml" "$ROOT$INSTALL_DIR/compose.yaml" payload_compose_yaml
@@ -744,13 +909,12 @@ do_checks() {
   check_payload "dynamic.yml" "$ROOT$INSTALL_DIR/dynamic/dynamic.yml" payload_dynamic_yml
   check_owned "down-page index.html" "$ROOT$INSTALL_DIR/down-page/index.html" 644 || true
   check_payload "down-page index.html" "$ROOT$INSTALL_DIR/down-page/index.html" payload_index_html
-  check_owned "docker-gid.env" "$ROOT$GID_FILE" 644 || true
 
   run_check "token file" chk_token_file
   run_check "ingress env file" chk_env_file
-  run_check "docker socket" chk_socket
+  run_check "access env file" chk_access_file
   run_check "token group is private" chk_token_group
-  run_check "stored DOCKER_GID matches the socket group" chk_stored_gid
+  run_check "no retired socket-proxy pieces" chk_no_legacy
   run_check "network $NETWORK" chk_network
 
   if ps="$(stack_ps 2>/dev/null)"; then
@@ -787,9 +951,9 @@ readonly LIVE_NAMES="$LIVE_APP $LIVE_SIBLING $LIVE_CURL $LIVE_HOSTILE"
 # Every fixture runs as hardened as the stack itself: no capabilities, no new privileges, small limits, non-root, and a
 # tmpfs /tmp (the busybox listener writes its page and pid there).
 readonly LIVE_HARDEN=(--cap-drop ALL --security-opt no-new-privileges:true --memory 32m --pids-limit 64 --user 65534:65534 --tmpfs /tmp)
-# The hostile fixture carries a competing, high-priority traefik.* router for its own host. The deny router outranks
-# it, so /_jobs on that host must still answer 503. (2147483647, one above the deny, WOULD win: that is why the deploy
-# path must reject every traefik.* label; this probe pins the documented guarantee for a high but lower priority.)
+# The hostile fixture carries a competing, high-priority traefik.* router label for its own host but no route file.
+# With no Docker provider the labels are inert, so it must get no route at all (the deploy path still refuses
+# traefik.* labels as defence in depth if a Docker provider ever returns).
 readonly HOSTILE_PRIORITY=2147483645
 # Pinned by exact tag and digest (same rule as compose.yaml). The test app image is the one compose.yaml already pins.
 readonly LIVE_IMAGE="docker.io/library/busybox:1.37.0@sha256:bdf57e528e45e4433820e045b29b4597825a1c9e38353532d90a01445013f82e"
@@ -817,6 +981,7 @@ readonly LIVE_VARIANTS=(
 readonly LIVE_SSH_OPTS=(-o ConnectTimeout=10 -o ServerAliveInterval=5 -o ServerAliveCountMax=3)
 
 LIVE_IDS=()
+LIVE_ROUTES=()
 LIVE_WAIT_PID=""
 PROBE_CODE=""
 PROBE_BODY=""
@@ -841,6 +1006,14 @@ ldk() { live_run docker "$@"; }
 live_cleanup() {
   trap '' INT TERM HUP
   [ -z "$LIVE_WAIT_PID" ] || kill "$LIVE_WAIT_PID" 2>/dev/null || true
+  # Route files this run wrote go first, so nothing stays publicly routed.
+  if [ "${#LIVE_ROUTES[@]}" -gt 0 ]; then
+    if live_run rm -f -- "${LIVE_ROUTES[@]}" >/dev/null 2>&1; then
+      LIVE_ROUTES=()
+    else
+      err "install-ingress: could not remove the test route files; remove them by hand: ssh <alias> sudo rm -f $ROOT$INSTALL_DIR/dynamic/app-ingress-livetest*.yml"
+    fi
+  fi
   # Only containers this run created (ids captured from docker run) are ever removed, and by id.
   if [ "${#LIVE_IDS[@]}" -gt 0 ]; then
     if ldk rm -f "${LIVE_IDS[@]}" >/dev/null 2>&1; then
@@ -881,7 +1054,7 @@ curl_probe() {
 }
 
 # expect_probe <label> <host> <path> <want code> <want friendly body: yes|no> [attempts]: polls (bounded) because the
-# Docker provider reloads asynchronously.
+# file provider reloads asynchronously.
 expect_probe() {
   local label="$1" host="$2" path="$3" want="$4" body="$5" attempts="${6:-1}" i=1
   while :; do
@@ -919,6 +1092,20 @@ start_fixture() {
   LIVE_IDS+=("$cid")
 }
 
+# write_route <fixture container name> <public host>: a route file in the shape platform deploy writes (app-<name>.yml),
+# placed atomically (temp file + rename) and tracked for cleanup. The body travels base64-encoded so no quoting layer
+# (ssh, sudo, remote shell) can alter it.
+write_route() {
+  local name="$1" host="$2" file body
+  file="$ROOT$INSTALL_DIR/dynamic/app-$name.yml"
+  # shellcheck disable=SC2016 # the backticks are Traefik rule syntax, not a command substitution
+  body="$(printf 'http:\n  routers:\n    app-%s:\n      rule: Host(`%s`)\n      entryPoints: [web]\n      service: app-%s\n  services:\n    app-%s:\n      loadBalancer:\n        servers:\n          - url: http://%s:8080\n' "$name" "$host" "$name" "$name" "$name" | base64 -w0)"
+  LIVE_ROUTES+=("$file")
+  # shellcheck disable=SC2016 # expanded by the remote shell
+  live_run sh -c 'printf %s "$1" | base64 -d > "$2.new" && chmod 644 "$2.new" && mv -f "$2.new" "$2"' _ "$body" "$file" \
+    || die "could not write the test route file $file"
+}
+
 # listener_cmd: a busybox httpd with request-line logging (-vv) whose process can be killed while the container
 # stays up (sleep takes over as the container's main process afterwards).
 listener_cmd() {
@@ -946,13 +1133,20 @@ do_live() {
   sibling_host="$LIVE_SIBLING.$domain"
   nohost="ingress-livetest-nohost.$domain"
 
+  # The deploy user's rights on the installed dynamic directory (a second uid): create/delete its own route file, and
+  # no replace or delete of root's dynamic.yml.
+  PERM_CTX=live
+  run_check "deploy user permissions on the dynamic directory" chk_deploy_dir
+
   existing="$(ldk ps -a -q --filter "label=platform.app=$LIVE_APP")" || die "cannot list containers over ssh as the administrator"
   [ -z "$existing" ] || die "a container labelled platform.app=$LIVE_APP already exists (a leftover is publicly routable behind Access); remove it first: ssh <alias> sudo docker rm -f $LIVE_NAMES"
   existing="$(ldk ps -a -q --filter "name=$LIVE_APP")" || die "cannot list containers over ssh as the administrator"
   [ -z "$existing" ] || die "a container named $LIVE_APP* already exists; remove it first: ssh <alias> sudo docker rm -f $LIVE_NAMES"
+  existing="$(live_run sh -c "ls -- $ROOT$INSTALL_DIR/dynamic/app-$LIVE_APP*.yml 2>/dev/null || true")" || die "cannot list the route files over ssh as the administrator"
+  [ -z "$existing" ] || die "a leftover route file exists (it would be publicly routed); remove it first: ssh <alias> sudo rm -f $ROOT$INSTALL_DIR/dynamic/app-$LIVE_APP*.yml"
 
-  # (1) labelled app with a real listener and exactly one exposed port, (2) unlabelled sibling, (3) curl client,
-  # (4) hostile app: platform.app plus a competing high-priority traefik.* router for its own host.
+  # (1) platform.app app with a real listener, one exposed port and (below) a route file, (2) unrouted sibling, (3) curl
+  # client, (4) hostile app: platform.app plus a competing high-priority traefik.* router, but NO route file.
   hostile_host="$LIVE_HOSTILE.$domain"
   start_fixture "$LIVE_APP" ldk run -d --name "$LIVE_APP" --network "$NETWORK" "${LIVE_HARDEN[@]}" --label "platform.app=$LIVE_APP" --expose 8080 "$LIVE_IMAGE" sh -c "$(listener_cmd)"
   start_fixture "$LIVE_SIBLING" ldk run -d --name "$LIVE_SIBLING" --network "$NETWORK" "${LIVE_HARDEN[@]}" --expose 8080 "$LIVE_IMAGE" sh -c "$(listener_cmd)"
@@ -961,12 +1155,15 @@ do_live() {
     --label "traefik.http.routers.$LIVE_HOSTILE.rule=Host(\`$hostile_host\`)" --label "traefik.http.routers.$LIVE_HOSTILE.priority=$HOSTILE_PRIORITY" \
     --expose 8080 "$LIVE_IMAGE" sh -c "$(listener_cmd)"
 
-  # Positive control: an unreachable Traefik must not pass. Polls while the provider picks the container up.
+  # The route file appears after Traefik is already running: the file provider must pick it up without a restart.
+  write_route "$LIVE_APP" "$app_host"
+
+  # Positive control: an unreachable Traefik must not pass. Polls while the provider picks the route file up.
   if expect_probe "positive control: a normal path reaches the labelled app (200)" "$app_host" "/index.html" 200 no 20; then
     if app_log_has "$LIVE_APP" 'index\.html'; then pass "positive control: the request appears in the app's own log"; else fail "positive control: the request does not appear in the app's log (the log check cannot be trusted)"; fi
   fi
 
-  # Unmatched host and the unlabelled sibling's name: the friendly 503, never the sibling.
+  # Unmatched host and the unrouted sibling's name: the friendly 503, never the sibling.
   expect_probe "unmatched host answers the friendly 503 on /" "$nohost" "/" 503 yes || true
   expect_probe "unmatched host answers the friendly 503 on a non-root path" "$nohost" "/some/path" 503 yes || true
   expect_probe "unlabelled sibling name answers the friendly 503 on /" "$sibling_host" "/" 503 yes || true
@@ -987,13 +1184,11 @@ do_live() {
     if app_log_has "$LIVE_APP" 'jobs'; then fail "/_jobs variant $name reached the app (its log mentions the path)"; else pass "/_jobs variant $name is absent from the app's log"; fi
   done
 
-  # A hostile label cannot bypass the deny: the app is reachable through its own competing router (positive control),
-  # yet /_jobs on it answers the friendly 503 and never reaches it.
-  if expect_probe "hostile-label app: a normal path reaches it through its own router (200)" "$hostile_host" "/index.html" 200 no 20; then
-    expect_probe "hostile-label app: /_jobs still answers the friendly 503" "$hostile_host" "/_jobs" 503 yes || true
-    expect_probe "hostile-label app: /_jobs/x still answers the friendly 503" "$hostile_host" "/_jobs/x" 503 yes || true
-    if app_log_has "$LIVE_HOSTILE" 'jobs'; then fail "hostile-label app: a /_jobs request reached it (its log mentions the path)"; else pass "hostile-label app: /_jobs is absent from its log"; fi
-  fi
+  # Labels route nothing: the hostile app carries a high-priority traefik.* router but no route file, so it has no
+  # route at all (friendly 503 on every path) and never receives a request.
+  expect_probe "hostile-label app without a route file is not routed on /index.html" "$hostile_host" "/index.html" 503 yes || true
+  expect_probe "hostile-label app without a route file is not routed on /_jobs" "$hostile_host" "/_jobs" 503 yes || true
+  if app_log_has "$LIVE_HOSTILE" 'index\.html|jobs'; then fail "hostile-label app: a request reached it (its log shows a request path)"; else pass "hostile-label app: its log shows no routed request"; fi
   # Not needed any more, and it must not stay routable during a hold.
   ldk stop -t 1 "$LIVE_HOSTILE" >/dev/null 2>&1 || fail "could not stop the hostile-label app"
 
@@ -1015,12 +1210,10 @@ do_live() {
     fail "could not kill the test app's listener"
   fi
 
-  # Stopped container: 503 with the friendly body (polled: the provider reloads asynchronously). A persistent 502 fails.
+  # Stopped container with its route file still present: the backend name no longer resolves, so 502 with the friendly body.
   if ldk stop -t 1 "$LIVE_APP" >/dev/null 2>&1; then
-    if expect_probe "a stopped app answers the friendly 503 on /" "$app_host" "/" 503 yes 20; then
-      expect_probe "a stopped app answers the friendly 503 on a non-root path" "$app_host" "/some/path" 503 yes || true
-    elif [ "$PROBE_CODE" = "502" ]; then
-      fail "the stopped app still answers 502 (the router is not gone); the down page is not shown"
+    if expect_probe "a stopped app with a route answers the friendly 502 on /" "$app_host" "/" 502 yes 20; then
+      expect_probe "a stopped app with a route answers the friendly 502 on a non-root path" "$app_host" "/some/path" 502 yes || true
     fi
   else
     fail "could not stop the test app"
@@ -1032,6 +1225,12 @@ do_live() {
     info "hold skipped: automated probes failed"
   fi
 
+  if live_run rm -f -- "${LIVE_ROUTES[@]}" >/dev/null; then
+    LIVE_ROUTES=()
+    pass "test route files removed"
+  else
+    fail "could not remove the test route files"
+  fi
   if ldk rm -f "${LIVE_IDS[@]}" >/dev/null; then
     LIVE_IDS=()
     pass "test containers removed"

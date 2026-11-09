@@ -17,8 +17,11 @@
 #      dir is root-owned and sticky and the deploy user also writes it there, so a missing lock is created with noclobber
 #      (O_EXCL, mode 0666) and the lock is taken with flock -n on a READ-ONLY descriptor. A held lock exits 1.
 #   3. Containers carrying the platform.app=<app> label (a leftover app-<app>-old counts): refused unless --stop, which
-#      removes every one of them first.
-#   4. The registry dir (the jobs runner stops scheduling the app).
+#      removes every one of them first. Volumes labelled platform.app=<app> (declared app volumes) are checked at the same
+#      time: also refused without --stop (naming them), and with --stop deleted after the containers, listed first.
+#      Every refusal happens before any change.
+#   4. The registry dir (the jobs runner stops scheduling the app) and the app's Traefik route file
+#      <routes dir>/app-<app>.yml (written by platform deploy; absent is fine).
 #   5. Redis: every <app>:* key by admin SCAN plus DEL, then ACL DELUSER and ACL SAVE.
 #   6. Postgres: DROP DATABASE ... WITH (FORCE), then DROP ROLE.
 #   7. secrets/<app>, job-secrets/<app>, the deploy state and the app's local images (this app's repository only). The
@@ -33,6 +36,7 @@
 # platform-data-redis), RM_DB_RESERVED_NAMES (/opt/platform/data/reserved-names.txt), RM_DB_SECRETS_ROOT
 # (/var/lib/platform/secrets), RM_DB_JOB_SECRETS_ROOT (/var/lib/platform/job-secrets), RM_DB_STATE_ROOT
 # (/var/lib/platform/deploy), RM_DB_REGISTRY_ROOT (/var/lib/platform/registry), RM_DB_LOCK_DIR (/var/lib/platform/locks),
+# RM_DB_ROUTES_DIR (/opt/platform/ingress/dynamic, where platform deploy writes app-<app>.yml),
 # RM_DB_IMAGE_NS (ghcr.io/gpropersi/apps), RM_DB_REDIS_CTR_ADMIN_FILE (the admin file as the Redis container sees it),
 # RM_DB_AS_DEPLOY (the command prefix that runs a delete as the deploy user; default "runuser -u deploy --"),
 # RM_DB_EXEC_TIMEOUT (seconds per external call, default 30).
@@ -62,6 +66,7 @@ JOB_SECRETS_ROOT="${RM_DB_JOB_SECRETS_ROOT:-/var/lib/platform/job-secrets}"
 STATE_ROOT="${RM_DB_STATE_ROOT:-/var/lib/platform/deploy}"
 REGISTRY_ROOT="${RM_DB_REGISTRY_ROOT:-/var/lib/platform/registry}"
 LOCK_DIR="${RM_DB_LOCK_DIR:-/var/lib/platform/locks}"
+ROUTES_DIR="${RM_DB_ROUTES_DIR:-/opt/platform/ingress/dynamic}"
 IMAGE_NS="${RM_DB_IMAGE_NS:-ghcr.io/gpropersi/apps}"
 REDIS_CTR_ADMIN_FILE="${RM_DB_REDIS_CTR_ADMIN_FILE:-/etc/platform/redis-admin.password}"
 EXEC_TIMEOUT="${RM_DB_EXEC_TIMEOUT:-30}"
@@ -239,17 +244,32 @@ labelled_containers() {
   phase "$1" "" docker ps -a --filter "label=platform.app=$APP" --format '{{.Names}}'
 }
 
-# step 3
+# labelled_volumes: sets PHASE_OUT to the names of every volume with this app's label (an exact label match: another
+# app's volume, even one whose name shares a prefix, and an unlabelled volume never appear).
+labelled_volumes() {
+  phase "$1" "" docker volume ls -q --filter "label=platform.app=$APP"
+}
+
+# step 3 (containers and volumes: refusals first)
 step_containers() {
-  local name found
+  local name found vols
   labelled_containers "containers-list"
   found="$PHASE_OUT"
-  [ -n "$found" ] || { info "already: no container labelled platform.app=$APP"; return 0; }
-  if [ "$STOP" -eq 0 ]; then
-    err "rm-db: containers carry the label platform.app=$APP:"
-    while IFS= read -r name; do err "  $name"; done <<<"$found"
-    die "refusing to remove an app that has containers (a leftover app-$APP-old counts); re-run with --stop to remove them first. Nothing was changed." 1
+  labelled_volumes "volumes-list"
+  vols="$PHASE_OUT"
+  # Every refusal happens here, before any change (the route file and registry entry go only after them).
+  if [ "$STOP" -eq 0 ] && { [ -n "$found" ] || [ -n "$vols" ]; }; then
+    if [ -n "$found" ]; then
+      err "rm-db: containers carry the label platform.app=$APP:"
+      while IFS= read -r name; do err "  $name"; done <<<"$found"
+    fi
+    if [ -n "$vols" ]; then
+      err "rm-db: volumes carry the label platform.app=$APP (their files would be deleted):"
+      while IFS= read -r name; do err "  $name"; done <<<"$vols"
+    fi
+    die "refusing to remove an app that has containers (a leftover app-$APP-old counts) or volumes; re-run with --stop to remove them first. Nothing was changed." 1
   fi
+  [ -n "$found" ] || { info "already: no container labelled platform.app=$APP"; return 0; }
   while IFS= read -r name; do
     [ -n "$name" ] || continue
     phase "container-rm" "" docker rm -f -v -- "$name"
@@ -257,10 +277,28 @@ step_containers() {
   done <<<"$found"
 }
 
+# step 3b: with --stop, the app's volumes go once its containers are gone (only reached with --stop: without it step 3 refused).
+step_volumes() {
+  local name found
+  labelled_volumes "volumes-list"
+  found="$PHASE_OUT"
+  [ -n "$found" ] || { info "already: no volume labelled platform.app=$APP"; return 0; }
+  info "will remove these volumes (their files are deleted):"
+  while IFS= read -r name; do [ -z "$name" ] || info "  $name"; done <<<"$found"
+  while IFS= read -r name; do
+    [ -n "$name" ] || continue
+    phase "volume-rm" "" docker volume rm -- "$name"
+    info "removed: volume $name"
+  done <<<"$found"
+}
+
 # step 4
 step_registry() {
   phase "registry-rm" "" "${DEPLOY_RUN[@]}" rm -rf -- "$REGISTRY_ROOT/$APP"
   info "removed: $REGISTRY_ROOT/$APP"
+  # The route file is deploy-owned in a sticky directory: the delete runs as the deploy user, idempotent when absent.
+  phase "route-rm" "" "${DEPLOY_RUN[@]}" rm -f -- "$ROUTES_DIR/app-$APP.yml"
+  info "removed: $ROUTES_DIR/app-$APP.yml"
 }
 
 # redis_scan <del|count>: walks every page of the app's keys; sets SCAN_TOTAL to the number of keys seen.
@@ -348,7 +386,9 @@ final_scan() {
   local left="" p users pgout roles dbs
   labelled_containers "final-containers"
   [ -z "$PHASE_OUT" ] || left+="containers: ${PHASE_OUT//$'\n'/ }"$'\n'
-  for p in "$REGISTRY_ROOT/$APP" "$SECRETS_ROOT/$APP" "$JOB_SECRETS_ROOT/$APP" "$STATE_ROOT/$APP"; do
+  labelled_volumes "final-volumes"
+  [ -z "$PHASE_OUT" ] || left+="volumes: ${PHASE_OUT//$'\n'/ }"$'\n'
+  for p in "$REGISTRY_ROOT/$APP" "$ROUTES_DIR/app-$APP.yml" "$SECRETS_ROOT/$APP" "$JOB_SECRETS_ROOT/$APP" "$STATE_ROOT/$APP"; do
     if [ -e "$p" ] || [ -L "$p" ]; then left+="path: $p"$'\n'; fi
   done
   redis_scan count
@@ -386,6 +426,7 @@ main() {
   ERRF="$(mktemp)"
   check_healthy
   step_containers
+  step_volumes
   step_registry
   step_redis
   step_postgres

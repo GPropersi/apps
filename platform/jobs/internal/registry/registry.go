@@ -38,9 +38,12 @@ var (
 	memCapRE   = regexp.MustCompile(`^[1-9][0-9]{0,2}m$`)
 	portRE     = regexp.MustCompile(`^[1-9][0-9]{0,4}$`)
 	healthRE   = regexp.MustCompile(`^/[A-Za-z0-9._~/%-]*$`)
-	topKeys    = []string{"schema_version", "name", "owner", "purpose", "template", "memory_cap", "port", "health_path", "access", "jobs"}
+	topKeys    = []string{"schema_version", "name", "owner", "purpose", "template", "memory_cap", "port", "health_path", "access", "jobs", "volumes"}
 	topReqd    = []string{"schema_version", "name", "owner", "purpose", "template", "memory_cap", "port"}
 	jobKeys    = []string{"name", "schedule", "timeout", "catch_up"}
+	volKeys    = []string{"name", "path"}
+	volNameRE  = regexp.MustCompile(`^[a-z][a-z0-9-]{0,30}$`)
+	volPathRE  = regexp.MustCompile(`^/data(/[a-z0-9._-]+)*$`)
 	templates  = []string{"go-react", "go-htmx", "fastapi-react", "flask", "node-hono"}
 	accessVals = []string{"family", "public", "restricted"}
 )
@@ -184,10 +187,13 @@ func ParseApp(dir string, b []byte) (*App, error) {
 	app := &App{}
 	for _, k := range topKeys {
 		n, ok := top[k]
-		if !ok || k == "jobs" {
+		if !ok || k == "jobs" || k == "volumes" {
 			continue
 		}
 		v.scalarKey(dir, k, n, app)
+	}
+	if n, ok := top["volumes"]; ok {
+		v.volumes(n)
 	}
 	if n, ok := top["jobs"]; ok {
 		app.Jobs = v.jobs(n)
@@ -362,6 +368,78 @@ func (v *validator) scalarKey(dir, k string, n *yaml.Node, app *App) {
 			v.errf("access '%s' must be family, public or restricted", val)
 		}
 	}
+}
+
+// volumes validates the declared app volumes with the shell validator's rules. The runner needs no volume data beyond
+// this validation, so nothing is returned.
+func (v *validator) volumes(n *yaml.Node) {
+	if n.Kind == yaml.ScalarNode && n.Value == "" && !quoted(n) || (n.Kind == yaml.SequenceNode && len(n.Content) == 0) {
+		v.errf("volumes is present but has no entries (omit the key instead)")
+		return
+	}
+	if n.Kind != yaml.SequenceNode {
+		v.errf("volumes must be a list of maps, not a scalar")
+		return
+	}
+	if len(n.Content) > 4 {
+		v.errf("volumes has %d entries, the maximum is 4", len(n.Content))
+	}
+	names := map[string]bool{}
+	paths := map[string]bool{}
+	var okPaths []string
+	for i, vn := range n.Content {
+		where := fmt.Sprintf("volumes[%d]", i)
+		if vn.Kind != yaml.MappingNode {
+			v.errf("volumes items must be maps (name, path), not plain values")
+			continue
+		}
+		m := v.mapping(vn, where, volKeys)
+		for k, kn := range m {
+			if kn.Kind != yaml.ScalarNode {
+				v.errf("%s/%s must be a scalar", where, k)
+				delete(m, k)
+			}
+		}
+		if nn, ok := m["name"]; !ok {
+			v.errf("%s is missing required key 'name'", where)
+		} else if !volNameRE.MatchString(nn.Value) {
+			v.errf("%s name '%s' must match %s", where, nn.Value, volNameRE)
+		} else if names[nn.Value] {
+			v.errf("duplicate volume name '%s'", nn.Value)
+		} else {
+			names[nn.Value] = true
+		}
+		pn, ok := m["path"]
+		switch {
+		case !ok:
+			v.errf("%s is missing required key 'path'", where)
+		case !volPathRE.MatchString(pn.Value):
+			v.errf("%s path '%s' must be absolute under /data and match %s", where, pn.Value, volPathRE)
+		case hasDotSegment(pn.Value):
+			v.errf("%s path '%s' must not contain a . or .. segment", where, pn.Value)
+		case paths[pn.Value]:
+			v.errf("duplicate volume path '%s'", pn.Value)
+		default:
+			paths[pn.Value] = true
+			okPaths = append(okPaths, pn.Value)
+		}
+	}
+	for _, a := range okPaths {
+		for _, b := range okPaths {
+			if a != b && strings.HasPrefix(b, a+"/") {
+				v.errf("volume path '%s' is inside volume path '%s'", b, a)
+			}
+		}
+	}
+}
+
+func hasDotSegment(p string) bool {
+	for _, seg := range strings.Split(p, "/") {
+		if seg == "." || seg == ".." {
+			return true
+		}
+	}
+	return false
 }
 
 func (v *validator) jobs(n *yaml.Node) []Job {

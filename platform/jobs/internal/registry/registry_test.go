@@ -133,6 +133,44 @@ func TestValidSchedulesAndCatchUp(t *testing.T) {
 	}
 }
 
+func TestVolumes(t *testing.T) {
+	vol := func(body string) string { return base + "volumes:\n" + body }
+	ok := vol("  - name: files\n    path: /data/files\n  - name: cache-1\n    path: /data/cache.d\n")
+	app, err := parse(t, ok+"jobs:\n  - name: a\n    timeout: 5s\n")
+	if err != nil || len(app.Jobs) != 1 {
+		t.Fatalf("valid volumes must load with jobs kept: app=%+v err=%v", app, err)
+	}
+	four := vol("  - name: a\n    path: /data/a\n  - name: b\n    path: /data/b\n  - name: c\n    path: /data/c\n  - name: d\n    path: /data/d\n")
+	if _, err := parse(t, four); err != nil {
+		t.Fatalf("four volumes must load: %v", err)
+	}
+	bad := map[string]string{
+		"fifth volume":       four + "  - name: e\n    path: /data/e\n",
+		"unknown entry key":  vol("  - name: a\n    path: /data/a\n    size: 1\n"),
+		"path outside data":  vol("  - name: a\n    path: /tmp/x\n"),
+		"path dotdot":        vol("  - name: a\n    path: /data/../etc\n"),
+		"path dot":           vol("  - name: a\n    path: /data/./x\n"),
+		"relative path":      vol("  - name: a\n    path: data/x\n"),
+		"bad name":           vol("  - name: A_b\n    path: /data/x\n"),
+		"duplicate name":     vol("  - name: a\n    path: /data/a\n  - name: a\n    path: /data/b\n"),
+		"duplicate path":     vol("  - name: a\n    path: /data/a\n  - name: b\n    path: /data/a\n"),
+		"nested path":        vol("  - name: a\n    path: /data/a\n  - name: b\n    path: /data/a/b\n"),
+		"data root nested":   vol("  - name: a\n    path: /data\n  - name: b\n    path: /data/b\n"),
+		"missing path":       vol("  - name: a\n"),
+		"missing name":       vol("  - path: /data/a\n"),
+		"empty":              base + "volumes:\n",
+		"empty list":         base + "volumes: []\n",
+		"scalar":             base + "volumes: nope\n",
+		"plain items":        vol("  - a\n"),
+		"entry value nested": vol("  - name: a\n    path:\n      x: 1\n"),
+	}
+	for name, content := range bad {
+		if app, err := parse(t, content); err == nil {
+			t.Errorf("%s: accepted as %+v", name, app)
+		}
+	}
+}
+
 func TestErrorReportsEveryProblem(t *testing.T) {
 	_, err := parse(t, strings.Replace(base, "port: 8080", "port: 0", 1)+"extra: 1\n")
 	if err == nil || !strings.Contains(err.Error(), "port") || !strings.Contains(err.Error(), "extra") {

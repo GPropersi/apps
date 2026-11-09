@@ -29,6 +29,7 @@ The file is written in the small YAML subset read by `platform/lib/yaml-subset.s
 | `health_path` | no | Starts with `/`; only letters, digits and `. _ ~ / % -` after it. |
 | `access` | no | `family` (default when absent), `public` or `restricted`. Records intent only: no email lists belong in the file. |
 | `jobs` | no | A non-empty list of maps (below). |
+| `volumes` | no | A non-empty list of 1 to 4 maps (below). |
 
 Unknown top-level keys, duplicate keys and wrong types are errors.
 
@@ -42,6 +43,18 @@ Unknown top-level keys, duplicate keys and wrong types are errors.
 | `catch_up` | no | `true` or `false` (unquoted), default `false`. |
 
 Unknown keys inside a job are errors.
+
+### `volumes[]`
+
+A non-empty list of 1 to 4 maps. Deploy creates each as the Docker volume `app_<app>_<name>` (labelled
+`platform.app=<app>` and `platform.volume=<name>`) and mounts it at `path`; `rm-db --stop` deletes it.
+
+| Key | Required | Rule |
+|---|---|---|
+| `name` | yes | `^[a-z][a-z0-9-]{0,30}$`, unique within the app. |
+| `path` | yes | Absolute, `^/data(/[a-z0-9._-]+)*$`, no `.` or `..` segment, unique, and not inside another volume's path. |
+
+Unknown keys inside an entry are errors. The jobs runner's parser applies the same rules.
 
 ## Jobs
 

@@ -47,6 +47,22 @@ mkstub nosudo <<'EOF'
 exit 1
 EOF
 
+# fakeasdeploy: stands in for `sudo -u deploy`. It runs the command, except where the sticky directory would stop a second
+# uid: mv/rm touching dynamic.yml fail unless $STATE/deploy_can_<cmd> exists, touch fails with $STATE/deploy_no_create and
+# rm of the probe file fails with $STATE/deploy_no_delete.
+mkstub fakeasdeploy <<'EOF'
+cmd="$1"
+case "$cmd" in
+  touch) [ ! -f "$STATE/deploy_no_create" ] || exit 1 ;;
+  mv | rm)
+    for a in "$@"; do
+      case "$a" in */dynamic.yml) [ -f "$STATE/deploy_can_$cmd" ] || exit 1 ;; esac
+    done
+    [ "$cmd" != rm ] || [ ! -f "$STATE/deploy_no_delete" ] || exit 1 ;;
+esac
+exec "$@"
+EOF
+
 mkstub chown <<'EOF'
 exit 0
 EOF
@@ -60,6 +76,7 @@ base="$(basename "$path")"
 if [ ! -e "$path" ] && [ ! -L "$path" ]; then exit 1; fi
 ug="0:0"
 [ "$base" != "cloudflared.token" ] || ug="0:64321"
+[ "$base" != "dynamic" ] || ug="0:64330"
 if [ -f "$STATE/stat_override" ]; then
   line="$(grep -F -- "$base " "$STATE/stat_override" | head -n1 || true)"
   [ -z "$line" ] || ug="${line##* }"
@@ -75,6 +92,11 @@ EOF
 mkstub getent <<'EOF'
 case "$1" in
   group)
+    if [ "${2:-}" = "deploy" ]; then
+      [ ! -f "$STATE/deploy_group_absent" ] || exit 2
+      echo "deploy:x:64330:"
+      exit 0
+    fi
     if [ "${2:-}" = "64321" ] && [ ! -f "$STATE/group_absent" ]; then
       echo "cftoken:x:64321:$(cat "$STATE/group_members" 2>/dev/null)"
       exit 0
@@ -113,7 +135,14 @@ friendly='<h1>This app is down or does not exist</h1>'
 case "$sub" in
   network)
     case "$1" in
-      ls) [ ! -f "$S/net_ls_fail" ] || exit 1; [ ! -f "$S/network_exists" ] || echo platform; exit 0 ;;
+      ls)
+        [ ! -f "$S/net_ls_fail" ] || exit 1
+        case "$*" in
+          *ingress-proxy*) [ ! -f "$S/legacy_network" ] || echo platform-ingress_ingress-proxy ;;
+          *) [ ! -f "$S/network_exists" ] || echo platform ;;
+        esac
+        exit 0 ;;
+      rm) [ ! -f "$S/net_rm_fail" ] || exit 1; rm -f "$S/legacy_network"; exit 0 ;;
       inspect) [ -f "$S/network_exists" ] || exit 1; cat "$S/network_desc" 2>/dev/null || echo "bridge false"; exit 0 ;;
       create) touch "$S/network_exists"; echo netid; exit 0 ;;
     esac
@@ -121,7 +150,11 @@ case "$sub" in
   compose)
     for a in "$@"; do
       case "$a" in
-        up) [ ! -f "$S/up_fail" ] || exit 1; touch "$S/stack_up"; exit 0 ;;
+        up)
+          [ ! -f "$S/up_fail" ] || exit 1
+          # --remove-orphans removes a leftover socket-proxy container (unless the test says it stays)
+          case "$*" in *--remove-orphans*) [ -f "$S/orphan_stays" ] || rm -f "$S/legacy_container" ;; esac
+          touch "$S/stack_up"; exit 0 ;;
         ps) [ ! -f "$S/ps_fail" ] || exit 1; [ -f "$S/stack_up" ] || exit 0; cat "$S/ps"; exit 0 ;;
       esac
     done
@@ -158,6 +191,7 @@ case "$sub" in
     case "$all" in
       *label=platform.app=ingress-livetest*) [ ! -f "$S/ps_fail_label" ] || exit 1; cat "$S/live_existing_label" 2>/dev/null ;;
       *name=ingress-livetest*) [ ! -f "$S/ps_fail_name" ] || exit 1; cat "$S/live_existing_name" 2>/dev/null ;;
+      *com.docker.compose.service=socket-proxy*) [ ! -f "$S/legacy_container" ] || echo ffffffffffff ;;
       *com.docker.compose.service=traefik*)
         [ ! -f "$S/ps_fail_traefik" ] || exit 1
         [ -f "$S/traefik_id_empty" ] || echo dddddddddddd ;;
@@ -228,10 +262,14 @@ case "$sub" in
         lower="$(printf '%s' "$path" | tr 'A-Z' 'a-z')"
         app_host="ingress-livetest.example.test"
         sib_host="ingress-livetest-sibling.example.test"
-        if [ "$host" = "$app_host" ] && [ -f "$S/created_ingress-livetest" ]; then
+        # Traefik routes the fixture host only while its route file exists with the host rule (file provider).
+        route="$INSTALL_INGRESS_ROOT/opt/platform/ingress/dynamic/app-ingress-livetest.yml"
+        if [ "$host" = "$app_host" ] && [ -f "$S/created_ingress-livetest" ] && [ -f "$route" ] && grep -qF "Host(\`$app_host\`)" "$route"; then
+          cp "$route" "$S/route_seen"
           if [ -f "$S/stopped" ]; then
-            if [ -f "$S/stop_502" ]; then respond 502 "$friendly"; fi
-            respond 503 "$friendly"
+            # the backend name no longer resolves: Bad Gateway with the friendly body (stop_503 simulates a lost route)
+            if [ -f "$S/stop_503" ]; then respond 503 "$friendly"; fi
+            respond 502 "$friendly"
           fi
           [ ! -f "$S/app_unrouted" ] || respond 404 "not found"
           case "$lower" in
@@ -256,14 +294,9 @@ case "$sub" in
           respond 200 ok
         fi
         if [ "$host" = "ingress-livetest-hostile.example.test" ] && [ -f "$S/created_ingress-livetest-hostile" ]; then
-          [ ! -f "$S/hostile_unrouted" ] || respond 404 "not found"
-          case "$lower" in
-            *jobs*)
-              if [ -f "$S/hostile_leak" ]; then echo "url:$path" >> "$S/log_ingress-livetest-hostile"; respond 200 ok; fi
-              respond 503 "$friendly" ;;
-          esac
-          echo "url:$path" >> "$S/log_ingress-livetest-hostile"
-          respond 200 ok
+          # labels route nothing: no route file, so the friendly 503 (hostile_routed simulates a Docker provider)
+          if [ -f "$S/hostile_routed" ]; then echo "url:$path" >> "$S/log_ingress-livetest-hostile"; respond 200 ok; fi
+          respond 503 "$friendly"
         fi
         if [ "$host" = "$sib_host" ]; then
           if [ -f "$S/sibling_routed" ]; then echo "url:$path" >> "$S/log_ingress-livetest-sibling"; respond 200 ok; fi
@@ -283,10 +316,9 @@ EOF
 # ---- fixtures ----
 
 TOKEN='FIXTURE-TUNNEL-TOKEN-NOT-A-REAL-SECRET-0123456789'
-NAMES=(platform-ingress-cloudflared-1 platform-ingress-traefik-1 platform-ingress-socket-proxy-1 platform-ingress-down-page-1)
+NAMES=(platform-ingress-cloudflared-1 platform-ingress-traefik-1 platform-ingress-down-page-1)
 CF=platform-ingress-cloudflared-1
 TR=platform-ingress-traefik-1
-SP=platform-ingress-socket-proxy-1
 DP=platform-ingress-down-page-1
 PROBE_IP="$(t_ip4 203 0 113 7)"
 
@@ -300,22 +332,22 @@ fresh() {
   chmod 640 "$R/etc/platform/cloudflared.token"
   printf '# comment\nPLATFORM_DOMAIN=example.test\n' > "$R/etc/platform/ingress.env"
   chmod 644 "$R/etc/platform/ingress.env"
-  : > "$T_TMP/dsock"
+  printf 'ACCESS_TEAM_DOMAIN=example.cloudflareaccess.com\nACCESS_AUD=%s\n' "$(printf '0%.0s' {1..64})" > "$R/etc/platform/access.env"
+  chmod 644 "$R/etc/platform/access.env"
+  : >"$T_TMP/dsock"
   echo 998 > "$STATE/docker_gid"
   printf '%s\n' 'root:x:0:0:root:/root:/bin/bash' 'admin:x:1000:1000::/home/admin:/bin/bash' 'claude:x:1002:1002::/home/claude:/usr/local/bin/claude-access' > "$STATE/passwd"
-  printf '%s|cloudflared|running|healthy\n%s|traefik|running|healthy\n%s|socket-proxy|running|healthy\n%s|down-page|running|healthy\n' "$CF" "$TR" "$SP" "$DP" > "$STATE/ps"
+  printf '%s|cloudflared|running|healthy\n%s|traefik|running|healthy\n%s|down-page|running|healthy\n' "$CF" "$TR" "$DP" > "$STATE/ps"
   local n
   for n in "${NAMES[@]}"; do
     printf 'com.docker.compose.project\ncom.docker.compose.service\n' > "$STATE/labels_$n"
     printf '/opt/platform/ingress/dynamic\n' > "$STATE/mounts_$n"
     printf 'platform\n' > "$STATE/networks_$n"
   done
-  printf '/var/run/docker.sock\n' > "$STATE/mounts_$SP"
-  printf 'ingress-proxy\n' > "$STATE/networks_$SP"
-  printf 'platform\ningress-proxy\n' > "$STATE/networks_$TR"
   printf '["TUNNEL_TOKEN_FILE=/run/cloudflared/token"] ["tunnel","--no-autoupdate","run"]\n' > "$STATE/envcmd_$CF"
   export INSTALL_INGRESS_ROOT="$R"
   export INSTALL_INGRESS_SUDO=fakesudo
+  export INSTALL_INGRESS_AS_DEPLOY=fakeasdeploy
   export INSTALL_INGRESS_SOCKET="$T_TMP/dsock"
   export INSTALL_INGRESS_HEALTH_TIMEOUT=2
   export INSTALL_INGRESS_POLL=0.1
@@ -421,8 +453,6 @@ c_dom_quote() { printf 'PLATFORM_DOMAIN="example.test"\n' > "$R/etc/platform/ing
 c_dom_dot() { printf 'PLATFORM_DOMAIN=example.test.\n' > "$R/etc/platform/ingress.env"; }
 c_dom_space() { printf 'PLATFORM_DOMAIN=example.test \n' > "$R/etc/platform/ingress.env"; }
 c_dom_empty() { printf 'PLATFORM_DOMAIN=\n' > "$R/etc/platform/ingress.env"; }
-c_sock_missing() { rm "$T_TMP/dsock"; }
-c_sock_root() { echo 0 > "$STATE/docker_gid"; }
 c_grp_absent() { touch "$STATE/group_absent"; }
 c_grp_member() { echo "claude" > "$STATE/group_members"; }
 c_grp_primary() { echo 'svc:x:1100:64321::/home/svc:/bin/false' >> "$STATE/passwd"; }
@@ -451,8 +481,6 @@ precond "domain quoted" c_dom_quote "not a lowercase DNS name"
 precond "domain trailing dot" c_dom_dot "not a lowercase DNS name"
 precond "domain trailing space" c_dom_space "not a lowercase DNS name"
 precond "domain empty" c_dom_empty "not a lowercase DNS name"
-precond "docker socket missing" c_sock_missing "Docker socket missing"
-precond "docker socket group is root" c_sock_root "Docker socket group is root"
 precond "token group does not resolve" c_grp_absent "no group with gid 64321 exists"
 precond "token group has a member" c_grp_member "has members"
 precond "token gid is an account's primary gid" c_grp_primary "an account's primary group"
@@ -484,11 +512,11 @@ expect_out_lacks "install never prints the token" "$TOKEN"
 expect_eq "compose.yaml is the tracked source, byte for byte" "$(cmp -s "$R$INST/compose.yaml" "$REPO_COMPOSE" && echo same)" "same"
 expect_eq "dynamic.yml lands in the mounted dynamic/ directory" "$(cmp -s "$R$INST/dynamic/dynamic.yml" "$REPO_DYNAMIC" && echo same)" "same"
 expect_eq "index.html lands in down-page/" "$(cmp -s "$R$INST/down-page/index.html" "$REPO_INDEX" && echo same)" "same"
-expect_eq "the derived gid file holds the socket group" "$(cat "$R$INST/docker-gid.env")" "DOCKER_GID=998"
+expect_eq "no docker-gid.env is written" "$([ -e "$R$INST/docker-gid.env" ] && echo present || echo absent)" "absent"
 expect_eq "compose.yaml mode" "$(stat -c %a "$R$INST/compose.yaml")" "644"
 expect_calls_has "files are chowned to root" "chown root:root $R$INST/compose.yaml.new"
 expect_calls_has "exact network create argv (bridge, IPv6 off)" "docker network create --driver bridge --ipv6=false platform"
-expect_calls_has "exact compose up argv" "docker compose -p platform-ingress -f $R$INST/compose.yaml --env-file $R/etc/platform/ingress.env --env-file $R$INST/docker-gid.env up -d --remove-orphans"
+expect_calls_has "exact compose up argv" "docker compose -p platform-ingress -f $R$INST/compose.yaml --env-file $R/etc/platform/ingress.env up -d --remove-orphans"
 expect_calls_has "container health is polled through compose ps" "ps --all --format"
 for bad in iptables ip6tables nft ufw docker-user.rules firewall; do
   expect_calls_lacks "install never touches the firewall ($bad)" "$bad"
@@ -503,7 +531,8 @@ expect_out_lacks "second install changes nothing" "changed:"
 expect_out_has "second install: compose.yaml already" "already: $R$INST/compose.yaml"
 expect_out_has "second install: dynamic.yml already" "already: $R$INST/dynamic/dynamic.yml"
 expect_out_has "second install: index.html already" "already: $R$INST/down-page/index.html"
-expect_out_has "second install: gid file already" "already: $R$INST/docker-gid.env"
+expect_out_has "second install: no gid file already" "already: no $INST/docker-gid.env"
+expect_out_has "second install: no retired network already" "already: no platform-ingress_ingress-proxy network"
 expect_out_has "second install: network already" "already: network platform"
 expect_calls_lacks "second install: no compose up" " up -d"
 expect_calls_lacks "second install: no network create" "network create"
@@ -511,14 +540,42 @@ expect_calls_lacks "second install: no copy" "fakesudo cp"
 expect_calls_lacks "second install: no move" "fakesudo mv"
 expect_calls_lacks "second install: no stop, restart or removal" "docker rm"
 
-# a changed socket group is rewritten, reported as changed, and the stack is brought up again
-echo 999 > "$STATE/docker_gid"
+# an upgrade from the socket-proxy layout: the retired docker-gid.env and ingress-proxy network are removed, the stack
+# is brought up with --remove-orphans (which removes the live socket-proxy container), all logged, idempotent
+fresh
+ins install
+mkdir -p "$R$INST"
+echo "DOCKER_GID=998" > "$R$INST/docker-gid.env"
+touch "$STATE/legacy_network" "$STATE/legacy_container"
 t_reset_calls
 ins install
-expect_rc "install with a new socket group" 0
-expect_out_has "stale gid reports changed" "changed: $R$INST/docker-gid.env"
-expect_eq "stale gid rewritten" "$(cat "$R$INST/docker-gid.env")" "DOCKER_GID=999"
-expect_calls_has "stale gid brings the stack up again" " up -d"
+expect_rc "install over the socket-proxy layout" 0
+expect_out_has "the retired gid file removal is logged" "changed: removed retired $INST/docker-gid.env"
+expect_out_has "the retired network removal is logged" "changed: removed retired network platform-ingress_ingress-proxy"
+expect_eq "the retired gid file is gone" "$([ -e "$R$INST/docker-gid.env" ] && echo present || echo absent)" "absent"
+expect_eq "the retired network is gone" "$([ -e "$STATE/legacy_network" ] && echo present || echo absent)" "absent"
+expect_eq "the socket-proxy container is gone" "$([ -e "$STATE/legacy_container" ] && echo present || echo absent)" "absent"
+expect_calls_has "the upgrade brings the stack up with --remove-orphans" " up -d --remove-orphans"
+expect_calls_has "the retired network is removed with docker network rm" "docker network rm platform-ingress_ingress-proxy"
+t_reset_calls
+ins install
+expect_rc "install after the upgrade" 0
+expect_out_lacks "a second install after the upgrade changes nothing" "changed:"
+expect_calls_lacks "no second network removal" "network rm"
+
+# a leftover socket-proxy container alone (nothing else changed) still forces the stack up so it is removed
+touch "$STATE/legacy_container"
+t_reset_calls
+ins install
+expect_rc "install with only a leftover socket-proxy container" 0
+expect_calls_has "a leftover socket-proxy container forces compose up" " up -d --remove-orphans"
+expect_eq "the leftover container is removed" "$([ -e "$STATE/legacy_container" ] && echo present || echo absent)" "absent"
+# ... and an install that cannot remove it fails loudly
+touch "$STATE/legacy_container" "$STATE/orphan_stays"
+ins install
+expect_rc "a socket-proxy container that survives compose up fails the install" 1
+expect_out_has "the surviving socket-proxy container is named" "a socket-proxy container still exists after compose up"
+rm -f "$STATE/legacy_container" "$STATE/orphan_stays"
 
 # a stack that is down is started even when no file changed
 rm "$STATE/stack_up"
@@ -558,7 +615,7 @@ expect_out_has "compose up failure is named" "docker compose up failed"
 
 # bounded health wait
 fresh
-printf '%s|cloudflared|running|healthy\n%s|traefik|running|unhealthy\n%s|socket-proxy|running|healthy\n%s|down-page|running|healthy\n' "$CF" "$TR" "$SP" "$DP" > "$STATE/ps"
+printf '%s|cloudflared|running|healthy\n%s|traefik|running|unhealthy\n%s|down-page|running|healthy\n' "$CF" "$TR" "$DP" > "$STATE/ps"
 start=$SECONDS
 INSTALL_INGRESS_HEALTH_TIMEOUT=1 ins install
 elapsed=$((SECONDS - start))
@@ -567,11 +624,11 @@ expect_out_has "unhealthy container is named" "$TR is unhealthy"
 expect_out_lacks "healthy containers are not named" "$CF is"
 if [ "$elapsed" -le 8 ]; then _pass; else _fail "the health wait is bounded" "took ${elapsed}s with a 1s timeout"; fi
 fresh
-printf '%s|cloudflared|running|healthy\n%s|traefik|running|healthy\n%s|socket-proxy|running|starting\n' "$CF" "$TR" "$SP" > "$STATE/ps"
+printf '%s|cloudflared|running|healthy\n%s|traefik|running|starting\n' "$CF" "$TR" > "$STATE/ps"
 INSTALL_INGRESS_HEALTH_TIMEOUT=1 ins install
 expect_rc "a missing container is not healthy" 1
 expect_out_has "a missing container is named" "service down-page has no container"
-expect_out_has "a starting container is named" "$SP is starting"
+expect_out_has "a starting container is named" "$TR is starting"
 
 # ---- token gid constant equals the compose group_add ----
 
@@ -617,28 +674,32 @@ vcase() { # label, setup function, expected FAIL fragment
 v_port() { echo "8080/tcp" > "$STATE/port_$TR"; }
 v_sock_traefik() { printf '/var/run/docker.sock\n' > "$STATE/mounts_$TR"; }
 v_sock_other() { printf '/var/run/docker.sock\n' > "$STATE/mounts_$DP"; }
-v_sock_proxy_none() { printf '/etc/hosts\n' > "$STATE/mounts_$SP"; }
+v_docker_env() { printf 'TRAEFIK_PROVIDERS_DOCKER_ENDPOINT=tcp://x:2375\n' > "$STATE/envcmd_$TR"; }
+v_legacy_container() { touch "$STATE/legacy_container"; }
+v_legacy_network() { touch "$STATE/legacy_network"; }
+v_legacy_gid_file() { echo "DOCKER_GID=998" > "$R$INST/docker-gid.env"; }
 v_label() { printf 'platform.app\n' > "$STATE/labels_$DP"; }
-v_unhealthy() { printf '%s|cloudflared|running|healthy\n%s|traefik|running|unhealthy\n%s|socket-proxy|running|healthy\n%s|down-page|running|healthy\n' "$CF" "$TR" "$SP" "$DP" > "$STATE/ps"; }
-v_exited() { printf '%s|cloudflared|exited|\n%s|traefik|running|healthy\n%s|socket-proxy|running|healthy\n%s|down-page|running|healthy\n' "$CF" "$TR" "$SP" "$DP" > "$STATE/ps"; }
+v_unhealthy() { printf '%s|cloudflared|running|healthy\n%s|traefik|running|unhealthy\n%s|down-page|running|healthy\n' "$CF" "$TR" "$DP" > "$STATE/ps"; }
+v_exited() { printf '%s|cloudflared|exited|\n%s|traefik|running|healthy\n%s|down-page|running|healthy\n' "$CF" "$TR" "$DP" > "$STATE/ps"; }
 v_no_net() { rm "$STATE/network_exists"; }
 v_net_v6() { echo "bridge true" > "$STATE/network_desc"; }
 v_token_env() { printf '["TUNNEL_TOKEN=%s"] ["tunnel"]\n' "$TOKEN" > "$STATE/envcmd_$CF"; }
 v_token_cmd() { printf '["A=b"] ["tunnel","--token","%s","run"]\n' "$TOKEN" > "$STATE/envcmd_$CF"; }
-v_stale_gid() { echo 777 > "$STATE/docker_gid"; }
 v_group_member() { echo "claude" > "$STATE/group_members"; }
-v_traefik_net() { printf 'ingress-proxy\n' > "$STATE/networks_$TR"; }
+v_traefik_net() { printf 'other\n' > "$STATE/networks_$TR"; }
 v_dns() { echo 1 > "$STATE/dns_rc"; }
 v_drift() { echo "# drift" >> "$R$INST/compose.yaml"; }
 v_mode() { chmod 600 "$R$INST/dynamic/dynamic.yml"; }
 v_missing_file() { rm "$R$INST/down-page/index.html"; }
-v_gid_file() { rm "$R$INST/docker-gid.env"; }
 v_ps_fail() { touch "$STATE/ps_fail"; }
 v_token_perm() { chmod 600 "$R/etc/platform/cloudflared.token"; }
 vcase "a container publishes a port" v_port "FAIL: $TR publishes a port"
 vcase "traefik mounts the docker socket" v_sock_traefik "FAIL: $TR mounts the Docker socket"
 vcase "another container mounts the docker socket" v_sock_other "FAIL: $DP mounts the Docker socket"
-vcase "socket-proxy lacks the socket mount" v_sock_proxy_none "socket-proxy does not mount the Docker socket"
+vcase "traefik has a Docker provider variable" v_docker_env "FAIL: $TR has a TRAEFIK_PROVIDERS_DOCKER_* variable"
+vcase "a socket-proxy container still exists" v_legacy_container "no retired socket-proxy pieces: a socket-proxy container still exists"
+vcase "the retired ingress-proxy network still exists" v_legacy_network "no retired socket-proxy pieces: retired network still present: platform-ingress_ingress-proxy"
+vcase "the retired docker-gid.env still exists" v_legacy_gid_file "no retired socket-proxy pieces: retired file still present"
 vcase "an ingress container carries platform.app" v_label "FAIL: $DP carries the platform.app label"
 vcase "an unhealthy container" v_unhealthy "FAIL: $TR is unhealthy"
 vcase "an exited container" v_exited "FAIL: $CF is exited"
@@ -646,27 +707,126 @@ vcase "the platform network is missing" v_no_net "network platform is missing"
 vcase "the platform network has IPv6 on" v_net_v6 "network platform is 'bridge true'"
 vcase "the token appears in Env" v_token_env "the tunnel token appears in the Env or Cmd of $CF"
 vcase "the token appears in Cmd" v_token_cmd "the tunnel token appears in the Env or Cmd of $CF"
-vcase "the stored gid is stale" v_stale_gid "stored DOCKER_GID differs"
 vcase "the token group has a member" v_group_member "token group is private: token group (gid 64321) has members"
 vcase "traefik is off the platform network" v_traefik_net "traefik is not on the platform network"
 vcase "container DNS cannot resolve the edge" v_dns "egress-allow.cidrs"
 vcase "compose.yaml drifted from the payload" v_drift "compose.yaml bytes differ from the embedded payload"
 vcase "dynamic.yml has the wrong mode" v_mode "dynamic.yml uid:gid/mode is '0:0 600'"
 vcase "a payload file is missing" v_missing_file "down-page index.html missing"
-vcase "the gid file is missing" v_gid_file "stored DOCKER_GID file missing"
 vcase "the compose project cannot be read" v_ps_fail "cannot read the state of the compose project"
 vcase "the token file mode drifted" v_token_perm "token file: token file uid:gid/mode is '0:64321 600'"
+
+# the dynamic directory is root:deploy 1775, and the deploy user's rights on it are probed as the deploy user
+v_dyn_mode() { chmod 755 "$R$INST/dynamic"; }
+v_dyn_group() { echo "dynamic 0:0" > "$STATE/stat_override"; }
+v_dp_replace() { touch "$STATE/deploy_can_mv"; }
+v_dp_delete() { touch "$STATE/deploy_can_rm"; }
+v_dp_create() { touch "$STATE/deploy_no_create"; }
+v_dp_ownrm() { touch "$STATE/deploy_no_delete"; }
+v_no_dgroup() { touch "$STATE/deploy_group_absent"; }
+vcase "the dynamic directory lost its sticky group-writable mode" v_dyn_mode "dynamic directory uid:gid/mode is '0:64330 755', want '0:64330 1775'"
+vcase "the dynamic directory has the wrong group" v_dyn_group "dynamic directory uid:gid/mode is '0:0 1775', want '0:64330 1775'"
+vcase "the deploy user can replace dynamic.yml" v_dp_replace "deploy user permissions on the dynamic directory: the deploy user could replace dynamic.yml"
+installed
+v_dp_delete
+ins verify
+expect_rc "verify fails: the deploy user can delete dynamic.yml" 1
+expect_out_has "verify names the cause: the deploy user can delete dynamic.yml" "the deploy user could delete dynamic.yml (operation: rm succeeded)"
+vcase "the deploy user cannot create a route file" v_dp_create "the deploy user cannot create a route file"
+vcase "the deploy user cannot delete its own route file" v_dp_ownrm "the deploy user cannot delete its own route file (operation: delete)"
+vcase "the deploy group is missing" v_no_dgroup "the deploy group does not exist"
+installed
+ins verify
+expect_calls_has "verify probes as the deploy user: create" "fakeasdeploy touch -- $R$INST/dynamic/app-zz-perm-probe-"
+expect_calls_has "verify probes as the deploy user: mv over dynamic.yml" "fakeasdeploy mv -f -- $R$INST/dynamic/app-zz-perm-probe-"
+expect_calls_has "verify probes as the deploy user: rm of dynamic.yml" "fakeasdeploy rm -f -- $R$INST/dynamic/dynamic.yml"
+expect_out_has "the deploy-user probe passes on the clean fixture" "PASS: deploy user permissions on the dynamic directory"
+expect_eq "the probe leaves no file behind" "$(find "$R$INST/dynamic" -name 'app-*' | wc -l)" "0"
+expect_eq "the dynamic directory is mode 1775" "$(stat -c %a "$R$INST/dynamic")" "1775"
+
+# the dynamic/ shape check: only app-<valid-name>.yml files in exactly the shape platform deploy renders
+good_route() { # app: a route file as render_route writes it
+  printf '# Generated by platform deploy for %s. Do not edit; removed by platform rm-db.\nhttp:\n  routers:\n    app-%s:\n      rule: Host(`%s.example.test`)\n      entryPoints: [web]\n      service: app-%s\n  services:\n    app-%s:\n      loadBalancer:\n        servers:\n          - url: http://%s:8080\n' "$1" "$1" "$1" "$1" "$1" "$1"
+}
+installed
+good_route demo > "$R$INST/dynamic/app-demo.yml"
+ins verify
+expect_rc "verify passes with a conforming route file" 0
+expect_out_has "a conforming route file passes the shape check" "PASS: dynamic directory holds only rendered route files"
+installed
+good_route demo > "$R$INST/dynamic/rogue.yml"
+ins verify
+expect_rc "verify fails on a rogue file name" 1
+expect_out_has "the rogue file name is reported" "unexpected file in the dynamic directory: 'rogue.yml'"
+installed
+good_route demo > "$R$INST/dynamic/app-demo.yml"
+printf '      priority: 99999\n' >> "$R$INST/dynamic/app-demo.yml"
+ins verify
+expect_rc "verify fails on a route file with a priority key" 1
+expect_out_has "the priority line is reported" "app-demo.yml line 13 is not part of the shape platform deploy renders"
+installed
+good_route demo | sed 's/^    app-demo:$/    app-other:/' > "$R$INST/dynamic/app-demo.yml"
+ins verify
+expect_rc "verify fails on a router that is not the app's own" 1
+expect_out_has "the foreign router is reported" "app-demo.yml line 4 is not part of the shape"
+
+# a misconfigured directory (not sticky) is never probed destructively: dynamic.yml survives even if the deploy user could mv/rm
+installed
+dyn_before="$(cat "$R$INST/dynamic/dynamic.yml")"
+v_dyn_mode
+v_dp_replace
+v_dp_delete
+t_reset_calls
+ins verify
+expect_rc "verify fails on a non-sticky dynamic directory" 1
+expect_eq "dynamic.yml is intact after probing a misconfigured directory" "$(cat "$R$INST/dynamic/dynamic.yml")" "$dyn_before"
+expect_calls_lacks "no replace attempt on a misconfigured directory" "fakeasdeploy mv -f -- $R$INST/dynamic/app-zz-perm-probe-"
+expect_calls_lacks "no delete attempt on dynamic.yml on a misconfigured directory" "fakeasdeploy rm -f -- $R$INST/dynamic/dynamic.yml"
+fresh
+ins install
+expect_calls_has "install chowns the dynamic directory to the deploy group" "chown root:64330 $R$INST/dynamic"
+
+# install refuses, before placing anything, when the deploy group does not exist
+fresh
+touch "$STATE/deploy_group_absent"
+ins install
+expect_rc "install without the deploy group" 1
+expect_out_has "the missing deploy group is named with the fix" "the deploy group does not exist; run"
+no_docker_calls "no deploy group: no docker command"
+expect_eq "no deploy group: nothing installed" "$(find "$R/opt" 2>/dev/null | wc -l)" "0"
+
+# the access env file: checked like the ingress env file, values never printed
+v_acc_missing() { rm "$R/etc/platform/access.env"; }
+v_acc_gw() { chmod 664 "$R/etc/platform/access.env"; }
+v_acc_owner() { echo "access.env 1000:0" > "$STATE/stat_override"; }
+v_acc_symlink() { mv "$R/etc/platform/access.env" "$R/etc/platform/real.env"; ln -s real.env "$R/etc/platform/access.env"; }
+v_acc_aud() { printf 'ACCESS_TEAM_DOMAIN=example.cloudflareaccess.com\nACCESS_AUD=bad-aud-VALUE123\n' > "$R/etc/platform/access.env"; }
+v_acc_team() { printf 'ACCESS_TEAM_DOMAIN=evil.example.test\nACCESS_AUD=%s\n' "$(printf '0%.0s' {1..64})" > "$R/etc/platform/access.env"; }
+v_acc_noaud() { printf 'ACCESS_TEAM_DOMAIN=example.cloudflareaccess.com\n' > "$R/etc/platform/access.env"; }
+v_acc_twice() { printf 'ACCESS_TEAM_DOMAIN=example.cloudflareaccess.com\nACCESS_TEAM_DOMAIN=other.cloudflareaccess.com\nACCESS_AUD=%s\n' "$(printf '0%.0s' {1..64})" > "$R/etc/platform/access.env"; }
+vcase "the access env file is missing" v_acc_missing "access env file: access env file missing"
+vcase "the access env file is group writable" v_acc_gw "access env file is group or world writable"
+vcase "the access env file is not root owned" v_acc_owner "access env file is not owned by root"
+vcase "the access env file is a symlink" v_acc_symlink "access env file is a symlink"
+vcase "ACCESS_AUD is malformed" v_acc_aud "exactly one valid ACCESS_AUD= line"
+vcase "ACCESS_TEAM_DOMAIN is not a cloudflareaccess.com name" v_acc_team "exactly one valid ACCESS_TEAM_DOMAIN= line"
+vcase "ACCESS_AUD is absent" v_acc_noaud "exactly one valid ACCESS_AUD= line"
+vcase "ACCESS_TEAM_DOMAIN twice" v_acc_twice "exactly one valid ACCESS_TEAM_DOMAIN= line"
+installed
+v_acc_aud
+ins verify
+expect_out_lacks "a malformed ACCESS_AUD value is never printed" "VALUE123"
 
 # fail-closed container_checks branches: an unreadable property is a FAIL, never a pass
 v_inspect_labels() { touch "$STATE/inspect_fail_labels_$TR"; }
 v_inspect_mounts() { touch "$STATE/inspect_fail_mounts_$DP"; }
-v_inspect_all() { touch "$STATE/inspect_fail_$SP"; }
+v_inspect_all() { touch "$STATE/inspect_fail_$DP"; }
 v_envcmd_inspect() { touch "$STATE/inspect_fail_$CF"; }
 v_envcmd_empty() { : > "$STATE/envcmd_$CF"; }
 vcase "the labels of a container cannot be inspected" v_inspect_labels "FAIL: cannot inspect the labels of $TR"
 vcase "the mounts of a container cannot be inspected" v_inspect_mounts "FAIL: cannot inspect the mounts of $DP"
-vcase "a container cannot be inspected at all (labels)" v_inspect_all "FAIL: cannot inspect the labels of $SP"
-vcase "a container cannot be inspected at all (mounts)" v_inspect_all "FAIL: cannot inspect the mounts of $SP"
+vcase "a container cannot be inspected at all (labels)" v_inspect_all "FAIL: cannot inspect the labels of $DP"
+vcase "a container cannot be inspected at all (mounts)" v_inspect_all "FAIL: cannot inspect the mounts of $DP"
 vcase "the Env and Cmd of cloudflared cannot be inspected" v_envcmd_inspect "FAIL: cannot compare the token with the Env and Cmd of $CF"
 vcase "the Env and Cmd of cloudflared come back empty" v_envcmd_empty "FAIL: cannot compare the token with the Env and Cmd of $CF"
 installed
@@ -686,7 +846,7 @@ expect_out_has "the drifted compose.yaml is reported changed" "changed: $R$INST/
 expect_out_has "the wrong-mode dynamic.yml is reported changed" "changed: $R$INST/dynamic/dynamic.yml"
 expect_out_has "the symlinked directory is reported changed" "changed: $R$INST/down-page/"
 expect_out_has "the file in the replaced directory is placed again" "changed: $R$INST/down-page/index.html"
-expect_out_has "the untouched gid file stays already" "already: $R$INST/docker-gid.env"
+expect_out_has "the absent gid file stays already" "already: no $INST/docker-gid.env"
 expect_eq "compose.yaml bytes are restored" "$(cmp -s "$R$INST/compose.yaml" "$REPO_COMPOSE" && echo same)" "same"
 expect_eq "dynamic.yml mode is restored" "$(stat -c %a "$R$INST/dynamic/dynamic.yml")" "644"
 expect_eq "down-page is a real directory again" "$([ -d "$R$INST/down-page" ] && [ ! -L "$R$INST/down-page" ] && echo dir)" "dir"
@@ -710,6 +870,9 @@ APP_HOST="ingress-livetest.example.test"
 header_variants() { awk '/^# variants-begin$/ { on = 1; next } /^# variants-end$/ { on = 0 } on && !/^# variant \| code$/' "$REPO_DYNAMIC" | sed 's/^# //'; }
 live_fresh() {
   fresh
+  mkdir -p "$R$INST/dynamic"
+  chmod 1775 "$R$INST/dynamic"
+  cp "$REPO_DYNAMIC" "$R$INST/dynamic/dynamic.yml"
   export INSTALL_INGRESS_LIVE_LOCAL=1
   printf '{"msg":"start"}\n' > "$STATE/traefik_log_pre"
   : > "$STATE/traefik_log_post"
@@ -718,6 +881,7 @@ live() { run_cmd "$script" verify --live "$@"; }
 removed_all() { # label
   expect_eq "$1: all four containers removed by id" "$(sort "$STATE/removed_ids" 2>/dev/null | tr '\n' ' ')" "aaaaaaaaaaaa bbbbbbbbbbbb cccccccccccc eeeeeeeeeeee "
   expect_eq "$1: no fixture left" "$(find "$STATE" -maxdepth 1 -name 'created_*' | wc -l)" "0"
+  expect_eq "$1: no test route file left" "$(find "$R$INST/dynamic" -name 'app-ingress-livetest*' 2>/dev/null | wc -l)" "0"
 }
 
 # nothing is created without --live
@@ -753,6 +917,7 @@ expect_eq "every created container image is pinned by tag and digest" "$runs_ok"
 expect_eq "four containers were created" "$(grep -c '^docker run ' "$CALL_LOG")" "4"
 expect_eq "the test app image is the busybox pin compose.yaml already uses" "$(grep -c "$(sed -n 's/^readonly LIVE_IMAGE="\(.*\)"$/\1/p' "$script")" "$REPO_COMPOSE")" "1"
 expect_eq "the curl image pin has an exact tag and digest" "$(sed -n 's/^readonly CURL_IMAGE="\(.*\)"$/\1/p' "$script" | grep -cE '^[a-z0-9.-]+/[a-z0-9._/-]+:[0-9]+\.[0-9]+\.[0-9]+@sha256:[0-9a-f]{64}$')" "1"
+expect_out_has "the live run proves the deploy user's rights on the dynamic directory" "PASS: deploy user permissions on the dynamic directory"
 expect_out_has "positive control passes" "PASS: positive control: a normal path reaches the labelled app (200)"
 expect_out_has "positive control log check passes" "PASS: positive control: the request appears in the app's own log"
 while IFS=' ' read -r vname _ vcode; do
@@ -761,8 +926,12 @@ while IFS=' ' read -r vname _ vcode; do
 done < <(header_variants)
 expect_out_has "ping refusal passes" "PASS: the Traefik ping port refuses a connection from a sibling container"
 expect_out_has "killed listener passes" "PASS: a killed listener in a running container answers the friendly 502"
-expect_out_has "stop-then-down passes" "PASS: a stopped app answers the friendly 503 on /"
-expect_out_has "stop-then-down non-root passes" "PASS: a stopped app answers the friendly 503 on a non-root path"
+expect_out_has "stop-then-down passes" "PASS: a stopped app with a route answers the friendly 502 on /"
+expect_out_has "stop-then-down non-root passes" "PASS: a stopped app with a route answers the friendly 502 on a non-root path"
+expect_out_has "the test route files are removed" "PASS: test route files removed"
+# the route file is written in the shape platform deploy writes, with the fixture's own host and backend
+expect_eq "the route file has the deploy shape" "$(grep -c -e '^http:$' -e '^    app-ingress-livetest:$' -e 'rule: Host(`ingress-livetest.example.test`)' -e 'entryPoints: \[web\]' -e '^      service: app-ingress-livetest$' -e 'url: http://ingress-livetest:8080$' "$STATE/route_seen")" "7"
+expect_eq "no temp route file is left behind" "$(find "$R$INST/dynamic" -name '*.new' | wc -l)" "0"
 expect_out_lacks "a normal run never holds" "HOLD:"
 curl_total="$(grep -c '^docker exec ingress-livetest-curl curl' "$CALL_LOG")"
 ping_total="$(grep -c 'http://traefik:8082/' "$CALL_LOG")"
@@ -806,6 +975,8 @@ lfail() { # label, switch file, expected message
   expect_out_has "live failure message: $1" "$3"
   removed_all "after the failure ($1)"
 }
+lfail "deploy user can replace dynamic.yml" deploy_can_mv "FAIL: deploy user permissions on the dynamic directory: the deploy user could replace dynamic.yml"
+lfail "deploy user cannot create a route file" deploy_no_create "FAIL: deploy user permissions on the dynamic directory: the deploy user cannot create a route file"
 lfail "app not routed" app_unrouted "FAIL: positive control: a normal path reaches the labelled app (200): status 404, want 200"
 lfail "app log blind" no_app_log "the request does not appear in the app's log"
 lfail "unmatched host served" unmatched_200 "FAIL: unmatched host answers the friendly 503 on /: status 200, want 503"
@@ -816,7 +987,7 @@ lfail "a variant reaches the app" jobs_leak "/_jobs variant sub reached the app"
 lfail "killed listener still served" kill_ineffective "a killed listener in a running container answers the friendly 502: status 200, want 502"
 lfail "killed listener answered 503" killed_503 "a killed listener in a running container answers the friendly 502: status 503, want 502"
 lfail "listener could not be killed" kill_fail "could not kill the test app's listener"
-lfail "stopped app keeps answering 502" stop_502 "the stopped app still answers 502"
+lfail "stopped app answers 503 instead of 502" stop_503 "FAIL: a stopped app with a route answers the friendly 502 on /: status 503, want 502"
 live_fresh
 touch "$STATE/rm_fail"
 live
@@ -927,14 +1098,12 @@ hostile_problems() { # a docker run call-log line: prints what the hostile fixtu
   { [[ "$prio" =~ ^[0-9]+$ ]] && [ "$prio" -ge 2000000000 ]; } || echo "priority '$prio' is not high"
 }
 expect_eq "hostile label: the fixture carries the platform.app label, a Host rule and a high priority" "$(hostile_problems "$hostile_line")" ""
-expect_out_has "hostile label: the control reaches the app through its own router" "PASS: hostile-label app: a normal path reaches it through its own router (200)"
-expect_out_has "hostile label: /_jobs answers 503" "PASS: hostile-label app: /_jobs still answers the friendly 503"
-expect_out_has "hostile label: /_jobs/x answers 503" "PASS: hostile-label app: /_jobs/x still answers the friendly 503"
-expect_out_has "hostile label: the app's log shows no /_jobs" "PASS: hostile-label app: /_jobs is absent from its log"
+expect_out_has "hostile label: /index.html is not routed (503)" "PASS: hostile-label app without a route file is not routed on /index.html"
+expect_out_has "hostile label: /_jobs is not routed (503)" "PASS: hostile-label app without a route file is not routed on /_jobs"
+expect_out_has "hostile label: the app's log shows no request" "PASS: hostile-label app: its log shows no routed request"
 expect_calls_has "hostile label: the hostile app is stopped before any hold" "docker stop -t 1 ingress-livetest-hostile"
-lfail "hostile app bypasses the deny" hostile_leak "FAIL: hostile-label app: /_jobs still answers the friendly 503: status 200, want 503"
-lfail "hostile app log shows the path" hostile_leak "hostile-label app: a /_jobs request reached it"
-lfail "hostile app not routed (control)" hostile_unrouted "FAIL: hostile-label app: a normal path reaches it through its own router (200): status 404, want 200"
+lfail "hostile labels get routed (Docker provider back)" hostile_routed "FAIL: hostile-label app without a route file is not routed on /index.html: status 200, want 503"
+lfail "hostile app log shows a request" hostile_routed "hostile-label app: a request reached it"
 lfail "hostile app cannot be stopped" hostile_stop_fail "could not stop the hostile-label app"
 # the probe cannot be weakened unnoticed: a lower priority fails the fixture check, a wrong expected code fails the run
 live_fresh
@@ -944,11 +1113,11 @@ run_cmd "$T_TMP/mut-hostile-prio.sh" verify --live
 hostile_line="$(grep -F -- '--name ingress-livetest-hostile' "$CALL_LOG" | head -n1)"
 expect_out_has_text "$(hostile_problems "$hostile_line")" "priority '5' is not high" "mutation: a lowered hostile priority is caught by the fixture check"
 live_fresh
-sed 's#"/_jobs" 503 yes#"/_jobs" 200 yes#' "$script" > "$T_TMP/mut-hostile-code.sh"
+sed 's#"\$hostile_host" "/_jobs" 503 yes#"$hostile_host" "/_jobs" 200 yes#' "$script" > "$T_TMP/mut-hostile-code.sh"
 chmod +x "$T_TMP/mut-hostile-code.sh"
 run_cmd "$T_TMP/mut-hostile-code.sh" verify --live
 expect_rc "mutation: expecting the wrong /_jobs code on the hostile app fails the run" 1
-expect_out_has "mutation: the wrong expected code is named" "FAIL: hostile-label app: /_jobs still answers the friendly 503: status 503, want 200"
+expect_out_has "mutation: the wrong expected code is named" "FAIL: hostile-label app without a route file is not routed on /_jobs: status 503, want 200"
 
 # signals during the run still remove every container
 live_bg() { # script args...; sets rc and out from the background run
@@ -1131,7 +1300,7 @@ hold_case() { # label, switch file, expected message
   removed_all "after the hold failure ($1)"
 }
 hold_case "the test app cannot be restarted" start_fail "FAIL: hold: could not restart the test app"
-hold_case "the restarted app is never routed again" start_stale "FAIL: hold: the restarted test app is not routed again (last status 503)"
+hold_case "the restarted app is never routed again" start_stale "FAIL: hold: the restarted test app is not routed again (last status 502)"
 hold_case "the traefik container id is empty" traefik_id_empty "FAIL: hold: cannot find the traefik container"
 hold_case "listing the traefik container fails" ps_fail_traefik "FAIL: hold: cannot find the traefik container"
 hold_case "the host clock cannot be read" date_fail "FAIL: hold: cannot read the host clock"

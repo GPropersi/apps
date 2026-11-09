@@ -19,9 +19,12 @@ here="$(cd "$(dirname "$0")" && pwd)"
 APP_RE='^[a-z][a-z0-9-]{1,30}$'
 JOB_RE='^[a-z][a-z0-9_-]{0,62}$'
 TEMPLATES=" go-react go-htmx fastapi-react flask node-hono "
-TOP_KEYS=" schema_version name owner purpose template memory_cap port health_path access jobs "
+TOP_KEYS=" schema_version name owner purpose template memory_cap port health_path access jobs volumes "
 TOP_REQUIRED="schema_version name owner purpose template memory_cap port"
 JOB_KEYS=" name schedule timeout catch_up "
+VOL_KEYS=" name path "
+VOL_NAME_RE='^[a-z][a-z0-9-]{0,30}$'
+VOL_PATH_RE='^/data(/[a-z0-9._-]+)*$'
 RESERVED_FILE="$here/reserved-names.txt"
 
 if [ "$#" -lt 1 ]; then
@@ -245,10 +248,89 @@ check_jobs() {
   [ -z "$n" ] || err "duplicate job name '$(echo "$n" | head -n 1)'"
 }
 
+# vol_indexes / vol_keys <n>: like job_indexes / job_keys, for volumes[N].
+vol_indexes() { awk -F '\t' '$1 ~ /^volumes\[[0-9]+\]/ { p = $1; sub(/^volumes\[/, "", p); sub(/\].*/, "", p); if (!(p in s)) { s[p] = 1; print p } }' "$flat"; }
+vol_keys() { awk -F '\t' -v p="volumes[$1]/" 'index($1, p) == 1 { print substr($1, length(p) + 1) }' "$flat"; }
+
+check_volume() {
+  local i="$1" k rest v where seen_keys=" "
+  where="volumes[$i]"
+  while IFS= read -r rest; do
+    k="${rest%%/*}"
+    if [ "$k" != "$rest" ]; then
+      err "$where/$k must be a scalar"
+      continue
+    fi
+    case "$VOL_KEYS" in
+      *" $k "*) ;;
+      *) err "$where has unknown key '$k'"; continue ;;
+    esac
+    seen_keys="$seen_keys$k "
+  done < <(vol_keys "$i")
+  case "$seen_keys" in *" name "*) ;; *) err "$where is missing required key 'name'" ;; esac
+  case "$seen_keys" in *" path "*) ;; *) err "$where is missing required key 'path'" ;; esac
+  case "$seen_keys" in
+    *" name "*)
+      v="$(ys_get "$flat" "volumes[$i]/name")"
+      [[ "$v" =~ $VOL_NAME_RE ]] || err "$where name '$v' must match $VOL_NAME_RE"
+      ;;
+    *) ;;
+  esac
+  case "$seen_keys" in
+    *" path "*)
+      v="$(ys_get "$flat" "volumes[$i]/path")"
+      if ! [[ "$v" =~ $VOL_PATH_RE ]]; then
+        err "$where path '$v' must be absolute under /data and match $VOL_PATH_RE"
+      else
+        case "/$v/" in
+          */./* | */../*) err "$where path '$v' must not contain a . or .. segment" ;;
+          *) ;;
+        esac
+      fi
+      ;;
+    *) ;;
+  esac
+}
+
+check_volumes() {
+  local i n names="" paths="" count=0 a b
+  if [ -n "$(ys_get "$flat" volumes)" ]; then
+    err "volumes must be a list of maps, not a scalar"
+    return
+  fi
+  if ys_has "$flat" "volumes[]"; then
+    err "volumes items must be maps (name, path), not plain values"
+  fi
+  if [ -z "$(vol_indexes)" ]; then
+    err "volumes is present but has no entries (omit the key instead)"
+    return
+  fi
+  for i in $(vol_indexes); do
+    check_volume "$i"
+    count=$((count + 1))
+    names="$names$(ys_get "$flat" "volumes[$i]/name")"$'\n'
+    paths="$paths$(ys_get "$flat" "volumes[$i]/path")"$'\n'
+  done
+  [ "$count" -le 4 ] || err "volumes has $count entries, the maximum is 4"
+  n="$(printf '%s' "$names" | grep -v '^$' | sort | uniq -d)"
+  [ -z "$n" ] || err "duplicate volume name '$(echo "$n" | head -n 1)'"
+  n="$(printf '%s' "$paths" | grep -v '^$' | sort | uniq -d)"
+  [ -z "$n" ] || err "duplicate volume path '$(echo "$n" | head -n 1)'"
+  # No path inside another (distinct paths only; equal ones are reported above).
+  while IFS= read -r a; do
+    [ -n "$a" ] || continue
+    while IFS= read -r b; do
+      [ -n "$b" ] && [ "$a" != "$b" ] || continue
+      case "$b" in "$a"/*) err "volume path '$b' is inside volume path '$a'" ;; *) ;; esac
+    done <<< "$paths"
+  done <<< "$paths"
+}
+
 check_scalar_keys() {
   local k v
   for k in $TOP_KEYS; do
     [ "$k" = jobs ] && continue
+    [ "$k" = volumes ] && continue
     ys_has "$flat" "$k" || continue
     if has_below "$k"; then
       err "$k must be a scalar value"
@@ -341,6 +423,7 @@ validate_one() {
   done
   check_scalar_keys
   if ys_has "$flat" jobs; then check_jobs; fi
+  if ys_has "$flat" volumes || has_below volumes; then check_volumes; fi
   rm -f "$flat"
 }
 

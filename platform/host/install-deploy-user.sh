@@ -379,15 +379,21 @@ payload_deploy_sh() {
 #              app.yaml (at most 16 KiB) into a private temp dir that is removed on every exit path
 #   validate   the installed validate-app-yaml.sh on <tmp>/<app>/app.yaml
 #   preflight  the shared per-app lock (flock, bounded wait), secrets dirs, network, curl, state root, registry root,
-#              connection.env
+#              routes dir, connection.env, and the two host files /etc/platform/ingress.env (PLATFORM_DOMAIN) and
+#              /etc/platform/access.env (ACCESS_TEAM_DOMAIN, ACCESS_AUD): each a regular, non-symlink, root-owned file
+#              that is not group or world writable, with well-formed values (the log names the key and file, never a value)
 #   pull       docker login (token on stdin, private DOCKER_CONFIG) and docker pull; resolves the immutable reference
 #              (repo digest, or the image ID under DEPLOY_SKIP_REGISTRY) used by every later phase instead of the tag
-#   inspect    architecture, numeric non-zero USER, no traefik.* / platform.* label, exactly one exposed <port>/tcp
+#   inspect    architecture, numeric non-zero USER, no traefik.* / platform.* label (traefik.* is inert now, routing is file based; still refused as defence in depth), exactly one exposed <port>/tcp
 #   swap       recover a leftover app-<app>-old, stop and rename the running container, run the new one
 #   health     curl on the health path (2xx within the wait) or, with no health_path, the container staying up
+#   route      <routes dir>/app-<app>.yml, the app's Traefik route (temp file + rename; skipped when identical). The previous
+#              route (or its absence) is recorded first
 #   commit     registry/<app>/app.yaml and deploy state (temp + rename), then the old container is removed
-# A swap or health failure removes the new container and restores the old one. A commit failure leaves the new container
-# running and the old one in place; the next deploy reconciles registry and state.
+# A swap, health or route failure removes the new container, restores the old one and puts the previous route back (so does
+# an interrupt or timeout before commit). A commit failure leaves the new container running, the new route in place and the
+# old container in place; the next deploy reconciles registry and state. A rollback re-renders the route from the port in
+# previous/app.yaml. `platform rm-db` removes the route file.
 #
 # Deploy state: <state root>/<app>/{current,previous}/{tag,digest,deployed-at,app.yaml}.
 #
@@ -400,7 +406,9 @@ payload_deploy_sh() {
 # restricted login; each defaults to the fixed production value): DEPLOY_NETWORK (platform), DEPLOY_SECRETS_ROOT
 # (/var/lib/platform/secrets), DEPLOY_JOB_SECRETS_ROOT (/var/lib/platform/job-secrets), DEPLOY_STATE_ROOT
 # (/var/lib/platform/deploy), DEPLOY_REGISTRY_ROOT (/var/lib/platform/registry), DEPLOY_LOCK_DIR
-# (/var/lib/platform/locks), DEPLOY_CONNECTION_ENV (/opt/platform/data/connection.env), DEPLOY_SKIP_REGISTRY (1 skips
+# (/var/lib/platform/locks), DEPLOY_CONNECTION_ENV (/opt/platform/data/connection.env), DEPLOY_ROUTES_DIR
+# (/opt/platform/ingress/dynamic), DEPLOY_INGRESS_ENV (/etc/platform/ingress.env), DEPLOY_ACCESS_ENV
+# (/etc/platform/access.env), DEPLOY_ENV_UID (0, the owner those two files must have), DEPLOY_SKIP_REGISTRY (1 skips
 # login and pull and uses the image already in the local daemon), DEPLOY_VALIDATOR
 # (/opt/platform/deploy/registry/validate-app-yaml.sh; its yaml reader is ../lib/yaml-subset.sh beside it),
 # DEPLOY_LOCK_WAIT (30), DEPLOY_EXEC_TIMEOUT (30, per docker call), DEPLOY_PULL_TIMEOUT (300, login and pull each),
@@ -419,6 +427,9 @@ readonly TAG_RE='^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$'
 readonly NET_RE='^[A-Za-z0-9][A-Za-z0-9_.-]{0,62}$'
 readonly NUM_RE='^[0-9]+$'
 readonly HOST_RE='^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$'
+readonly DOMAIN_RE='^[a-z0-9-]+(\.[a-z0-9-]+)+$'
+readonly TEAM_RE='^[a-z0-9-]+\.cloudflareaccess\.com$'
+readonly AUD_RE='^[0-9a-f]{64}$'
 readonly TOKEN_MAX=1024
 readonly YAML_MAX=16384
 readonly REGISTRY_HOST="ghcr.io"
@@ -432,6 +443,10 @@ STATE_ROOT="${DEPLOY_STATE_ROOT:-/var/lib/platform/deploy}"
 REGISTRY_ROOT="${DEPLOY_REGISTRY_ROOT:-/var/lib/platform/registry}"
 LOCK_DIR="${DEPLOY_LOCK_DIR:-/var/lib/platform/locks}"
 CONNECTION_ENV="${DEPLOY_CONNECTION_ENV:-/opt/platform/data/connection.env}"
+ROUTES_DIR="${DEPLOY_ROUTES_DIR:-/opt/platform/ingress/dynamic}"
+INGRESS_ENV="${DEPLOY_INGRESS_ENV:-/etc/platform/ingress.env}"
+ACCESS_ENV="${DEPLOY_ACCESS_ENV:-/etc/platform/access.env}"
+ENV_UID="${DEPLOY_ENV_UID:-0}"
 SKIP_REGISTRY="${DEPLOY_SKIP_REGISTRY:-0}"
 VALIDATOR="${DEPLOY_VALIDATOR:-/opt/platform/deploy/registry/validate-app-yaml.sh}"
 LOCK_WAIT="${DEPLOY_LOCK_WAIT:-30}"
@@ -454,10 +469,18 @@ FLAT=""
 MEMCAP=""
 PORT=""
 HEALTH_PATH=""
+VOL_NAMES=()
+VOL_PATHS=()
+RUN_VOLS=()
 PG_HOST=""
 PG_PORT=""
 RD_HOST=""
 RD_PORT=""
+DOMAIN=""
+ACC_TEAM=""
+ACC_AUD=""
+ROUTE_TOUCHED=0
+ROUTE_HAD=0
 IMAGE_REPO=""
 REF=""
 C_NEW=""
@@ -653,6 +676,21 @@ validate() {
   [[ "$MEMCAP" =~ ^[1-9][0-9]{0,2}m$ ]] || fail validate "memory_cap '$MEMCAP' is not usable"
   [[ "$PORT" =~ ^[1-9][0-9]{0,4}$ ]] || fail validate "port '$PORT' is not usable"
   [ "$(ys_get "$FLAT" name)" = "$APP" ] || fail validate "app.yaml name does not match the app '$APP'"
+  # The validator allows 1 to 4 volumes; read them with the same index scan and re-check the shapes (defence in depth).
+  VOL_NAMES=()
+  VOL_PATHS=()
+  local vi=0 vn vp
+  while ys_has "$FLAT" "volumes[$vi]/name"; do
+    vn="$(ys_get "$FLAT" "volumes[$vi]/name")"
+    vp="$(ys_get "$FLAT" "volumes[$vi]/path")"
+    [[ "$vn" =~ ^[a-z][a-z0-9-]{0,30}$ ]] || fail validate "volume name '$vn' is not usable"
+    [[ "$vp" =~ ^/data(/[a-z0-9._-]+)*$ ]] || fail validate "volume path '$vp' is not usable"
+    case "/$vp/" in */./* | */../*) fail validate "volume path '$vp' is not usable" ;; esac
+    VOL_NAMES+=("$vn")
+    VOL_PATHS+=("$vp")
+    vi=$((vi + 1))
+    [ "$vi" -le 4 ] || fail validate "more than 4 volumes"
+  done
   step_end
 }
 
@@ -678,13 +716,46 @@ take_lock() {
   log "phase=lock end rc=0"
 }
 
-# env_value <key>: the value of KEY=VALUE from connection.env (last one wins), parsed, never sourced.
+# env_value <key> [file]: the value of KEY=VALUE from connection.env (or the file given; last one wins), parsed, never
+# sourced.
 env_value() {
-  local line v=""
+  local line v="" f="${2:-$CONNECTION_ENV}"
   while IFS= read -r line || [ -n "$line" ]; do
     case "$line" in "$1="*) v="${line#"$1="}" ;; *) ;; esac
-  done <"$CONNECTION_ENV"
+  done <"$f"
   printf '%s' "$v"
+}
+
+# host_file_ok <file>: 0 when the file is a regular, non-symlink file owned by $ENV_UID and not group or world writable. The
+# reason (never a value) goes to HOST_FILE_WHY.
+HOST_FILE_WHY=""
+host_file_ok() {
+  local f="$1" meta uid mode g o
+  HOST_FILE_WHY=""
+  if [ -L "$f" ]; then HOST_FILE_WHY="is a symlink"; return 1; fi
+  if [ ! -f "$f" ] || [ ! -r "$f" ]; then HOST_FILE_WHY="is missing or not a readable regular file"; return 1; fi
+  meta="$(stat -c '%u %a' -- "$f" 2>/dev/null)" || { HOST_FILE_WHY="cannot be examined"; return 1; }
+  uid="${meta% *}"
+  mode="${meta#* }"
+  if [ "$uid" != "$ENV_UID" ]; then HOST_FILE_WHY="is not owned by root"; return 1; fi
+  if ! [[ "$mode" =~ ^[0-7]{3,4}$ ]]; then HOST_FILE_WHY="has an unreadable mode"; return 1; fi
+  g="${mode: -2:1}"
+  o="${mode: -1}"
+  if [ $((g & 2)) -ne 0 ] || [ $((o & 2)) -ne 0 ]; then HOST_FILE_WHY="is group or world writable"; return 1; fi
+  return 0
+}
+
+# load_host_settings: PLATFORM_DOMAIN from the ingress env file and ACCESS_TEAM_DOMAIN / ACCESS_AUD from the access env file.
+# Anything missing or invalid fails the deploy in preflight; the log names the key and the file, never the value.
+load_host_settings() {
+  host_file_ok "$INGRESS_ENV" || fail preflight "the ingress env file $INGRESS_ENV $HOST_FILE_WHY: run \`make host-ingress HOST=<alias> ARGS=verify\`"
+  host_file_ok "$ACCESS_ENV" || fail preflight "the access env file $ACCESS_ENV $HOST_FILE_WHY: create it by hand (platform/ingress/README.md, Host files you create by hand)"
+  DOMAIN="$(env_value PLATFORM_DOMAIN "$INGRESS_ENV")"
+  ACC_TEAM="$(env_value ACCESS_TEAM_DOMAIN "$ACCESS_ENV")"
+  ACC_AUD="$(env_value ACCESS_AUD "$ACCESS_ENV")"
+  [[ "$DOMAIN" =~ $DOMAIN_RE ]] || fail preflight "PLATFORM_DOMAIN in $INGRESS_ENV is missing or malformed"
+  [[ "$ACC_TEAM" =~ $TEAM_RE ]] || fail preflight "ACCESS_TEAM_DOMAIN in $ACCESS_ENV is missing or malformed"
+  [[ "$ACC_AUD" =~ $AUD_RE ]] || fail preflight "ACCESS_AUD in $ACCESS_ENV is missing or malformed"
 }
 
 preflight() {
@@ -696,7 +767,9 @@ preflight() {
   command -v curl >/dev/null 2>&1 || fail preflight "curl is not installed"
   [ -d "$STATE_ROOT" ] && [ ! -L "$STATE_ROOT" ] && [ -w "$STATE_ROOT" ] || fail preflight "the deploy state root $STATE_ROOT is missing or not writable by this user: run \`make host-deploy-user HOST=<alias> ARGS=install\`"
   [ -d "$REGISTRY_ROOT" ] && [ ! -L "$REGISTRY_ROOT" ] && [ -w "$REGISTRY_ROOT" ] || fail preflight "the registry root $REGISTRY_ROOT is missing or not writable by this user: run \`make host-jobs HOST=<alias> ARGS=install\`"
+  [ -d "$ROUTES_DIR" ] && [ ! -L "$ROUTES_DIR" ] && [ -w "$ROUTES_DIR" ] || fail preflight "the routes dir $ROUTES_DIR is missing or not writable by this user: run \`make host-ingress HOST=<alias> ARGS=install\`"
   [ -f "$CONNECTION_ENV" ] && [ -r "$CONNECTION_ENV" ] || fail preflight "the connection file $CONNECTION_ENV is missing: run \`make host-data HOST=<alias> ARGS=install\`"
+  load_host_settings
   PG_HOST="$(env_value PLATFORM_PG_HOST)"
   PG_PORT="$(env_value PLATFORM_PG_PORT)"
   RD_HOST="$(env_value PLATFORM_REDIS_HOST)"
@@ -787,6 +860,15 @@ restore_old() {
   local bad=0
   SWAP_OPEN=0
   log "restoring the previous container"
+  # The route written by this run goes back first: the previous content, or no file when there was none.
+  if [ "$ROUTE_TOUCHED" -eq 1 ]; then
+    ROUTE_TOUCHED=0
+    if [ "$ROUTE_HAD" -eq 1 ]; then
+      (umask 022 && put_file "$(route_file)" "$TMPD/route.prev") || { log "phase=route could not restore the previous route"; bad=1; }
+    else
+      rm -f -- "$(route_file)" || { log "phase=route could not remove the new route"; bad=1; }
+    fi
+  fi
   # The new container is removed only when the name is known to be ours: no original existed, or it was renamed away.
   if [ "$NEW_RUN" -eq 1 ] && { [ "$ORIG_PRESENT" -eq 0 ] || [ "$RENAMED" -eq 1 ]; }; then
     try_phase "$EXEC_TIMEOUT" swap "" docker rm -f -v "$C_NEW"
@@ -801,7 +883,7 @@ restore_old() {
     [ "$PHASE_RC" -eq 0 ] || bad=1
   fi
   if [ "$bad" -eq 1 ]; then
-    err "deploy: THE PREVIOUS CONTAINER MAY NOT BE RESTORED: check app-$APP and app-$APP-old by hand; the next deploy reconciles"
+    err "deploy: THE PREVIOUS CONTAINER OR ROUTE MAY NOT BE RESTORED: check app-$APP, app-$APP-old and $(route_file) by hand; the next deploy reconciles"
   fi
 }
 
@@ -817,8 +899,34 @@ swap_step() {
   [ "$PHASE_RC" -eq 0 ] || fail_restore swap "$2 failed (rc $PHASE_RC)"
 }
 
+# prep_volumes: for each declared volume, create it (idempotent) with the app labels. An existing volume of that name whose
+# platform.app label differs fails the deploy here, before any container change. Sets RUN_VOLS to the -v arguments.
+prep_volumes() {
+  local i vname vol want errtext
+  RUN_VOLS=()
+  for i in "${!VOL_NAMES[@]}"; do
+    vname="${VOL_NAMES[$i]}"
+    vol="app_${APP}_${vname}"
+    try_phase "$EXEC_TIMEOUT" swap "" docker volume inspect --format '{{index .Labels "platform.app"}}' "$vol"
+    if [ "$PHASE_RC" -eq 0 ]; then
+      want="$PHASE_OUT"
+      [ "$want" = "$APP" ] || fail swap "volume $vol exists but is labelled platform.app='$want', not '$APP'; refusing to mount it (nothing was changed)"
+    else
+      errtext="$(head -c 1000 "$ERRF")"
+      case "$errtext" in
+        *[Nn]o\ such*) ;;
+        *) fail swap "cannot tell whether volume $vol exists (probe rc $PHASE_RC); nothing was changed" ;;
+      esac
+      try_phase "$EXEC_TIMEOUT" swap "" docker volume create --label "platform.app=$APP" --label "platform.volume=$vname" "$vol"
+      [ "$PHASE_RC" -eq 0 ] || fail swap "creating volume $vol failed (rc $PHASE_RC); nothing was changed"
+    fi
+    RUN_VOLS+=(-v "$vol:${VOL_PATHS[$i]}")
+  done
+}
+
 swap() {
   step_begin swap
+  prep_volumes
   C_NEW="app-$APP"
   C_OLD="app-$APP-old"
   ORIG_PRESENT=0
@@ -844,11 +952,13 @@ swap() {
     --group-add 64323 --group-add 64324 --cap-drop ALL --security-opt no-new-privileges:true --read-only --tmpfs /tmp
     --memory "$MEMCAP" --memory-swap "$MEMCAP" --pids-limit 256 --restart unless-stopped
     -v "$SECRETS_ROOT/$APP:/run/platform/secrets:ro" -v "$JOB_SECRETS_ROOT/$APP:/run/platform/job-secrets:ro"
+    "${RUN_VOLS[@]+"${RUN_VOLS[@]}"}"
     -e "DB_HOST=$PG_HOST" -e "DB_PORT=$PG_PORT" -e "DB_NAME=${APP//-/_}" -e "DB_USER=${APP//-/_}"
     -e "DB_PASSWORD_FILE=/run/platform/secrets/db-password"
     -e "REDIS_HOST=$RD_HOST" -e "REDIS_PORT=$RD_PORT" -e "REDIS_USER=$APP"
     -e "REDIS_PASSWORD_FILE=/run/platform/secrets/redis-password" -e "REDIS_KEY_PREFIX=$APP:"
     -e "JOBS_SECRET_FILE=/run/platform/job-secrets/jobs-secret"
+    -e "ACCESS_TEAM_DOMAIN=$ACC_TEAM" -e "ACCESS_AUD=$ACC_AUD"
     "$REF")
   NEW_RUN=1
   swap_step "${run[@]}"
@@ -897,13 +1007,51 @@ health() {
   done
 }
 
-# ---- 8. commit ----
+# ---- 8. route ----
+
+# route_file: where this app's Traefik route lives.
+route_file() { printf '%s/app-%s.yml' "$ROUTES_DIR" "$APP"; }
+
+# render_route: the route file content for the validated name, the registered port and the domain (no priority key:
+# Traefik's default, the rule length, stays far below jobs-deny and above catch-all; the `app-` prefix keeps an app named
+# like a static router from colliding with it).
+render_route() {
+  # shellcheck disable=SC2016 # the backticks are literal Traefik rule quoting
+  printf '# Generated by platform deploy for %s. Do not edit; removed by platform rm-db.\nhttp:\n  routers:\n    app-%s:\n      rule: Host(`%s.%s`)\n      entryPoints: [web]\n      service: app-%s\n  services:\n    app-%s:\n      loadBalancer:\n        servers:\n          - url: http://%s:%s\n' \
+    "$APP" "$APP" "$APP" "$DOMAIN" "$APP" "$APP" "$APP" "$PORT"
+}
+
+route() {
+  local dest new
+  step_begin route
+  dest="$(route_file)"
+  new="$TMPD/route.new"
+  render_route >"$new" || fail_restore route "cannot render the route"
+  if [ -f "$dest" ] && [ ! -L "$dest" ] && cmp -s -- "$new" "$dest"; then
+    log "phase=route $dest already has this content; not rewritten"
+    step_end
+    return 0
+  fi
+  # Record the previous route (or its absence) before the first write, so an interrupt at any later point restores it.
+  ROUTE_HAD=0
+  if [ -e "$dest" ] || [ -L "$dest" ]; then
+    cp -- "$dest" "$TMPD/route.prev" || fail_restore route "cannot record the previous route $dest"
+    ROUTE_HAD=1
+  fi
+  ROUTE_TOUCHED=1
+  (umask 022 && put_file "$dest" "$new") || fail_restore route "cannot write the route $dest"
+  step_end
+}
+
+# ---- 9. commit ----
 
 # put_file <dest> <src>: copy next to the destination, then an atomic rename.
 put_file() {
   local dest="$1" src="$2" tmp
   tmp="${dest%/*}/.tmp.${dest##*/}.$$"
   cp -- "$src" "$tmp" || return 1
+  # cp keeps the source's mode (a 0600 mktemp file); Traefik runs as another uid and must read the route file.
+  chmod 0644 -- "$tmp" || { rm -f -- "$tmp"; return 1; }
   mv -f -- "$tmp" "$dest" || { rm -f -- "$tmp"; return 1; }
 }
 
@@ -1152,6 +1300,7 @@ main() {
   inspect_image
   swap
   health
+  route
   commit
   prune_images all
   log "end rc=0"
@@ -1191,9 +1340,12 @@ here="$(cd "$(dirname "$0")" && pwd)"
 APP_RE='^[a-z][a-z0-9-]{1,30}$'
 JOB_RE='^[a-z][a-z0-9_-]{0,62}$'
 TEMPLATES=" go-react go-htmx fastapi-react flask node-hono "
-TOP_KEYS=" schema_version name owner purpose template memory_cap port health_path access jobs "
+TOP_KEYS=" schema_version name owner purpose template memory_cap port health_path access jobs volumes "
 TOP_REQUIRED="schema_version name owner purpose template memory_cap port"
 JOB_KEYS=" name schedule timeout catch_up "
+VOL_KEYS=" name path "
+VOL_NAME_RE='^[a-z][a-z0-9-]{0,30}$'
+VOL_PATH_RE='^/data(/[a-z0-9._-]+)*$'
 RESERVED_FILE="$here/reserved-names.txt"
 
 if [ "$#" -lt 1 ]; then
@@ -1417,10 +1569,89 @@ check_jobs() {
   [ -z "$n" ] || err "duplicate job name '$(echo "$n" | head -n 1)'"
 }
 
+# vol_indexes / vol_keys <n>: like job_indexes / job_keys, for volumes[N].
+vol_indexes() { awk -F '\t' '$1 ~ /^volumes\[[0-9]+\]/ { p = $1; sub(/^volumes\[/, "", p); sub(/\].*/, "", p); if (!(p in s)) { s[p] = 1; print p } }' "$flat"; }
+vol_keys() { awk -F '\t' -v p="volumes[$1]/" 'index($1, p) == 1 { print substr($1, length(p) + 1) }' "$flat"; }
+
+check_volume() {
+  local i="$1" k rest v where seen_keys=" "
+  where="volumes[$i]"
+  while IFS= read -r rest; do
+    k="${rest%%/*}"
+    if [ "$k" != "$rest" ]; then
+      err "$where/$k must be a scalar"
+      continue
+    fi
+    case "$VOL_KEYS" in
+      *" $k "*) ;;
+      *) err "$where has unknown key '$k'"; continue ;;
+    esac
+    seen_keys="$seen_keys$k "
+  done < <(vol_keys "$i")
+  case "$seen_keys" in *" name "*) ;; *) err "$where is missing required key 'name'" ;; esac
+  case "$seen_keys" in *" path "*) ;; *) err "$where is missing required key 'path'" ;; esac
+  case "$seen_keys" in
+    *" name "*)
+      v="$(ys_get "$flat" "volumes[$i]/name")"
+      [[ "$v" =~ $VOL_NAME_RE ]] || err "$where name '$v' must match $VOL_NAME_RE"
+      ;;
+    *) ;;
+  esac
+  case "$seen_keys" in
+    *" path "*)
+      v="$(ys_get "$flat" "volumes[$i]/path")"
+      if ! [[ "$v" =~ $VOL_PATH_RE ]]; then
+        err "$where path '$v' must be absolute under /data and match $VOL_PATH_RE"
+      else
+        case "/$v/" in
+          */./* | */../*) err "$where path '$v' must not contain a . or .. segment" ;;
+          *) ;;
+        esac
+      fi
+      ;;
+    *) ;;
+  esac
+}
+
+check_volumes() {
+  local i n names="" paths="" count=0 a b
+  if [ -n "$(ys_get "$flat" volumes)" ]; then
+    err "volumes must be a list of maps, not a scalar"
+    return
+  fi
+  if ys_has "$flat" "volumes[]"; then
+    err "volumes items must be maps (name, path), not plain values"
+  fi
+  if [ -z "$(vol_indexes)" ]; then
+    err "volumes is present but has no entries (omit the key instead)"
+    return
+  fi
+  for i in $(vol_indexes); do
+    check_volume "$i"
+    count=$((count + 1))
+    names="$names$(ys_get "$flat" "volumes[$i]/name")"$'\n'
+    paths="$paths$(ys_get "$flat" "volumes[$i]/path")"$'\n'
+  done
+  [ "$count" -le 4 ] || err "volumes has $count entries, the maximum is 4"
+  n="$(printf '%s' "$names" | grep -v '^$' | sort | uniq -d)"
+  [ -z "$n" ] || err "duplicate volume name '$(echo "$n" | head -n 1)'"
+  n="$(printf '%s' "$paths" | grep -v '^$' | sort | uniq -d)"
+  [ -z "$n" ] || err "duplicate volume path '$(echo "$n" | head -n 1)'"
+  # No path inside another (distinct paths only; equal ones are reported above).
+  while IFS= read -r a; do
+    [ -n "$a" ] || continue
+    while IFS= read -r b; do
+      [ -n "$b" ] && [ "$a" != "$b" ] || continue
+      case "$b" in "$a"/*) err "volume path '$b' is inside volume path '$a'" ;; *) ;; esac
+    done <<< "$paths"
+  done <<< "$paths"
+}
+
 check_scalar_keys() {
   local k v
   for k in $TOP_KEYS; do
     [ "$k" = jobs ] && continue
+    [ "$k" = volumes ] && continue
     ys_has "$flat" "$k" || continue
     if has_below "$k"; then
       err "$k must be a scalar value"
@@ -1513,6 +1744,7 @@ validate_one() {
   done
   check_scalar_keys
   if ys_has "$flat" jobs; then check_jobs; fi
+  if ys_has "$flat" volumes || has_below volumes; then check_volumes; fi
   rm -f "$flat"
 }
 

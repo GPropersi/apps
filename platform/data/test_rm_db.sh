@@ -25,11 +25,12 @@ SECRETS="$T_TMP/secrets"
 JOBS="$T_TMP/job-secrets"
 DSTATE="$T_TMP/deploy-state"
 REG="$T_TMP/registry"
+ROUTES="$T_TMP/routes"
 LOCKS="$T_TMP/locks"
 RESERVED="$T_TMP/reserved-names.txt"
 LOGGER_LOG="$T_TMP/logger.log"
 NS=example.test/apps
-export STATE LOGGER_LOG SECRETS JOBS DSTATE REG
+export STATE LOGGER_LOG SECRETS JOBS DSTATE REG ROUTES
 
 PGC=test-data-postgres
 RDC=test-data-redis
@@ -62,6 +63,7 @@ mkstub asdeploy <<'EOF'
 path="${*: -1}"
 case "$path" in
   "$REG"/*) k=registry ;;
+  "$ROUTES"/*) k=route ;;
   "$SECRETS"/*) k=secrets ;;
   "$JOBS"/*) k=jobsecrets ;;
   "$DSTATE"/*) k=state ;;
@@ -106,6 +108,26 @@ case "$sub" in
       mv "$f.new" "$f"
     done
     exit 0 ;;
+  volume)
+    # $S/volumes holds "<name> <platform.app label or ->" lines; ls matches the label exactly, like docker's filter.
+    action="$1"
+    shift
+    case "$action" in
+      ls)
+        stubfail volls
+        app=""
+        for a in "$@"; do case "$a" in label=platform.app=*) app="${a#label=platform.app=}" ;; esac; done
+        awk -v a="$app" '$2 == a { print $1 }' "$S/volumes" 2>/dev/null
+        exit 0 ;;
+      rm)
+        stubfail volrm
+        echo "MARK vol" >> "$CALL_LOG"
+        name="${*: -1}"
+        grep -v "^$name " "$S/volumes" > "$S/volumes_new" || true
+        mv "$S/volumes_new" "$S/volumes"
+        exit 0 ;;
+      *) echo "stub: unexpected volume action $action" >&2; exit 97 ;;
+    esac ;;
   image)
     # image ls: prints every image line regardless of the repository argument (rm-db.sh must filter by itself)
     stubfail imgls
@@ -191,8 +213,8 @@ EOF
 # ---- harness ----
 
 fresh() {
-  rm -rf "$STATE" "$SECRETS" "$JOBS" "$DSTATE" "$REG" "$LOCKS" "$RESERVED"
-  mkdir -p "$STATE" "$SECRETS" "$JOBS" "$DSTATE" "$REG" "$LOCKS"
+  rm -rf "$STATE" "$SECRETS" "$JOBS" "$DSTATE" "$REG" "$ROUTES" "$LOCKS" "$RESERVED"
+  mkdir -p "$STATE" "$SECRETS" "$JOBS" "$DSTATE" "$REG" "$ROUTES" "$LOCKS"
   "$REAL_CHMOD" 1777 "$LOCKS"
   cp "$RESERVED_SRC" "$RESERVED"
   : > "$STATE/stdin.log"
@@ -204,6 +226,7 @@ fresh() {
   export RM_DB_JOB_SECRETS_ROOT="$JOBS"
   export RM_DB_STATE_ROOT="$DSTATE"
   export RM_DB_REGISTRY_ROOT="$REG"
+  export RM_DB_ROUTES_DIR="$ROUTES"
   export RM_DB_LOCK_DIR="$LOCKS"
   export RM_DB_RESERVED_NAMES="$RESERVED"
   export RM_DB_PG_CONTAINER="$PGC"
@@ -223,6 +246,7 @@ seed() {
   printf 'v1' > "$DSTATE/$app/current/tag"
   printf 'v0' > "$DSTATE/$app/previous/tag"
   printf 'name: x' > "$REG/$app/app.yaml"
+  printf 'http: {}\n' > "$ROUTES/app-$app.yml"
   touch "$STATE/role_$role" "$STATE/db_$role" "$STATE/ruser_$app"
   touch "$STATE/rkey_$app:a" "$STATE/rkey_$app:b:c"
   printf 'id%s %s/%s v1 <none>\nid%s %s/%s v0 <none>\nid%sd %s/%s <none> sha256:aaaa\n' "$app" "$NS" "$app" "${app}0" "$NS" "$app" "$app" "$NS" "$app" >> "$STATE/images"
@@ -231,7 +255,7 @@ seed() {
 # present <app>: how many kinds of object remain (0 = fully removed)
 present() {
   local app="$1" role="${1//-/_}" n=0 f
-  for f in "$SECRETS/$app" "$JOBS/$app" "$DSTATE/$app" "$REG/$app" "$STATE/role_$role" "$STATE/db_$role" "$STATE/ruser_$app"; do
+  for f in "$SECRETS/$app" "$JOBS/$app" "$DSTATE/$app" "$REG/$app" "$ROUTES/app-$app.yml" "$STATE/role_$role" "$STATE/db_$role" "$STATE/ruser_$app"; do
     if [ -e "$f" ]; then n=$((n + 1)); fi
   done
   n=$((n + $(find "$STATE" -maxdepth 1 -name "rkey_$app:*" | wc -l)))
@@ -284,7 +308,7 @@ rd foo --confirm ""
 expect_rc "an empty confirmation mismatches" 1
 expect_eq "usage and mismatch cases make no docker call" "$(docker_calls)" "0"
 expect_eq "usage and mismatch cases make no delete" "$(delete_calls)" "0"
-expect_eq "usage and mismatch cases change nothing" "$(present foo)" "12"
+expect_eq "usage and mismatch cases change nothing" "$(present foo)" "13"
 
 refuse_case() { # label name
   fresh
@@ -314,7 +338,7 @@ run_cmd env -u RM_DB_TESTING RM_DB_RESERVED_NAMES="$RESERVED" bash "$script" foo
 expect_out_has "overrides without RM_DB_TESTING=1 are named in a warning" "ignoring test overrides without RM_DB_TESTING=1"
 expect_out_has "the warning names the variable" "RM_DB_RESERVED_NAMES"
 expect_out_lacks "the warning never prints a value" "$RESERVED"
-expect_eq "ignored overrides leave the app untouched" "$(present foo)" "12"
+expect_eq "ignored overrides leave the app untouched" "$(present foo)" "13"
 expect_eq "ignored overrides make no docker call" "$(docker_calls)" "0"
 
 for lst in absent dir empty; do
@@ -347,6 +371,9 @@ expect_file "foo-bar Redis keys survive" "$STATE/rkey_foo-bar:a"
 expect_eq "another app's images are untouched (rm-db filters by repository itself)" "$(grep -c "$NS/foo-bar " "$STATE/images")" "3"
 expect_calls_lacks "no image of foo-bar was removed" "rmi -- $NS/foo-bar"
 expect_calls_has "the registry delete ran through the deploy prefix" "asdeploy rm -rf -- $REG/foo"
+expect_calls_has "the route delete ran through the deploy prefix" "asdeploy rm -f -- $ROUTES/app-foo.yml"
+expect_file "foo-bar route file survives" "$ROUTES/app-foo-bar.yml"
+if [ -e "$ROUTES/app-foo.yml" ]; then _fail "foo's route file is removed"; else _pass; fi
 expect_calls_has "the secrets delete ran through the deploy prefix" "asdeploy rm -rf -- $SECRETS/foo"
 expect_calls_has "the job-secrets delete ran through the deploy prefix" "asdeploy rm -rf -- $JOBS/foo"
 expect_calls_has "the state delete ran through the deploy prefix" "asdeploy rm -rf -- $DSTATE/foo"
@@ -357,7 +384,7 @@ if grep -qF 'ACL DELUSER foo' "$STATE/stdin.log" && grep -qF 'ACL SAVE' "$STATE/
 if grep -qF "foo:*" "$STATE/stdin.log"; then _pass; else _fail "the scan matches foo:* only"; fi
 # the order: containers, registry, redis, postgres, secrets/state, images, then the final scans
 order="$(grep '^MARK ' "$CALL_LOG" | cut -d' ' -f2 | tr '\n' ' ')"
-expect_eq "the steps run in order: registry, Redis, Postgres, then secrets, job-secrets, state" "$order" "registry redis-del deluser dropdb droprole secrets jobsecrets state "
+expect_eq "the steps run in order: registry, Redis, Postgres, then secrets, job-secrets, state" "$order" "registry route redis-del deluser dropdb droprole secrets jobsecrets state "
 seq_ok=1
 last=0
 for pat in "^docker ps " "^asdeploy rm -rf -- $REG/foo" "^docker image ls"; do
@@ -385,7 +412,7 @@ expect_rc "labelled containers without --stop refuse" 1
 expect_out_has "the refusal names the live container" "app-foo"
 expect_out_has "the refusal names the leftover -old" "app-foo-old"
 expect_out_has "the refusal points at --stop" "--stop"
-expect_eq "refusal changed nothing" "$(present foo)" "12"
+expect_eq "refusal changed nothing" "$(present foo)" "13"
 expect_eq "refusal removed no container" "$(wc -l < "$STATE/ctr_foo")" "2"
 expect_eq "refusal made no delete" "$(delete_calls)" "0"
 if [ -n "$(mutations)" ]; then _fail "refusal sent no SQL or ACL text"; else _pass; fi
@@ -393,7 +420,7 @@ if [ -n "$(mutations)" ]; then _fail "refusal sent no SQL or ACL text"; else _pa
 printf 'app-foo-old\n' > "$STATE/ctr_foo"
 rd foo --confirm foo
 expect_rc "a leftover -old alone also refuses" 1
-expect_eq "the leftover -old alone changed nothing" "$(present foo)" "12"
+expect_eq "the leftover -old alone changed nothing" "$(present foo)" "13"
 
 printf 'app-foo\napp-foo-old\n' > "$STATE/ctr_foo"
 rd foo --confirm foo --stop
@@ -407,6 +434,75 @@ seed foo
 printf 'app-foo\n' > "$STATE/ctr_foo"
 rd foo --stop --confirm foo
 expect_rc "--stop may come before --confirm" 0
+
+# ---- 3b. declared app volumes: refuse without --stop, delete only this app's labelled volumes with it ----
+
+seed_volumes() {
+  printf 'app_foo_files foo\napp_foo_cache foo\napp_foo-bar_files foo-bar\napp_foo_unlabelled -\nother_vol foobar\n' > "$STATE/volumes"
+}
+vols_left() { grep -c . "$STATE/volumes" || true; }
+
+fresh
+seed foo
+seed_volumes
+rd foo --confirm foo
+expect_rc "labelled volumes without --stop refuse" 1
+expect_out_has "the refusal names a volume" "app_foo_files"
+expect_out_has "the refusal names the other volume" "app_foo_cache"
+expect_out_has "the refusal points at --stop" "--stop"
+expect_eq "a volume refusal changed nothing" "$(present foo)" "13"
+expect_eq "a volume refusal removed no volume" "$(vols_left)" "5"
+expect_file "a volume refusal leaves the route file in place" "$ROUTES/app-foo.yml"
+expect_file "a volume refusal leaves the registry entry in place" "$REG/foo/app.yaml"
+expect_eq "a volume refusal made no delete" "$(delete_calls)" "0"
+expect_calls_lacks "a volume refusal removed no volume" "docker volume rm"
+
+# a container refusal also leaves the route file in place
+fresh
+seed foo
+printf 'app-foo\n' > "$STATE/ctr_foo"
+rd foo --confirm foo
+expect_rc "a container refusal exits 1" 1
+expect_file "a container refusal leaves the route file in place" "$ROUTES/app-foo.yml"
+
+fresh
+seed foo
+seed_volumes
+rd foo --confirm foo --stop
+expect_rc "--stop removes the volumes and finishes" 0
+expect_out_has "the confirmation output lists a volume" "app_foo_files"
+expect_calls_has "the first labelled volume was removed" "docker volume rm -- app_foo_files"
+expect_calls_has "the second labelled volume was removed" "docker volume rm -- app_foo_cache"
+expect_eq "only docker volume rm of this app's labelled volumes was called" "$(grep -c '^docker volume rm' "$CALL_LOG")" "2"
+expect_eq "another app's volume (shared prefix), an unlabelled one and a foreign one remain" "$(sort "$STATE/volumes" | paste -sd, -)" "app_foo-bar_files foo-bar,app_foo_unlabelled -,other_vol foobar"
+expect_eq "everything else of foo is gone" "$(present foo)" "0"
+rd foo --confirm foo
+expect_rc "a second run with no volumes left is a clean no-op" 0
+expect_eq "the second run removed nothing more" "$(vols_left)" "3"
+
+# with --stop the containers go first, then the volumes, then the registry and route
+fresh
+seed foo
+seed_volumes
+printf 'app-foo\n' > "$STATE/ctr_foo"
+rd foo --confirm foo --stop
+expect_rc "--stop with a container and volumes finishes" 0
+cl="$(grep -n -e '^docker rm -f' -e '^docker volume rm' -e '^asdeploy rm -rf -- '"$REG/foo" "$CALL_LOG" | cut -d: -f2- | cut -d' ' -f1-3 | paste -sd'|' -)"
+expect_eq "containers, then volumes, then the registry delete" "$cl" "docker rm -f|docker volume rm|docker volume rm|asdeploy rm -rf"
+
+# a volume removal failure exits 1 before the registry delete; the rerun converges
+fresh
+seed foo
+seed_volumes
+echo 1 > "$STATE/fail_volrm"
+rd foo --confirm foo --stop
+expect_rc "a failed volume removal exits 1" 1
+expect_file "a failed volume removal leaves the registry entry" "$REG/foo/app.yaml"
+rm -f "$STATE/fail_volrm"
+rd foo --confirm foo --stop
+expect_rc "the rerun after a failed volume removal completes" 0
+expect_eq "the rerun removed every labelled volume" "$(vols_left)" "3"
+expect_eq "the rerun removed everything of foo" "$(present foo)" "0"
 
 # ---- 4. the lock ----
 
@@ -435,7 +531,7 @@ expect_eq "the background holder took the lock" "$held" "1"
 rd foo --confirm foo
 expect_rc "a held lock exits 1" 1
 expect_out_has "the held lock is named" "holds the lock"
-expect_eq "a held lock changed nothing" "$(present foo)" "12"
+expect_eq "a held lock changed nothing" "$(present foo)" "13"
 expect_eq "a held lock made no docker call" "$(docker_calls)" "0"
 kill "$holder" 2>/dev/null
 wait "$holder" 2>/dev/null
@@ -448,7 +544,7 @@ seed foo
 ln -s "$T_TMP/elsewhere" "$LOCKS/foo.lock"
 rd foo --confirm foo
 expect_rc "a symlinked lock path is refused" 1
-expect_eq "a symlinked lock changed nothing" "$(present foo)" "12"
+expect_eq "a symlinked lock changed nothing" "$(present foo)" "13"
 
 # a missing data root is refused before any change
 fresh
@@ -489,6 +585,7 @@ fail_case "the secrets delete" files_secrets 3
 fail_case "the job-secrets delete" files_jobsecrets 3
 fail_case "the deploy-state delete" files_state 3
 fail_case "the registry delete" files_registry 3
+fail_case "the route delete" files_route 3
 fail_case "the final Postgres check" pg-final 3
 fail_case "the final Redis user list" rd-users 3
 
@@ -519,7 +616,7 @@ seed foo
 echo 1 > "$STATE/fail_health_$RDC"
 rd foo --confirm foo
 expect_rc "an unhealthy Redis container stops the run" 1
-expect_eq "an unhealthy container changed nothing" "$(present foo)" "12"
+expect_eq "an unhealthy container changed nothing" "$(present foo)" "13"
 
 # ---- 6. the final re-scan exits 1 when any one thing is left ----
 
@@ -533,6 +630,7 @@ left_case() { # label switch expected-text
   expect_out_has "left behind: the re-scan header is printed" "final re-scan"
 }
 left_case "the registry dir" noop_registry "path: $REG/foo"
+left_case "the route file" noop_route "path: $ROUTES/app-foo.yml"
 left_case "secrets/<app>" noop_secrets "path: $SECRETS/foo"
 left_case "job-secrets/<app>" noop_jobsecrets "path: $JOBS/foo"
 left_case "the deploy state" noop_state "path: $DSTATE/foo"
