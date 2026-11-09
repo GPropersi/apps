@@ -1,0 +1,11 @@
+schema_version: 1
+name: tmplgoreact
+owner: gpropersi
+purpose: Starter app for the go-react template; make app-new replaces this text.
+template: go-react
+memory_cap: 64m
+port: 8080
+health_path: /healthz
+jobs:
+  - name: add-note
+    timeout: 30s
