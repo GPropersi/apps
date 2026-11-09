@@ -1,5 +1,5 @@
 .DEFAULT_GOAL := help
-.PHONY: help lint test test-changed test-app embed app-ls host-app-ls host-deploy-user host-claude-access host-verify-egress host-ingress host-data host-jobs host-backup host-restore host-app-rm host-verify-ingress
+.PHONY: help lint test test-changed test-app embed app-ls app-sqlc app-new host-app-ls host-deploy-user host-claude-access host-verify-egress host-ingress host-data host-jobs host-backup host-restore host-app-rm host-verify-ingress
 
 # Live-host targets (host-*) stream a script to the app host over SSH. HOST (an ssh alias) is required, with no
 # default alias; ARGS is passed to the script. They are for you to run, never inside a worktree.
@@ -8,6 +8,10 @@
 export HOST
 export ARGS
 export APP
+export TEMPLATE
+
+# The pinned sqlc generator (exact version and digest) used by app-sqlc.
+SQLC_IMAGE := sqlc/sqlc:1.30.0@sha256:b8d1092c720438e093a231e75eba5d55b7696122f390292acabd5b6d3e986a12
 
 # test-changed compares against BASE (a git ref); an unresolvable ref selects every test. Defined before it is
 # exported (the other way round exports it empty) and read as "$$BASE" in the recipe so its value is never shell text.
@@ -17,19 +21,20 @@ export BASE
 help: ## Show this help
 	@awk 'BEGIN {FS = ":.*## "} /^[a-zA-Z_-]+:.*## / {printf "  %-18s %s\n", $$1, $$2}' $(MAKEFILE_LIST)
 
-lint: ## Public-repo hygiene, embedded-payload drift check, app.yaml registry validation, per-app contract (tests, pinned Dockerfile, numeric USER), Go pin + gofmt + vet, shellcheck (pinned version) on tracked *.sh
+lint: ## Public-repo hygiene, embedded-payload drift check, app.yaml registry validation, per-app contract (tests, pinned Dockerfile, numeric USER, go-react access scope), go-react helper copies identical to the template, Go pin + builder digest + gofmt + vet, shellcheck (pinned version) on tracked *.sh
 	@platform/lint/check-public-hygiene.sh
 	@platform/lint/embed-payloads.sh --check
 	@platform/registry/validate-tracked.sh
 	@platform/lint/check-apps.sh
 	@platform/lint/check-test-classes.sh
 	@platform/lint/check-workflows.sh
+	@platform/lint/check-template-copies.sh
 	@platform/lint/check-go.sh
 	@want=$$(cat platform/lint/SHELLCHECK_VERSION); have=$$(shellcheck --version 2>/dev/null | sed -n 's/^version: //p'); \
 	[ "$$have" = "$$want" ] || { echo "lint: shellcheck $$want required (platform/lint/SHELLCHECK_VERSION), found $${have:-none}" >&2; exit 1; }
 	@git ls-files -z -- '*.sh' | xargs -0 -r -P "$$(nproc 2>/dev/null || echo 4)" -n 16 shellcheck
 
-test: ## Run every platform/**/test_*.sh and apps/<name>/test_*.sh (discovered on disk; zero found is an error; knobs TEST_JOBS, TEST_DOCKER_JOBS, TEST_VERBOSE, TEST_FILE_TIMEOUT)
+test: ## Run every platform/**/test_*.sh, apps/<name>/test_*.sh and templates/<name>/test_*.sh (discovered on disk; zero found is an error; knobs TEST_JOBS, TEST_DOCKER_JOBS, TEST_VERBOSE, TEST_FILE_TIMEOUT)
 	@platform/test/run.sh
 
 test-changed: ## Run only the tests the change since BASE needs (platform/test/areas.map); unclear or failing selection runs all (knobs TEST_JOBS, TEST_DOCKER_JOBS, TEST_VERBOSE, TEST_FILE_TIMEOUT)
@@ -85,6 +90,24 @@ host-app-rm: ## LIVE, DESTRUCTIVE: remove a retired app completely over ssh as r
 
 app-ls: ## List the registered apps (apps/*/app.yaml), registry only and offline; ignores HOST
 	@platform/registry/app-ls.sh
+
+app-sqlc: ## Regenerate the sqlc Go code with the pinned generator image (TEMPLATE=<name> for templates/<name>, or APP=<name> for apps/<name>; exactly one)
+	@bad() { echo 'usage: make app-sqlc TEMPLATE=<name> | APP=<name> (lowercase letters, digits, hyphens; 2-31 characters, starting with a letter; exactly one)' >&2; exit 2; }; \
+	if [ -n "$$TEMPLATE" ] && [ -n "$$APP" ]; then bad; fi; \
+	if [ -n "$$TEMPLATE" ]; then name="$$TEMPLATE"; base=templates; else name="$$APP"; base=apps; fi; \
+	case "$$name" in [a-z]*) ;; *) bad ;; esac; \
+	case "$$name" in *[!a-z0-9-]*) bad ;; esac; \
+	[ "$${#name}" -ge 2 ] && [ "$${#name}" -le 31 ] || bad; \
+	[ -f "$$base/$$name/sqlc.yaml" ] || { echo "app-sqlc: no $$base/$$name/sqlc.yaml found" >&2; exit 1; }; \
+	docker run --rm --user "$$(id -u):$$(id -g)" --network none -v "$$PWD/$$base/$$name:/src" -w /src $(SQLC_IMAGE) generate
+
+app-new: ## Scaffold apps/<name>/ from a template, offline (NAME=<name> PURPOSE="<one line>" [TEMPLATE=go-react] [OWNER=gpropersi]); refusals leave apps/ unchanged
+	@# Only values given on the make command line count: an ambient NAME, OWNER, PURPOSE or TEMPLATE in the shell environment is ignored (fail closed).
+	@[ "$(origin NAME)" = "command line" ] && [ "$(origin PURPOSE)" = "command line" ] && [ -n "$$NAME" ] && [ -n "$$PURPOSE" ] || { echo 'usage: make app-new NAME=<name> PURPOSE="<one line>" [TEMPLATE=go-react] [OWNER=gpropersi]' >&2; exit 2; }
+	@tpl=go-react; owner=gpropersi; \
+	if [ "$(origin TEMPLATE)" = "command line" ]; then tpl="$$TEMPLATE"; fi; \
+	if [ "$(origin OWNER)" = "command line" ]; then owner="$$OWNER"; fi; \
+	platform/scaffold/app-new.sh "$$NAME" --template "$$tpl" --owner "$$owner" --purpose "$$PURPOSE"
 
 host-app-ls: ## LIVE: registered apps plus live container state over ssh (HOST=<alias>; needs the passwordless sudo the other host-* targets use)
 	@[ -n "$$HOST" ] || { echo 'usage: make host-app-ls HOST=<ssh-alias>' >&2; exit 2; }
