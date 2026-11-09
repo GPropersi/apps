@@ -105,6 +105,59 @@ expect_fail "live-tagged file that does not compile" "^FAIL go vet -tags live \\
 new_root; printf 'package main\n\nfunc broken() { undefinedSymbol() }\n' > "$root/platform/jobs/bad.go"; run_check
 expect_fail "untagged file that does not compile" "^FAIL go vet \\./\\.\\.\\. failed"
 
+# Template and app modules are covered too, with the dev tag vetted.
+add_module() { # <relative dir>: a clean module at that path
+  mkdir -p "$root/$1"
+  printf 'module example.test/m\n\ngo %s\n\ntoolchain go%s\n' "${good_version%.*}" "$good_version" > "$root/$1/go.mod"
+  printf 'package main\n\nfunc main() {}\n' > "$root/$1/main.go"
+}
+new_root; add_module templates/t1; add_module apps/a1; run_check
+expect_pass "clean template and app modules pass"
+if grep -qE '(^|[^0-9])3 module' <<< "$out"; then passed=$((passed + 1)); else failed=$((failed + 1)); echo "FAIL: module count not reported"; echo "$out"; fi
+
+new_root; add_module templates/t1; sed -i "s/^toolchain go.*/toolchain go9.9.9/" "$root/templates/t1/go.mod"; run_check
+expect_fail "template toolchain line differs" "^FAIL go.mod toolchain line mismatch: .*go9\\.9\\.9 \\(in templates/t1\\)"
+
+new_root; add_module apps/a1; printf 'package main\n\nfunc   main( ) {  }\n' > "$root/apps/a1/main.go"; run_check
+expect_fail "unformatted app file" "^FAIL gofmt: main\\.go is not formatted .*\\(in apps/a1\\)"
+
+new_root; add_module templates/t1; printf 'package main\n\nfunc broken() { undefinedSymbol() }\n' > "$root/templates/t1/bad.go"; run_check
+expect_fail "untagged template file that does not compile" "^FAIL go vet \\./\\.\\.\\. failed .*\\(in templates/t1\\)"
+
+new_root; add_module templates/t1; printf '//go:build dev\n\npackage main\n\nfunc broken() { undefinedSymbol() }\n' > "$root/templates/t1/dev.go"; run_check
+expect_fail "dev-tagged template file that does not compile" "^FAIL go vet -tags dev \\./\\.\\.\\. failed .*\\(in templates/t1\\)"
+
+# The golang builder of a template or app Dockerfile equals platform/jobs/Dockerfile's.
+jobs_ref="golang:1.26.0@sha256:$(printf 'a%.0s' $(seq 64))"
+other_ref="golang:1.26.0@sha256:$(printf 'b%.0s' $(seq 64))"
+set_dockerfile() { # <relative dir> <FROM ref>
+  printf 'FROM %s AS build\nFROM scratch\n' "$2" > "$root/$1/Dockerfile"
+}
+new_root; add_module templates/t1; add_module apps/a1
+printf 'FROM %s AS build\n' "$jobs_ref" > "$root/platform/jobs/Dockerfile"
+set_dockerfile templates/t1 "$jobs_ref"; set_dockerfile apps/a1 "$jobs_ref"; run_check
+expect_pass "matching golang builders pass"
+
+new_root; add_module templates/t1; add_module apps/a1
+printf 'FROM %s AS build\n' "$jobs_ref" > "$root/platform/jobs/Dockerfile"
+set_dockerfile templates/t1 "$jobs_ref"; set_dockerfile apps/a1 "$other_ref"; run_check
+expect_fail "an app builder digest differs" "^FAIL golang builder mismatch: apps/a1/Dockerfile has golang:1\\.26\\.0@sha256:b+, platform/jobs/Dockerfile has golang:1\\.26\\.0@sha256:a+"
+
+new_root; add_module templates/t1
+printf 'FROM %s AS build\n' "$jobs_ref" > "$root/platform/jobs/Dockerfile"
+set_dockerfile templates/t1 "$other_ref"; run_check
+expect_fail "a template builder digest differs" "^FAIL golang builder mismatch: templates/t1/Dockerfile has "
+
+new_root; add_module templates/t1
+printf 'FROM %s AS build\n' "$jobs_ref" > "$root/platform/jobs/Dockerfile"
+printf 'FROM alpine@sha256:%s\n' "$(printf 'c%.0s' $(seq 64))" > "$root/templates/t1/Dockerfile"; run_check
+expect_fail "a Dockerfile with no golang builder" "^FAIL templates/t1/Dockerfile has no golang builder FROM"
+
+new_root; add_module templates/t1
+printf 'FROM golang:1.26.0 AS build\n' > "$root/platform/jobs/Dockerfile"
+set_dockerfile templates/t1 "$jobs_ref"; run_check
+expect_fail "an unpinned platform/jobs builder fails closed" "^FAIL platform/jobs/Dockerfile has no digest-pinned golang builder"
+
 # GOTOOLCHAIN=local forced from outside must not win: the script exports go<GO_VERSION> itself.
 new_root; make_stub "$good_version"
 rc=0; out="$(GOTOOLCHAIN=local PATH="$stub_path:$PATH" "$check" --root "$root" 2>&1)" || rc=$?

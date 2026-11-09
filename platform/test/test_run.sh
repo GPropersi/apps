@@ -108,6 +108,15 @@ expect_eq "explicit args run exactly those files in order" "$order" "== apps/foo
 expect_out_lacks "the summary names only files that ran" "test_b.sh"
 expect_out_has "the total counts only the files run" " wall, 2 files, 0 failed"
 
+# Discovery: templates/<name>/test_*.sh runs with no arguments (with its class marker honoured); deeper files do not.
+fake templates/tpl/test_t.sh docker 'exit 0'
+fake templates/tpl/sub/test_deep.sh - 'exit 0'
+run_cmd "${ENVU[@]}" bash "$R"
+expect_out_has "a template test is discovered" "== templates/tpl/test_t.sh ok "
+expect_out_lacks "a template test nested deeper is not discovered" "test_deep.sh"
+expect_out_has "the template test joins the count" " wall, 4 files, 1 failed"
+rm -rf "$S/templates"
+
 # --- Ordering: docker/heavy-marked files first, each group in the given order ---
 clear_tests
 fake platform/a/test_m1.sh - 'exit 0'

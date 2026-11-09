@@ -13,13 +13,15 @@
 # The USER check is a heuristic and may refuse a legitimate form such as an ARG-expanded USER; the deploy-time image
 # `inspect` check stays the authority (heredoc bodies are scanned as instructions; that also fails closed or is
 # harmless). No apps passes.
+#   5. an app declaring `template: go-react` has no `access` key or `access: family` (the template validates one shared
+#      Access audience, so `public` and `restricted` are refused, naming the key).
 set -uo pipefail
 
 root=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --root) [ $# -ge 2 ] || { echo "missing value for --root" >&2; exit 2; }; root="$2"; shift 2 ;;
-    -h | --help) sed -n '2,15p' "$0"; exit 0 ;;
+    -h | --help) sed -n '2,17p' "$0"; exit 0 ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac
 done
@@ -91,12 +93,24 @@ check_dockerfile() {
   fi
 }
 
+# top_value <app.yaml path> <key>: the top-level scalar, quotes removed (empty when absent).
+top_value() {
+  awk -v k="$2" '
+    index($0, k ":") == 1 { sub(/^[^:]*:[ \t]*/, ""); sub(/[ \t]+$/, ""); gsub(/^["\047]|["\047]$/, ""); print; exit }' "$root/$1"
+}
+
 while IFS= read -r yaml; do
   [ -n "$yaml" ] || continue
   case "$yaml" in apps/*/app.yaml) ;; *) continue ;; esac
   dir="${yaml%/app.yaml}"
   name="${dir#apps/}"
   case "$name" in */*) continue ;; esac
+  if [ "$(top_value "$yaml" template)" = "go-react" ] && grep -q '^access:' "$root/$yaml"; then
+    access="$(top_value "$yaml" access)"
+    if [ "$access" != "family" ]; then
+      problem "$yaml" "access '$access' is not supported by template go-react: the template validates one shared Access audience, so only an absent access key or access: family passes"
+    fi
+  fi
   if ! grep -qE "^$dir/test_[^/]*\.sh\$" <<< "$tracked"; then
     problem "$dir" "no tracked test_*.sh (every app ships a test script)"
   fi

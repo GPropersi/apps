@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Parallel test runner: `run.sh [FILE...]`, run from the repo root (it cd's there itself).
-#   no arguments: discover platform/**/test_*.sh and apps/<name>/test_*.sh (either directory may be absent), sorted
+#   no arguments: discover platform/**/test_*.sh, apps/<name>/test_*.sh and templates/<name>/test_*.sh (any directory may be
+#                 absent), sorted
 #   FILE...:      run exactly those files
 # Each file runs as `bash <file>` in its own process group, its output buffered to <logdir>/<path with / as __>.log.
 # When a file finishes it prints `== <file> ok <secs>s` or `== <file> FAIL rc=<n> <secs>s` (or
@@ -97,6 +98,9 @@ else
   fi
   if [ -d apps ]; then
     while IFS= read -r f; do files+=("$f"); done < <(find apps -mindepth 2 -maxdepth 2 -name 'test_*.sh' | LC_ALL=C sort)
+  fi
+  if [ -d templates ]; then
+    while IFS= read -r f; do files+=("$f"); done < <(find templates -mindepth 2 -maxdepth 2 -name 'test_*.sh' | LC_ALL=C sort)
   fi
   if [ "${#files[@]}" -eq 0 ]; then
     echo "no test_*.sh found" >&2
