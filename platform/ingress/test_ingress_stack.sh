@@ -22,12 +22,11 @@ here="$(cd "$(dirname "$0")" && pwd)"
 t_init
 host_readme="$(cd "$here/../host" && pwd)/README.md"
 
-services="cloudflared down-page socket-proxy traefik"
+services="cloudflared down-page traefik"
 declare -A svc_nets=(
   [cloudflared]="platform"
-  [traefik]="platform ingress-proxy"
+  [traefik]="platform"
   [down-page]="platform"
-  [socket-proxy]="ingress-proxy"
 )
 
 # The exact Traefik settings, all in the traefik service's environment (never in command).
@@ -50,11 +49,6 @@ declare -A want=(
   [TRAEFIK_PING]=true
   [TRAEFIK_PING_ENTRYPOINT]=ping
   [TRAEFIK_ENTRYPOINTS_PING_ADDRESS]=127.0.0.1:8082
-  [TRAEFIK_PROVIDERS_DOCKER_ENDPOINT]=tcp://socket-proxy:2375
-  [TRAEFIK_PROVIDERS_DOCKER_NETWORK]=platform
-  [TRAEFIK_PROVIDERS_DOCKER_EXPOSEDBYDEFAULT]=true
-  [TRAEFIK_PROVIDERS_DOCKER_CONSTRAINTS]='LabelRegex(`platform.app`, `.+`)'
-  [TRAEFIK_PROVIDERS_DOCKER_DEFAULTRULE]='Host(`{{ index .Labels "platform.app" }}.${PLATFORM_DOMAIN}`)'
   [TRAEFIK_PROVIDERS_FILE_DIRECTORY]=/etc/traefik/dynamic
   [TRAEFIK_PROVIDERS_FILE_WATCH]=true
   [TRAEFIK_ACCESSLOG]=true
@@ -83,9 +77,6 @@ traefik_option_name() {
   esac
 }
 
-# Exact request-path regexes for the socket proxy ($$ is Compose's escape for a literal $).
-re_get='^(/v[0-9]+\.[0-9]+)?/(version|containers/json|containers/[a-zA-Z0-9]+/json|events)$'
-re_head='^(/v[0-9]+\.[0-9]+)?/_ping$'
 # Characters the deny rule may use after the optional leading (?i) (everything else fails closed).
 re_ok='^[]A-Za-z0-9_/;^$()|*+?.[-]*$'
 
@@ -96,7 +87,8 @@ re_ok='^[]A-Za-z0-9_/;^$()|*+?.[-]*$'
 host_registry="docker.io"
 host_label="platform.app"
 host_fake="example.test"
-host_files=" env.example lib.sh yaml-subset.sh test_ingress_stack.sh test_traefik_dynamic.sh test_lib.sh README.md "
+host_access="cloudflareaccess.com" # Cloudflare's own public team-domain suffix, named in access.env.example and the README
+host_files=" env.example access.env.example lib.sh yaml-subset.sh test_ingress_stack.sh test_traefik_dynamic.sh test_lib.sh README.md "
 # File names that platform/host/README.md mentions.
 host_files="$host_files platform.sh login-shell.sh install-deploy-user.sh claude-access.sh claude-helper.sh install-claude-access.sh install-ingress.sh "
 host_files="$host_files install-backup.sh restore.sh backup.sh platform-backup.service platform-backup.timer RUNBOOK.md "
@@ -106,6 +98,10 @@ host_files="$host_files docker-user.rules.bak docker-user.rules docker-user-fire
 # Docker inspect template fields used by test_traefik_dynamic.sh.
 host_files="$host_files NetworkSettings.Networks State.Health.Status "
 host_exts=" yml yaml html table env token sock json txt tsv "
+# The one temp-file name test_traefik_dynamic.sh writes (an exact token, not the whole .tmp extension).
+host_files="$host_files name.tmp "
+# Traefik label names the hostile-label fixture of test_traefik_dynamic.sh sets (they route nothing now).
+host_files="$host_files traefik.enable traefik.http.routers.hostile.rule traefik.http.routers.hostile.priority Config.Env "
 
 hostname_ok() {
   local t="$1" last="${1##*.}"
@@ -113,6 +109,7 @@ hostname_ok() {
   [ "$t" = "$host_registry" ] && return 0
   [ "$t" = "$host_label" ] && return 0
   [ "$t" = "$host_fake" ] && return 0
+  [ "$t" = "$host_access" ] && return 0
   [[ "$t" == *".$host_fake" ]] && return 0
   [[ "$host_files" == *" $t "* ]] && return 0
   [[ "$host_exts" == *" $last "* ]] && return 0
@@ -173,8 +170,8 @@ run_checks() {
     if grep -F "services/$s/labels" "$cf" | grep -qF 'platform.app'; then
       r "$s: carries a platform.app label (no service in the ingress stack may)"
     fi
-    if [ "$s" != socket-proxy ] && ys_list "$cf" "services/$s/volumes" | grep -qF docker.sock; then
-      r "$s: the Docker socket is mounted on a service other than socket-proxy"
+    if ys_list "$cf" "services/$s/volumes" | grep -qF docker.sock; then
+      r "$s: the Docker socket is mounted (no service in the ingress stack may)"
     fi
     got_nets="$(ys_list "$cf" "services/$s/networks" | sort | tr '\n' ' ')"
     want_nets="$(tr ' ' '\n' <<<"${svc_nets[$s]}" | sort | tr '\n' ' ')"
@@ -187,10 +184,9 @@ run_checks() {
 
   # -- networks
   [ "$(ys_get "$cf" networks/platform/external)" = true ] || r "network platform must be external: true"
-  [ "$(ys_get "$cf" networks/ingress-proxy/internal)" = true ] || r "ingress-proxy must be internal: true"
-  [ "$(ys_children "$cf" networks | sort | tr '\n' ' ')" = "ingress-proxy platform " ] || r "unexpected network set"
+  [ "$(ys_children "$cf" networks | sort | tr '\n' ' ')" = "platform " ] || r "unexpected network set (only the external platform network)"
   for k in ipam enable_ipv6 driver_opts; do
-    { ys_has "$cf" "networks/platform/$k" || ys_has "$cf" "networks/ingress-proxy/$k"; } && r "networks: $k is not allowed (no subnet or address literals, IPv6 off)"
+    ys_has "$cf" "networks/platform/$k" && r "networks: $k is not allowed (no subnet or address literals, IPv6 off)"
   done
 
   # -- cloudflared
@@ -203,34 +199,10 @@ run_checks() {
   ys_list "$cf" services/cloudflared/volumes | grep -qE '^/etc/platform/cloudflared\.token:[^:]+:ro$' || r "cloudflared must mount the host token file read-only"
   ys_list "$cf" services/cloudflared/healthcheck/test | grep -qxF ready || r "cloudflared healthcheck must be the ready check"
 
-  # -- socket-proxy
-  ys_list "$cf" services/socket-proxy/volumes | grep -qxF '/var/run/docker.sock:/var/run/docker.sock:ro' || r "socket-proxy must mount the Docker socket read-only"
-  ys_list "$cf" services/socket-proxy/group_add | grep -qxF '${DOCKER_GID}' || r "socket-proxy group_add must be the installer-derived DOCKER_GID"
-  ys_list "$cf" services/socket-proxy/command > "$T_TMP/sp-args"
-  grep -qxF -- '-allowfrom=traefik' "$T_TMP/sp-args" || r "socket-proxy allowfrom must be the traefik service only"
-  grep -qxF -- '-allowhealthcheck' "$T_TMP/sp-args" || r "socket-proxy must run with -allowhealthcheck (its /healthcheck probe needs it)"
-  grep -qxF -- "-allowGET=${re_get//\$/\$\$}" "$T_TMP/sp-args" || r "socket-proxy GET allowlist is not the exact expected regex"
-  grep -qxF -- "-allowHEAD=${re_head//\$/\$\$}" "$T_TMP/sp-args" || r "socket-proxy HEAD allowlist is not the exact expected regex"
-  grep -iE '^-allow(CONNECT|DELETE|OPTIONS|PATCH|POST|PUT|TRACE)' "$T_TMP/sp-args" | grep -q . && r "socket-proxy allows a method other than GET and HEAD"
-  while IFS= read -r i; do
-    case "$i" in
-      -listenip=0.0.0.0|-allowfrom=traefik|-allowhealthcheck|-watchdoginterval=*) ;;
-      -allowGET=*|-allowHEAD=*) ;;
-      *) r "socket-proxy: unexpected argument '$i'" ;;
-    esac
-  done < "$T_TMP/sp-args"
-  local pth get_re head_re
-  get_re="$(grep -m1 -- '^-allowGET=' "$T_TMP/sp-args" | sed -e 's/^-allowGET=//' -e 's/\$\$/$/')"
-  head_re="$(grep -m1 -- '^-allowHEAD=' "$T_TMP/sp-args" | sed -e 's/^-allowHEAD=//' -e 's/\$\$/$/')"
-  for pth in /version /v1.43/version /containers/json /v1.43/containers/json /containers/abc123/json /v1.43/containers/abc123/json /events /v1.43/events; do
-    grep -qE -e "$get_re" <<<"$pth" || r "socket-proxy GET regex rejects $pth"
-  done
-  for pth in /containers/abc123/exec /containers/abc123/logs /containers/abc123/json/x /containers/abc123/json/ /images/json /containers/create /info /_ping /v1.43/containers/abc123/archive; do
-    grep -qE -e "$get_re" <<<"$pth" && r "socket-proxy GET regex allows $pth"
-  done
-  grep -qE -e "$head_re" <<<"/v1.43/_ping" || r "socket-proxy HEAD regex rejects /_ping"
-  grep -qE -e "$head_re" <<<"/version" && r "socket-proxy HEAD regex allows /version"
-  [[ "$(ys_get "$cf" services/socket-proxy/user)" =~ ^[1-9][0-9]*:[0-9]+$ ]] || r "socket-proxy must run as a fixed non-root user"
+  # -- no Docker access anywhere: no Docker provider key, no DOCKER_GID plumbing, no socket-proxy service
+  grep -qF 'TRAEFIK_PROVIDERS_DOCKER' "$cf" && r "a TRAEFIK_PROVIDERS_DOCKER_* key is present (routing comes only from files)"
+  grep -qF 'DOCKER_GID' "$cf" && r "DOCKER_GID plumbing is present (nothing in the stack gets the Docker socket group)"
+  ys_has "$cf" services/socket-proxy && r "a socket-proxy service is present (the Docker API is not brokered any more)"
 
   # -- down-page
   ys_list "$cf" services/down-page/healthcheck/test | tr '\n' ' ' | grep -qE '(^| )nc -z ' || r "down-page healthcheck must be the TCP-connect form (nc -z)"
@@ -451,10 +423,8 @@ mutate "floating image tag" "floating or unpinned" compose traefik 2 replace '^ 
 mutate "tag without digest" "floating or unpinned" compose cloudflared 2 replace '^    image:' '    image: docker.io/cloudflare/cloudflared:2026.10.1'
 mutate "unqualified image" "fully qualified" compose down-page 2 replace '^    image:' '    image: busybox:1.37.0@sha256:bdf57e528e45e4433820e045b29b4597825a1c9e38353532d90a01445013f82e'
 mutate "docker socket on traefik" "Docker socket" compose traefik 2 after '^    volumes:' '      - /var/run/docker.sock:/var/run/docker.sock:ro'
-mutate "read-write socket" "must mount the Docker socket read-only" compose socket-proxy 2 replace '^      - /var/run/docker.sock' '      - /var/run/docker.sock:/var/run/docker.sock'
 mutate "platform.app label on cloudflared" "platform.app label" compose cloudflared 2 after '^  cloudflared:' '    labels:\n      platform.app: cloudflared'
 mutate "platform.app label list form on down-page" "platform.app label" compose down-page 2 after '^  down-page:' '    labels:\n      - platform.app=down'
-mutate "proxy network not internal" "ingress-proxy must be internal" compose - - replace '^    internal: true' '    internal: false'
 mutate "platform network not external" "platform must be external" compose - - replace '^    external: true' '    external: false'
 mutate "inline token" "inline token" compose cloudflared 2 after '^    environment:' '      TUNNEL_TOKEN: placeholder'
 mutate "token as command argument" "inline token" compose cloudflared 2 after '^      - tunnel' '      - --token=placeholder'
@@ -475,25 +445,25 @@ mutate "flag in command disables the environment" "command arguments" compose tr
 mutate "healthcheck with --ping flag" "traefik healthcheck must be exactly" compose traefik 2 after '^        - healthcheck' '        - --ping'
 mutate "second routed entrypoint" "entrypoints must be exactly" compose traefik 2 after '^    environment:' '      TRAEFIK_ENTRYPOINTS_EXTRA_ADDRESS: ":81"'
 mutate "errors middleware missing from the entrypoint" "errors@file" compose traefik 2 replace '^      TRAEFIK_ENTRYPOINTS_WEB_HTTP_MIDDLEWARES:' '      TRAEFIK_ENTRYPOINTS_WEB_HTTP_MIDDLEWARES: ""'
-mutate "provider constraint dropped" "provider constraint" compose traefik 2 delete '^      TRAEFIK_PROVIDERS_DOCKER_CONSTRAINTS:'
-mutate "constraint weakened" "provider constraint" compose traefik 2 replace '^      TRAEFIK_PROVIDERS_DOCKER_CONSTRAINTS:' '      TRAEFIK_PROVIDERS_DOCKER_CONSTRAINTS: LabelRegex(`platform.app`, `.*`)'
-mutate "defaultRule changed" "defaultRule" compose traefik 2 replace '^      TRAEFIK_PROVIDERS_DOCKER_DEFAULTRULE:' '      TRAEFIK_PROVIDERS_DOCKER_DEFAULTRULE: Host(`{{ normalize .Name }}`)'
-mutate "domain literal in defaultRule" "hostname shape" compose traefik 2 replace '^      TRAEFIK_PROVIDERS_DOCKER_DEFAULTRULE:' '      TRAEFIK_PROVIDERS_DOCKER_DEFAULTRULE: Host(`{{ index .Labels "platform.app" }}.'"$(printf '%s.%s' real-home example)"'.org`)'
+mutate "file provider directory dropped" "TRAEFIK_PROVIDERS_FILE_DIRECTORY is missing" compose traefik 2 delete '^      TRAEFIK_PROVIDERS_FILE_DIRECTORY:'
+mutate "file provider watch off" "TRAEFIK_PROVIDERS_FILE_WATCH is 'false'" compose traefik 2 replace '^      TRAEFIK_PROVIDERS_FILE_WATCH:' '      TRAEFIK_PROVIDERS_FILE_WATCH: "false"'
 mutate "access log not JSON" "access-log" compose traefik 2 replace '^      TRAEFIK_ACCESSLOG_FORMAT:' '      TRAEFIK_ACCESSLOG_FORMAT: common'
 mutate "query string logged" "access-log" compose traefik 2 replace '^      TRAEFIK_ACCESSLOG_FIELDS_QUERYPARAMETERS_DEFAULTMODE:' '      TRAEFIK_ACCESSLOG_FIELDS_QUERYPARAMETERS_DEFAULTMODE: keep'
 mutate "headers kept by default" "access-log" compose traefik 2 replace '^      TRAEFIK_ACCESSLOG_FIELDS_HEADERS_DEFAULTMODE:' '      TRAEFIK_ACCESSLOG_FIELDS_HEADERS_DEFAULTMODE: keep'
 mutate "cookie header kept" "other than Cf-Connecting-Ip" compose traefik 2 after '^    environment:' '      TRAEFIK_ACCESSLOG_FIELDS_HEADERS_NAMES_Cookie: keep'
 mutate "forwarded headers trusted" "forwardedHeaders" compose traefik 2 after '^    environment:' '      TRAEFIK_ENTRYPOINTS_WEB_FORWARDEDHEADERS_INSECURE: "true"'
 mutate "trusted ips set" "forwardedHeaders" compose traefik 2 after '^    environment:' "      TRAEFIK_ENTRYPOINTS_WEB_FORWARDEDHEADERS_TRUSTEDIPS: $(t_ip4 10 0 0 0)/8"
-mutate "socket-proxy allows POST" "allows a method other than GET and HEAD" compose socket-proxy 2 after '^      - -allowfrom' '      - -allowPOST=.*'
-mutate "socket-proxy GET too wide" "GET allowlist" compose socket-proxy 2 replace '^      - -allowGET' '      - -allowGET=.*'
-mutate "socket-proxy allowfrom widened" "allowfrom" compose socket-proxy 2 replace '^      - -allowfrom' '      - -allowfrom=0.0.0.0/0'
-mutate "socket-proxy hardcoded gid" "DOCKER_GID" compose socket-proxy 2 replace '^      - "\$\{DOCKER_GID\}"' '      - "999"'
 mutate "down-page healthcheck not TCP-connect" "TCP-connect form" compose down-page 2 replace '^        - nc$' '        - wget'
-mutate "proxy on the platform network" "networks are" compose socket-proxy 2 after '^      - ingress-proxy' '      - platform'
+mutate "docker provider key returns (endpoint)" "TRAEFIK_PROVIDERS_DOCKER_" compose traefik 2 after '^    environment:' '      TRAEFIK_PROVIDERS_DOCKER_ENDPOINT: tcp://socket-proxy:2375'
+mutate "docker provider key returns (bare enable)" "TRAEFIK_PROVIDERS_DOCKER_" compose traefik 2 after '^    environment:' '      TRAEFIK_PROVIDERS_DOCKER: "true"'
+mutate "docker provider key returns (exposedByDefault)" "TRAEFIK_PROVIDERS_DOCKER_" compose traefik 2 after '^    environment:' '      TRAEFIK_PROVIDERS_DOCKER_EXPOSEDBYDEFAULT: "true"'
+mutate "docker socket mounted on traefik read-only" "the Docker socket is mounted" compose traefik 2 after '^    volumes:' '      - /var/run/docker.sock:/var/run/docker.sock:ro'
+mutate "socket-proxy service returns" "socket-proxy service is present" compose - - before '^  down-page:' '  socket-proxy:\n    image: docker.io/wollomatic/socket-proxy:1.13.1@sha256:3935b709275e4ec35d6ed5a5c4a1f0d01ed31eec5e7234efc3357ecd47689002\n'
+mutate "DOCKER_GID plumbing returns" "DOCKER_GID plumbing" compose cloudflared 2 after '^    group_add:' '      - "${DOCKER_GID}"'
+mutate "ingress-proxy network returns" "unexpected network set" compose - - after '^    external: true' '  ingress-proxy:\n    internal: true'
 mutate "compose leaves the YAML subset" "outside the YAML subset" compose cloudflared 2 replace '^    cap_drop:' '    cap_drop: [ALL]'
 
-for svc in cloudflared down-page socket-proxy traefik; do
+for svc in cloudflared down-page traefik; do
   mutate "$svc without cap_drop" "$svc: cap_drop must contain ALL" compose "$svc" 2 dropkey '^    cap_drop:'
   mutate "$svc without mem_limit" "$svc: mem_limit must be set" compose "$svc" 2 delete '^    mem_limit:'
   mutate "$svc without restart policy" "$svc: restart must be unless-stopped" compose "$svc" 2 delete '^    restart:'
@@ -505,20 +475,13 @@ done
 
 mutate "cloudflared healthcheck not the ready check" "healthcheck must be the ready check" compose cloudflared 2 replace '^        - ready' '        - version'
 mutate "root traefik" "traefik must run as a fixed non-root user" compose traefik 2 replace '^    user:' '    user: "0:0"'
-mutate "root socket-proxy" "socket-proxy must run as a fixed non-root user" compose socket-proxy 2 replace '^    user:' '    user: "0:0"'
 mutate "root down-page" "down-page must run as a fixed non-root user" compose down-page 2 replace '^    user:' '    user: "0:0"'
 mutate "ipam on the platform network" "ipam is not allowed" compose platform 2 after '^  platform:' '    ipam: x'
 mutate "ipv6 on the platform network" "enable_ipv6 is not allowed" compose platform 2 after '^  platform:' '    enable_ipv6: true'
 mutate "driver_opts on the platform network" "driver_opts is not allowed" compose platform 2 after '^  platform:' '    driver_opts: x'
-mutate "ipam on the ingress-proxy network" "ipam is not allowed" compose ingress-proxy 2 after '^  ingress-proxy:' '    ipam: x'
-mutate "ipv6 on the ingress-proxy network" "enable_ipv6 is not allowed" compose ingress-proxy 2 after '^  ingress-proxy:' '    enable_ipv6: true'
-mutate "driver_opts on the ingress-proxy network" "driver_opts is not allowed" compose ingress-proxy 2 after '^  ingress-proxy:' '    driver_opts: x'
-mutate "docker socket on down-page" "mounted on a service other than socket-proxy" compose down-page 2 after '^    volumes:' '      - /var/run/docker.sock:/var/run/docker.sock:ro'
-mutate "docker socket on cloudflared" "mounted on a service other than socket-proxy" compose cloudflared 2 after '^    volumes:' '      - /var/run/docker.sock:/var/run/docker.sock:ro'
+mutate "docker socket on down-page" "the Docker socket is mounted" compose down-page 2 after '^    volumes:' '      - /var/run/docker.sock:/var/run/docker.sock:ro'
+mutate "docker socket on cloudflared" "the Docker socket is mounted" compose cloudflared 2 after '^    volumes:' '      - /var/run/docker.sock:/var/run/docker.sock:ro'
 mutate "non-TRAEFIK_ variable on traefik" "unexpected environment variable EXTRA_VAR" compose traefik 2 after '^    environment:' '      EXTRA_VAR: x'
-mutate "unexpected socket-proxy argument" "socket-proxy: unexpected argument" compose socket-proxy 2 after '^      - -allowfrom' '      - -logjson'
-mutate "socket-proxy without -allowhealthcheck" "-allowhealthcheck" compose socket-proxy 2 delete '^      - -allowhealthcheck'
-mutate "socket-proxy HEAD allowlist widened" "HEAD allowlist" compose socket-proxy 2 replace '^      - -allowHEAD' '      - -allowHEAD=.*'
 mutate "catch-all priority raised" "priority 1 (lowest)" dynamic catch-all 4 replace '^      priority:' '      priority: 100'
 mutate "empty service removed" "lacks the shared empty service" dynamic - - dropkey '^    empty:'
 mutate "down-page service URL changed" "lacks the down-page service" dynamic - - replace '^          - url:' '          - url: http://other:8080'

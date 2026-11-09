@@ -70,10 +70,12 @@ app="$rid"
 net="$rid-net"
 repo="ghcr.io/gpropersi/apps/$app"
 ctr="app-$app"
+vol="app_${app}_files"
 W="$T_TMP/w"
 
 cleanup() {
   docker rm -fv "$ctr" "$ctr-old" >/dev/null 2>&1
+  docker volume rm -f "$vol" >/dev/null 2>&1
   docker network rm "$net" >/dev/null 2>&1
   docker image rm -f "$repo:v1" "$repo:v2" "$repo:v3" "$repo:bad" >/dev/null 2>&1
   t_cleanup
@@ -91,6 +93,15 @@ printf 'x' >"$W/secrets/$app/redis-password"
 printf 'x' >"$W/jobs/$app/jobs-secret"
 chmod 644 "$W/secrets/$app/"* "$W/jobs/$app/"*
 printf 'PLATFORM_PG_HOST=postgres\nPLATFORM_PG_PORT=5432\nPLATFORM_REDIS_HOST=redis\nPLATFORM_REDIS_PORT=6379\n' >"$W/conn.env"
+# The route file goes to a temp routes dir, never /opt/platform/ingress/dynamic; the host settings come from temp env files
+# (DEPLOY_ENV_UID is this user's uid because the files cannot be root-owned here). All values are test placeholders.
+mkdir -p "$W/routes"
+live_aud="$(printf 'cd%.0s' {1..32})"
+printf 'PLATFORM_DOMAIN=apps.example.test\n' >"$W/ingress.env"
+printf 'ACCESS_TEAM_DOMAIN=liveteam.cloudflareaccess.com\nACCESS_AUD=%s\n' "$live_aud" >"$W/access.env"
+chmod 644 "$W/ingress.env" "$W/access.env"
+export DEPLOY_ROUTES_DIR="$W/routes" DEPLOY_INGRESS_ENV="$W/ingress.env" DEPLOY_ACCESS_ENV="$W/access.env" DEPLOY_ENV_UID
+DEPLOY_ENV_UID="$(id -u)"
 
 # build_image <tag> <healthy 1|0>: a busybox httpd on port 8080 as uid 1000; unhealthy serves no /healthz (a 404).
 build_image() {
@@ -99,6 +110,8 @@ build_image() {
     printf 'FROM %s\n' "$base_image"
     printf 'RUN mkdir /www && echo %s > /www/index.html\n' "$tag"
     [ "$healthy" -eq 0 ] || printf 'RUN echo ok > /www/healthz\n'
+    # The declared volume's mount point: a directory owned by the numeric USER, which docker copies into the empty volume.
+    printf 'RUN mkdir -p /data/files && chown 1000:1000 /data/files\n'
     printf 'USER 1000\nEXPOSE 8080\nCMD ["httpd", "-f", "-p", "8080", "-h", "/www"]\n'
   } >"$W/ctx/Dockerfile"
   docker build -q -t "$repo:$tag" "$W/ctx" >/dev/null 2>"$T_TMP/build-err" || { cat "$T_TMP/build-err"; echo "FAIL: building $repo:$tag"; exit 1; }
@@ -115,6 +128,9 @@ template: flask
 memory_cap: 64m
 port: 8080
 health_path: /healthz
+volumes:
+  - name: files
+    path: /data/files
 EOF
 printf 'unused-token-line\n' >"$W/input"
 cat "$W/app.yaml" >>"$W/input"
@@ -138,6 +154,7 @@ ctr_image() { docker inspect --format '{{.Image}}' "$1" 2>/dev/null; }
 ctr_state() { docker inspect --format '{{.State.Status}}' "$1" 2>/dev/null; }
 ctr_exists() { docker inspect "$1" >/dev/null 2>&1; }
 rd() { if [ -f "$1" ]; then cat "$1"; fi; }
+marker() { docker exec "$ctr" cat /data/files/marker 2>&1; }
 fmt() { docker inspect --format "$1" "$ctr" 2>/dev/null; }
 probe() { # the container's /healthz over the per-run network, as the health phase does
   local ip
@@ -170,13 +187,24 @@ expect_eq "pids limit" "$(fmt '{{.HostConfig.PidsLimit}}')" "256"
 expect_eq "restart policy" "$(fmt '{{.HostConfig.RestartPolicy.Name}}')" "unless-stopped"
 expect_eq "supplementary groups" "$(fmt '{{.HostConfig.GroupAdd}}')" "[64323 64324]"
 expect_eq "only the app's own secret dirs are mounted, read-only" \
-  "$(fmt '{{range .Mounts}}{{.Source}}:{{.Destination}}:{{.RW}}{{println}}{{end}}' | grep -v '^$' | LC_ALL=C sort | paste -sd' ' -)" \
+  "$(fmt '{{range .Mounts}}{{if eq .Type "bind"}}{{.Source}}:{{.Destination}}:{{.RW}}{{println}}{{end}}{{end}}' | grep -v '^$' | LC_ALL=C sort | paste -sd' ' -)" \
   "$W/jobs/$app:/run/platform/job-secrets:false $W/secrets/$app:/run/platform/secrets:false"
+expect_eq "the declared volume is mounted read-write at its path" \
+  "$(fmt '{{range .Mounts}}{{if eq .Type "volume"}}{{.Name}}:{{.Destination}}:{{.RW}}{{println}}{{end}}{{end}}' | grep -v '^$')" \
+  "$vol:/data/files:true"
+expect_eq "the volume carries both labels" "$(docker volume inspect --format '{{index .Labels "platform.app"}}/{{index .Labels "platform.volume"}}' "$vol" 2>/dev/null)" "$app/files"
+expect_eq "the container can write the volume (image directory ownership)" "$(docker exec "$ctr" sh -c 'echo marker-1 > /data/files/marker && cat /data/files/marker' 2>&1)" "marker-1"
 expect_eq "DB_NAME" "$(fmt '{{range .Config.Env}}{{println .}}{{end}}' | grep -x 'DB_NAME=.*')" "DB_NAME=${app//-/_}"
 expect_eq "REDIS_KEY_PREFIX" "$(fmt '{{range .Config.Env}}{{println .}}{{end}}' | grep -x 'REDIS_KEY_PREFIX=.*')" "REDIS_KEY_PREFIX=$app:"
 expect_eq "the environment names files, never a password" "$(fmt '{{range .Config.Env}}{{println .}}{{end}}' | grep -c '_PASSWORD=')" "0"
 expect_eq "the container is on the per-run network with the app alias" "$(fmt "{{index .NetworkSettings.Networks \"$net\" \"Aliases\"}}" | grep -c "$app")" "1"
 expect_eq "the temp dir is removed" "$(ls -A "$W/tmp")" ""
+expect_eq "the Access settings reach the container" \
+  "$(fmt '{{range .Config.Env}}{{println .}}{{end}}' | grep -E -x 'ACCESS_(TEAM_DOMAIN|AUD)=.*' | LC_ALL=C sort | paste -sd' ' -)" \
+  "ACCESS_AUD=$live_aud ACCESS_TEAM_DOMAIN=liveteam.cloudflareaccess.com"
+expect_eq "the route file is written to the temp routes dir, mode 0644" "$(ls -A "$W/routes"):$(stat -c %a "$W/routes/app-$app.yml")" "app-$app.yml:644"
+expect_eq "the route names the app host and the registered port" \
+  "$(grep -E -c "Host\(\`$app\.apps\.example\.test\`\)|url: http://$app:8080" "$W/routes/app-$app.yml")" "2"
 
 # ---- a healthy swap ----
 
@@ -185,6 +213,7 @@ build_image bad 0
 deploy v2
 expect_rc "a healthy swap succeeds" 0
 expect_eq "the new image runs" "$(ctr_image "$ctr")" "$(img_id v2)"
+expect_eq "the volume marker survived the redeploy" "$(marker)" "marker-1"
 expect_eq "it is running" "$(ctr_state "$ctr")" "running"
 expect_eq "the old container is removed at commit" "$(ctr_exists "$ctr-old" && echo yes || echo no)" "no"
 expect_eq "current/tag is v2" "$(rd "$W/dstate/$app/current/tag")" "v2"
@@ -203,9 +232,11 @@ expect_eq "the old container is restored under its name" "$(ctr_image "$ctr")" "
 expect_eq "and is running" "$(ctr_state "$ctr")" "running"
 expect_eq "no app-old container is left" "$(ctr_exists "$ctr-old" && echo yes || echo no)" "no"
 expect_eq "the restored container still answers" "$(probe)" "200"
+expect_eq "the volume marker survived the failed swap" "$(marker)" "marker-1"
 expect_eq "current/tag is unchanged" "$(rd "$W/dstate/$app/current/tag")" "v2"
 expect_eq "previous/tag is unchanged" "$(rd "$W/dstate/$app/previous/tag")" "v1"
 expect_eq "the registry entry is unchanged" "$(rd "$W/reg/$app/app.yaml")" "$before_reg"
+expect_eq "the route file is unchanged and no temp file is left" "$(ls -A "$W/routes")" "app-$app.yml"
 expect_eq "a failed deploy removed the image it pulled" "$(img_id bad | grep -c sha256)" "0"
 expect_eq "and kept the current and previous images" "$(img_id v2 | grep -c sha256):$(img_id v1 | grep -c sha256)" "1:1"
 
@@ -220,6 +251,7 @@ expect_eq "the new image runs after the recovery" "$(ctr_image "$ctr")" "$(img_i
 expect_eq "no -old remains" "$(ctr_exists "$ctr-old" && echo yes || echo no)" "no"
 expect_eq "current/tag is v1" "$(rd "$W/dstate/$app/current/tag")" "v1"
 expect_eq "the health path answers after the recovery" "$(probe)" "200"
+expect_eq "the volume marker survived the recovery" "$(marker)" "marker-1"
 
 # ---- rollback (state now: current v1, previous v2) ----
 
@@ -230,11 +262,13 @@ expect_eq "it is running and answers" "$(ctr_state "$ctr"):$(probe)" "running:20
 expect_eq "no -old container remains" "$(ctr_exists "$ctr-old" && echo yes || echo no)" "no"
 expect_eq "current/tag and previous/tag are exchanged" "$(rd "$W/dstate/$app/current/tag"):$(rd "$W/dstate/$app/previous/tag")" "v2:v1"
 expect_eq "the temp dir is removed after a rollback" "$(ls -A "$W/tmp")" ""
+expect_eq "the volume marker survived the rollback" "$(marker)" "marker-1"
 
 rollback
 expect_rc "a second rollback succeeds" 0
 expect_eq "two rollbacks end on the original image (v1)" "$(ctr_image "$ctr")" "$(img_id v1)"
 expect_eq "and the original state" "$(rd "$W/dstate/$app/current/tag"):$(rd "$W/dstate/$app/previous/tag")" "v1:v2"
+expect_eq "the volume marker survived the second rollback" "$(marker)" "marker-1"
 
 # A redeploy of the live tag, then a rollback, still returns to the version before it.
 deploy v1

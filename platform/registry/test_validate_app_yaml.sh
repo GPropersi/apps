@@ -112,6 +112,49 @@ mutate "jobs with plain items" "key after a list item" 's/^  - name: daily-diges
 mutate "jobs empty" "jobs is present but has no entries" '/^  - name:/,$d'
 mutate "email list in access" "access 'family, bob" "s/^access: family/access: family, bob${at}home/"
 
+# ---- volumes: the example plus an appended volumes block ----
+
+# volcase <label> <reason|-> <block>: expect rc 1 and the reason (rc 0 and no output when the reason is "-").
+volcase() {
+  local label="$1" reason="$2" block="$3" f="$cases/chores/app.yaml"
+  rm -rf "${cases:?}/chores"
+  mkdir -p "$cases/chores"
+  { cat "$example"; printf '%s\n' "$block"; } > "$f"
+  run_cmd "$validator" "$f"
+  if [ "$reason" = "-" ]; then
+    expect_rc "$label: rc" 0
+    expect_eq "$label: prints nothing" "$out" ""
+  else
+    expect_rc "$label: rc" 1
+    expect_out_has "$label: reason" "$reason"
+  fi
+}
+v1=$'volumes:\n  - name: files\n    path: /data/files'
+volcase "one volume" - "$v1"
+volcase "four volumes with dots, dashes and depth" - $'volumes:\n  - name: a\n    path: /data/a\n  - name: b-1\n    path: /data/x.y-z_1/deep\n  - name: c\n    path: /data/..hidden\n  - name: d\n    path: /data/.cfg'
+volcase "path outside /data" "must be absolute under /data" $'volumes:\n  - name: a\n    path: /tmp/x'
+volcase "path /dataset is not under /data" "must be absolute under /data" $'volumes:\n  - name: a\n    path: /dataset'
+volcase "relative path" "must be absolute under /data" $'volumes:\n  - name: a\n    path: data/x'
+volcase "dotdot segment" "must not contain a . or .. segment" $'volumes:\n  - name: a\n    path: /data/../etc'
+volcase "dot segment" "must not contain a . or .. segment" $'volumes:\n  - name: a\n    path: /data/./x'
+volcase "trailing dotdot" "must not contain a . or .. segment" $'volumes:\n  - name: a\n    path: /data/x/..'
+volcase "uppercase in path" "must be absolute under /data" $'volumes:\n  - name: a\n    path: /data/Files'
+volcase "trailing slash" "must be absolute under /data" $'volumes:\n  - name: a\n    path: /data/files/'
+volcase "bad volume name" "name 'A_b' must match" $'volumes:\n  - name: A_b\n    path: /data/x'
+volcase "underscore in volume name" "name 'a_b' must match" $'volumes:\n  - name: a_b\n    path: /data/x'
+volcase "duplicate name" "duplicate volume name 'a'" $'volumes:\n  - name: a\n    path: /data/a\n  - name: a\n    path: /data/b'
+volcase "duplicate path" "duplicate volume path '/data/a'" $'volumes:\n  - name: a\n    path: /data/a\n  - name: b\n    path: /data/a'
+volcase "path inside another" "volume path '/data/a/b' is inside volume path '/data/a'" $'volumes:\n  - name: a\n    path: /data/a\n  - name: b\n    path: /data/a/b'
+volcase "a sibling with a shared prefix is not nested" - $'volumes:\n  - name: a\n    path: /data/a\n  - name: b\n    path: /data/ab'
+volcase "fifth volume" "volumes has 5 entries, the maximum is 4" $'volumes:\n  - name: a\n    path: /data/a\n  - name: b\n    path: /data/b\n  - name: c\n    path: /data/c\n  - name: d\n    path: /data/d\n  - name: e\n    path: /data/e'
+volcase "unknown entry key" "volumes[0] has unknown key 'size'" $'volumes:\n  - name: a\n    path: /data/a\n    size: 1'
+volcase "entry missing path" "volumes[0] is missing required key 'path'" $'volumes:\n  - name: a'
+volcase "entry missing name" "volumes[0] is missing required key 'name'" $'volumes:\n  - path: /data/a'
+volcase "volumes empty" "volumes is present but has no entries" 'volumes:'
+volcase "volumes plain items" "volumes items must be maps" $'volumes:\n  - a'
+volcase "nested entry value" "must be a scalar" $'volumes:\n  - name: a\n    path:\n      x: 1'
+volcase "path as a quoted string with spaces" "must be absolute under /data" $'volumes:\n  - name: a\n    path: "/data/a b"'
+
 # Optional keys really are optional.
 f="$cases/minimal/app.yaml"
 mkdir -p "$cases/minimal"

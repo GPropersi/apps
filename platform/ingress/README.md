@@ -8,17 +8,18 @@ here is **run by you**; Claude never touches the live host or the Cloudflare acc
 
 | File | Role |
 |---|---|
-| `compose.yaml` | The Compose project `platform-ingress`: `cloudflared` (token from a host file), `traefik`, a read-only `socket-proxy` for the Docker API (on an internal network only Traefik reaches) and `down-page`. No published ports. Traefik is configured by `TRAEFIK_*` environment variables only; its healthcheck is `traefik healthcheck`. |
+| `compose.yaml` | The Compose project `platform-ingress`: `cloudflared` (token from a host file), `traefik` (routes from files only, no Docker access) and `down-page`. No published ports. Traefik is configured by `TRAEFIK_*` environment variables only; its healthcheck is `traefik healthcheck`. |
 | `dynamic.yml` | Traefik file-provider config: the `/_jobs` deny router, the lowest-priority catch-all and the `errors` middleware. |
 | `down-page/index.html` | The static "this app is down or does not exist" page. |
 | `jobs-paths.table` | The `/_jobs` path variants the tests probe. |
 | `env.example` | Placeholder for the host-side `/etc/platform/ingress.env`. |
+| `access.env.example` | Placeholder for the host-side `/etc/platform/access.env`. |
 | `test_*.sh` | Offline tests of the files above (`make test`); they read the YAML with `../lib/yaml-subset.sh`. |
 
 `test_traefik_dynamic.sh` runs the pinned Traefik for real and needs docker, so it skips (exit 0, loud notice) on a
 host without it, as in CI. For the pre-merge run on a docker host use `REQUIRE_DOCKER=1 platform/ingress/test_traefik_dynamic.sh`:
-a missing docker, daemon or socket then fails instead of skipping. It routes Traefik through a socket-proxy built from
-the production image and allowlist, so the host Docker socket is never mounted into Traefik.
+a missing docker, daemon or socket then fails instead of skipping. Traefik there gets no Docker socket at all: routes
+come from `app-<app>.yml` files written after it starts, which also proves the file watcher picks them up.
 
 The installer `platform/host/install-ingress.sh` embeds the three payload files; edit the source file and run
 `make embed` (`make lint` fails on drift).
@@ -50,6 +51,38 @@ hostname Access app overrides the wildcard, test it live before relying on it.
 | `/etc/platform/cloudflared.token` | `root:64321`, `0640` | the tunnel token (one line) |
 | `/etc/platform/ingress.env` | `root`, not group or world writable (`0644`) | `PLATFORM_DOMAIN=<your domain>` (lowercase DNS name) |
 
+#### Host files you create by hand
+
+`/etc/platform/access.env` (root-owned, `0644`, not group or world writable) holds the Cloudflare Access settings
+`platform deploy` hands to every app. Copy `access.env.example` and fill in two values from the Zero Trust dashboard:
+
+- `ACCESS_TEAM_DOMAIN=<team>.cloudflareaccess.com`: the team domain (Zero Trust, Settings, Custom Pages).
+- `ACCESS_AUD=<64 hex characters>`: the Application Audience tag (Zero Trust, Access, Applications, the wildcard app,
+  Overview).
+
+```
+sudo tee /etc/platform/access.env >/dev/null
+sudo chown root:root /etc/platform/access.env
+sudo chmod 0644 /etc/platform/access.env
+```
+
+(paste the two lines, Enter, Ctrl-D). Both values are account-specific: never commit them. A deploy refuses to start
+when the file is missing, a symlink, group or world writable, or holds a malformed value, and its log names the key and
+the file, never the value. `make host-ingress ... ARGS="verify"` checks the file too. The single `ACCESS_AUD` fits only
+apps whose Access scope is `access` absent or `family`; a `public` or `restricted` app needs a later template or a
+per-app audience.
+
+The ingress installer also needs the `deploy` group (run `make host-deploy-user` first): the
+`/opt/platform/ingress/dynamic` directory is `root:deploy` mode `1775` (sticky, group-writable), so `platform deploy`
+writes only its own `app-<app>.yml` route files there and cannot replace or delete root's `dynamic.yml`. `verify` and
+`verify --live` prove this as the `deploy` user.
+
+**Trust boundary.** The `deploy` identity (CI's restricted login) can author any `*.yml` in that directory, including a
+router with a high `priority` that would shadow the `/_jobs` deny or an Access-gated route; the sticky bit protects only
+root's `dynamic.yml`. The guard is `install-ingress.sh verify` (and `status`): it fails on any file other than
+`dynamic.yml` that is not named `app-<valid-name>.yml` or whose lines are not exactly what `platform deploy` renders
+(that app's own router and service, no `priority`, `middlewares` or other key). Run it after any deploy-identity change.
+
 The token group is created by you, once, at the fixed gid `64321` (it must equal `group_add` of `cloudflared` in
 `compose.yaml`). It must have **no members**, be **no account's primary group** and **not be the Docker socket's
 group**. The installer only verifies this, fail-closed, and prints the commands when something is missing:
@@ -63,10 +96,13 @@ echo 'PLATFORM_DOMAIN=<your-domain>' | sudo tee /etc/platform/ingress.env >/dev/
 sudo chmod 0644 /etc/platform/ingress.env
 ```
 
-(paste the token, Enter, Ctrl-D, for the `tee` of the token file). `DOCKER_GID` is not yours to set: the installer derives it from the socket's
-group with `stat` and stores it in `/opt/platform/ingress/docker-gid.env`. The stack installs under
-`/opt/platform/ingress` and creates the `platform` network (bridge, IPv6 off) if absent. If container DNS goes to a
+(paste the token, Enter, Ctrl-D, for the `tee` of the token file). The stack installs under
+`/opt/platform/ingress` and creates the `platform` network (bridge, IPv6 off) if absent. An upgrade from the earlier
+socket-proxy layout is automatic: the installer removes the socket-proxy container, the `ingress-proxy` network and
+`docker-gid.env`, logs each removal, and `verify` fails while any of them remains. If container DNS goes to a
 LAN resolver, list it in `/etc/platform/egress-allow.cidrs` (see `platform/host/README.md`).
+Install order for a first app that declares volumes or routes: `make host-deploy-user`, then `make host-jobs`, then
+`make host-ingress`, before its first deploy.
 
 ### 3. Install and verify
 
@@ -85,19 +121,16 @@ make host-verify-ingress HOST=<alias> ARGS="--domain <your domain>"
   stranger and passes only when the Access login wall is seen. Open, unreachable and unconfirmed each fail with a
   distinct message. `PLATFORM_DOMAIN` in the environment can replace `--domain`.
 
-## Label contract
+## Routing and label contract
 
-- An app container carries exactly one label, `platform.app=<name>`, and is then served at
-  `https://<name>.<domain>` on its single exposed port.
-- **Traefik sees only containers with `platform.app`.** Traefik, cloudflared, the socket proxy, the down page and
-  later Postgres and Redis are unlabelled and never become routers.
-- **Apps must not carry `traefik.*` labels.** An app-supplied label could shadow the `/_jobs` deny (a
-  higher-priority router would bypass it). Deploy-path requirement: the deploy path must reject any `traefik.*`
-  label, and must validate `platform.app` as a lowercase DNS label, before an app is deployed. Nothing in the
-  ingress stack enforces either rule; the enforcement point is `platform/deploy/deploy.sh`. Its `inspect` phase refuses an
-  image carrying any `traefik.*` or `platform.*` label (or not exposing exactly the registered port), and its `docker run`
-  (no compose file is generated) sets the one `platform.app=<name>` label itself from the name that passed the
-  app-name check.
+- **Routing comes only from files.** Traefik reads `dynamic.yml` plus one `app-<app>.yml` per app from
+  `/opt/platform/ingress/dynamic`, written by `platform deploy` (router `app-<name>`, rule Host(`<name>.<domain>`),
+  entry point `web`, service `app-<name>` to the container's single port). Labels route nothing: an app with
+  `traefik.*` labels but no route file answers the friendly 503.
+- An app container carries exactly one label, `platform.app=<name>`, used by `platform ls` and scoping, not routing.
+- **Apps must not carry `traefik.*` labels.** Defence in depth: they are inert now, but the deploy path still rejects
+  any `traefik.*` or `platform.*` image label and validates `platform.app` as a lowercase DNS label
+  (`platform/deploy/deploy.sh`, `inspect` phase), and its `docker run` sets the one label itself.
 - **A stopped `app-<name>-old` keeps its label.** Labels are immutable, so during a deploy the old container, renamed
   `app-<name>-old` and stopped, still carries `platform.app=<name>`: `platform ls` shows the app `exited` from the swap until
   the commit removes it, and after an interrupted deploy until the next deploy removes or restores it. This is accepted.
@@ -114,9 +147,8 @@ traffic (INPUT, not forwarded) is still out of scope, as in the egress guarantee
 Access gate is verified from outside by `make host-verify-ingress`; routing and the `/_jobs` denial by
 `verify --live`.
 
-**Environment exposure.** Traefik can read every container's environment variables through the socket proxy
-(the allowlist includes `GET /containers/<id>/json`, which the Docker provider needs), until the file-provider
-migration (master plan Step 11). No app may rely on env-only secrets being hidden from the ingress tier.
+**Environment exposure.** Traefik has no Docker API access of any kind, so it cannot read any container's
+environment variables.
 
 ## Rotating the tunnel token
 
@@ -125,7 +157,7 @@ Get the new token from the tunnel's page in the Cloudflare dashboard, then on th
 file keeps both), and restart only cloudflared:
 
 ```
-sudo docker compose -p platform-ingress -f /opt/platform/ingress/compose.yaml --env-file /etc/platform/ingress.env --env-file /opt/platform/ingress/docker-gid.env restart cloudflared
+sudo docker compose -p platform-ingress -f /opt/platform/ingress/compose.yaml --env-file /etc/platform/ingress.env restart cloudflared
 ```
 
 Then run `make host-ingress HOST=<alias> ARGS="verify"`. Revoke the old token in the dashboard.
@@ -135,7 +167,7 @@ Then run `make host-ingress HOST=<alias> ARGS="verify"`. Revoke the old token in
 1. Stop the stack on the Pi (removes the ingress containers; the `platform` network stays (it is external to the stack, IPv6 off,
    and apps join it later); no firewall rule is touched):
    ```
-   sudo docker compose -p platform-ingress -f /opt/platform/ingress/compose.yaml --env-file /etc/platform/ingress.env --env-file /opt/platform/ingress/docker-gid.env down
+   sudo docker compose -p platform-ingress -f /opt/platform/ingress/compose.yaml --env-file /etc/platform/ingress.env down
    ```
 2. In the Cloudflare dashboard remove the wildcard route and the `*` DNS record (and the Access app if you are
    retiring the domain). These two dashboard steps are documented only; they are not exercised by the acceptance

@@ -7,6 +7,11 @@ memory_cap: 64m
 port: 8080
 health_path: /healthz
 access: family
+# Optional persistent folders (1 to 4), kept across restarts and redeploys. Each path must be a
+# directory in the image under /data, owned by the image's numeric USER:
+# volumes:
+#   - name: files
+#     path: /data/files
 jobs:
   - name: daily-digest
     schedule: "0 7 * * *"

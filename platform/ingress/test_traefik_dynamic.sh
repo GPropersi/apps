@@ -3,8 +3,8 @@
 # Pre-merge run of the pinned Traefik against dynamic.yml and the Traefik settings in compose.yaml.
 #
 # Needs docker; on a host without a usable docker daemon it skips with a loud notice and exits 0. Run it
-# once un-skipped on a docker host before merge, with REQUIRE_DOCKER=1 so a missing docker, daemon, curl or Docker
-# socket is a failure instead of a skip (a skip is otherwise indistinguishable from a pass):
+# once un-skipped on a docker host before merge, with REQUIRE_DOCKER=1 so a missing docker, daemon or curl
+# is a failure instead of a skip (a skip is otherwise indistinguishable from a pass):
 #   REQUIRE_DOCKER=1 platform/ingress/test_traefik_dynamic.sh
 #
 # What it proves (the live host reconfirms it):
@@ -14,14 +14,14 @@
 #   - the ping entrypoint is loopback-only (a sibling container is refused) and Traefik's own healthcheck works;
 #   - the access log has no cookie value and no query string, and keeps Cf-Connecting-Ip.
 #
-# Traefik's settings come from compose.yaml (never retyped here). Only two entries differ for the run: the Docker
-# provider network (a throwaway network, never `platform`) and the domain value (a fake domain). Everything else,
-# including the provider endpoint, is used verbatim and asserted unchanged. Like production, Traefik never sees the
-# host Docker socket: a socket-proxy container, built from the pinned image and the exact command in compose.yaml
-# (the production allowlist), joins the throwaway network and is the only container that mounts the socket
-# (read-only; the test-owned path INGRESS_TEST_DOCKER_SOCK, default /var/run/docker.sock). Traefik carries the
-# network alias `traefik` so the proxy's -allowfrom=traefik resolves. No host port is published; requests go straight
-# to the container address on the throwaway network. All containers and the network are removed on every exit path.
+#   - routing comes only from files: fixture apps get an app-<name>.yml route file (the shape platform deploy writes),
+#     the router name ends @file, a container that only carries traefik.* labels gets no route, and a route file that
+#     appears after Traefik started is served without a restart.
+#
+# Traefik's settings come from compose.yaml (never retyped here) and are used verbatim, asserted to hold no Docker
+# provider key. Like production, Traefik has no Docker socket and no Docker API access of any kind. No host port is
+# published; requests go straight to the container address on a throwaway network. All containers and the network are
+# removed on every exit path.
 #
 # Usage: test_traefik_dynamic.sh [--record]
 #   --record  rewrite the "variant | code" block in dynamic.yml with the observed codes instead of checking it.
@@ -68,33 +68,15 @@ command -v curl >/dev/null 2>&1 || skip "curl is not installed"
 
 t_init
 
-sock="${INGRESS_TEST_DOCKER_SOCK:-/var/run/docker.sock}"
-[ -S "$sock" ] || skip "no Docker socket at $sock (set INGRESS_TEST_DOCKER_SOCK)"
-sockgid="$(stat -c %g "$sock")"
-
-# Traefik's Docker provider watches every container on the daemon, so two copies of this test at once see each other's
-# containers and both fail. Runs queue on one lock instead (released when this process exits, on every exit path). The
-# wait is bounded and logged, so a holder that never finishes shows up here and not as a silent hang.
-# The lock stays global on purpose: it guards against a second copy started by another worktree's gate, which per-run
-# container names cannot fix (the provider sees every container on the daemon). Within one run there is only one copy,
-# so the lock costs nothing. The wait bound is under the runner's default per-file timeout (30 minutes), so a contended lock
-# fails with this named message instead of a bare timeout.
-# The /tmp lock path is trusted: these hosts are single-tenant, so no other user can plant a symlink there.
-lock="${INGRESS_TEST_LOCK:-/tmp/platform-traefik-dynamic-test-lock}"
-command -v flock >/dev/null 2>&1 || skip "flock is not installed"
-exec 8>>"$lock" || { echo "FAIL: cannot open the run lock $lock"; exit 1; }
-if ! flock -n 8; then
-  echo "$(date -u +%FT%TZ) waiting for another run of this test to finish (lock $lock, up to 900s)"
-  flock -w 900 8 || { echo "FAIL: another run still held $lock after 900s"; exit 1; }
-  echo "$(date -u +%FT%TZ) got the run lock"
-fi
+# No run lock: with no Docker provider, Traefik sees only its own route files, so two copies of this test (each with
+# its own network, containers and route directory) cannot see each other.
 
 rid="ingt-$$-$RANDOM"
 net="$rid-net"
 fake_domain="example.test"
 friendly="This app is down or does not exist"
 tname="$rid-traefik"
-sname="$rid-proxy"
+hname="$rid-hostile"
 aname="$rid-app"
 fname="$rid-fail503"
 gname="$rid-gone"
@@ -125,11 +107,6 @@ fi
 
 timage="$(ys_get "$flat" services/traefik/image)"
 pimage="$(ys_get "$flat" services/down-page/image)"
-simage="$(ys_get "$flat" services/socket-proxy/image)"
-suser="$(ys_get "$flat" services/socket-proxy/user)"
-mapfile -t sp_cmd < <(ys_list "$flat" services/socket-proxy/command)
-# Compose writes a literal dollar as two; the container must get one.
-sp_cmd=("${sp_cmd[@]//\$\$/\$}")
 tuser="$(ys_get "$flat" services/traefik/user)"
 tvol="$(ys_list "$flat" services/traefik/volumes | head -n 1)"
 tvol_target="${tvol#*:}"
@@ -154,17 +131,11 @@ fi
 mapfile -t hc < <(ys_list "$flat" services/traefik/healthcheck/test)
 hc_cmd="${hc[*]:1}"
 
-# The three entries this run replaces (everything else is verbatim).
-envv[TRAEFIK_PROVIDERS_DOCKER_NETWORK]="$net"
-changed=""
-for k in "${env_keys[@]}"; do
-  [ "${envv[$k]}" = "${orig[$k]}" ] || changed="$changed $k"
-done
-# The domain substitution is part of `orig` already; the endpoint stays the production socket-proxy address.
-# shellcheck disable=SC2086
-expect_eq "only the Docker network is replaced (the endpoint stays the socket-proxy)" "$(printf '%s\n' $changed | sort | tr '\n' ' ')" \
-  "TRAEFIK_PROVIDERS_DOCKER_NETWORK "
-expect_eq "the provider endpoint is the production socket-proxy address" "${envv[TRAEFIK_PROVIDERS_DOCKER_ENDPOINT]}" "tcp://socket-proxy:2375"
+# Nothing is replaced for the run: the production environment is used verbatim, and it has no Docker provider.
+docker_keys="$(printf '%s\n' "${env_keys[@]}" | grep -c '^TRAEFIK_PROVIDERS_DOCKER' || true)"
+expect_eq "compose.yaml carries no TRAEFIK_PROVIDERS_DOCKER_* key" "$docker_keys" 0
+expect_eq "the file provider reads the mounted dynamic directory" "${envv[TRAEFIK_PROVIDERS_FILE_DIRECTORY]:-}" "/etc/traefik/dynamic"
+expect_eq "the file provider watches for changes" "${envv[TRAEFIK_PROVIDERS_FILE_WATCH]:-}" "true"
 
 # ---- helpers ----
 
@@ -185,13 +156,20 @@ backend_hits() { docker logs "$aname" 2>&1 | grep -c 'url:' || true; }
 
 ip_of() { docker inspect -f "{{(index .NetworkSettings.Networks \"$net\").IPAddress}}" "$1"; }
 
-# dump_logs: the Traefik and socket-proxy log tails printed when a readiness wait times out.
+# dump_logs: the Traefik log tail printed when a readiness wait times out.
 dump_logs() {
-  # The 404 access-log lines would fill the tail and hide the provider error, so drop them and add the socket-proxy's log.
+  # The 404 access-log lines would fill the tail and hide the provider error, so drop them.
   echo "-- traefik (access-log lines dropped):"
   docker logs "$tname" 2>&1 | grep -v '"RequestAddr"' | tail -n 20
-  echo "-- socket-proxy:"
-  docker logs "$sname" 2>&1 | tail -n 10
+}
+
+# write_route <dir> <name> <host> <backend container>: a route file in the shape platform deploy writes
+# (app-<name>.yml), placed atomically (temp name + rename) in the directory Traefik watches.
+write_route() {
+  local dir="$1" name="$2" host="$3" backend="$4"
+  # shellcheck disable=SC2016 # the backticks are Traefik rule syntax, not a command substitution
+  printf 'http:\n  routers:\n    app-%s:\n      rule: Host(`%s`)\n      entryPoints: [web]\n      service: app-%s\n  services:\n    app-%s:\n      loadBalancer:\n        servers:\n          - url: http://%s:8080\n' \
+    "$name" "$host" "$name" "$name" "$backend" > "$dir/app-$name.tmp" && mv -f "$dir/app-$name.tmp" "$dir/app-$name.yml"
 }
 
 # wait_route <host> <path> <want-code> [secs]: poll until Traefik answers <want-code>; exit 1 with a named failure.
@@ -255,7 +233,7 @@ start_traefik() {
     [ "$req_code" = 200 ] && return 0
     sleep 0.5
   done
-  echo "positive control did not reach the backend: Traefik not routing, check the provider network"
+  echo "positive control did not reach the backend: Traefik not routing, check the app route file and the throwaway network"
   dump_logs
   return 1
 }
@@ -272,6 +250,7 @@ mutated_dyn() {
     errors-narrow) sed 's/"502-504"/"599"/' "$here/dynamic.yml" > "$dir/dynamic.yml" ;;
     errors-wide) sed 's/"502-504"/"400-599"/' "$here/dynamic.yml" > "$dir/dynamic.yml" ;;
   esac
+  write_route "$dir" app "$apphost" "$aname"
   if [ "$name" != plain ] && cmp -s "$here/dynamic.yml" "$dir/dynamic.yml"; then
     echo "mutation $name did not change dynamic.yml" >&2
     return 1
@@ -381,7 +360,7 @@ expect_mutation_fails() {
 
 # ---- images and throwaway network ----
 
-for img in "$timage" "$pimage" "$simage"; do
+for img in "$timage" "$pimage"; do
   if ! docker image inspect "$img" >/dev/null 2>&1; then
     docker pull -q "$img" >/dev/null 2>"$T_TMP/pull-err" || { echo "FAIL: pull $img"; cat "$T_TMP/pull-err"; exit 1; }
   fi
@@ -413,11 +392,13 @@ docker run -d --name "$gname" --label "ingress-test=$rid" --label "platform.app=
   --user 65534:65534 -v "$app_dir:/www:ro" "$pimage" sh -c 'httpd -f -p 8080 -h /www & while :; do sleep 1; done' >/dev/null \
   || { echo "FAIL: start stopped-listener app"; exit 1; }
 
-# The only container that mounts the Docker socket (read-only), with the production allowlist and hardening. Traefik
-# reaches it by the alias socket-proxy, exactly as in production.
-docker run -d --name "$sname" --label "ingress-test=$rid" --network "$net" --network-alias socket-proxy \
-  --user "$suser" --group-add "$sockgid" --cap-drop ALL --security-opt no-new-privileges:true --read-only \
-  -v "$sock:/var/run/docker.sock:ro" "$simage" "${sp_cmd[@]}" >/dev/null || { echo "FAIL: start socket-proxy"; exit 1; }
+# A hostile app: it carries platform.app and a competing, maximum-priority traefik.* router for its own host, but no
+# route file. With no Docker provider the labels are inert, so it must not be routed.
+hostile_host="hostile.$fake_domain"
+docker run -d --name "$hname" --label "ingress-test=$rid" --label "platform.app=hostile" \
+  --label "traefik.enable=true" --label "traefik.http.routers.hostile.rule=Host(\`$hostile_host\`)" \
+  --label "traefik.http.routers.hostile.priority=2147483647" --network "$net" --expose 8080 \
+  --user 65534:65534 -v "$app_dir:/www:ro" "$pimage" httpd -f -vv -p 8080 -h /www >/dev/null || { echo "FAIL: start hostile app"; exit 1; }
 
 # ---- main run: unmutated config ----
 
@@ -441,9 +422,22 @@ encoded_slash_check
 expect_eq "errors middleware range and encoded-slash rejection hold" "${reasons[*]:-}" ""
 [ "${#reasons[@]}" -eq 0 ] || printf '  reason: %s\n' "${reasons[@]}"
 
-# Traefik reaches Docker only through the socket-proxy: no Docker socket mount on the Traefik container.
+# Traefik has no Docker access: no Docker socket mount and no Docker provider variable on the Traefik container.
 tmounts="$(docker inspect -f '{{range .Mounts}}{{.Source}} {{end}}' "$tname")"
 [[ "$tmounts" != *docker.sock* ]] && _pass || _fail "the Docker socket is mounted into the Traefik container (mounts: $tmounts)"
+tenv="$(docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "$tname")"
+grep -q '^TRAEFIK_PROVIDERS_DOCKER' <<<"$tenv" && _fail "the Traefik container has a TRAEFIK_PROVIDERS_DOCKER_* variable" || _pass
+
+# A container with traefik.* labels (even at maximum priority) and no route file gets no route: the friendly 503, and
+# the backend never sees a request.
+hbefore="$(docker logs "$hname" 2>&1 | grep -c 'url:' || true)"
+req "$hostile_host" /index.html
+expect_eq "labelled container without a route file: status" "$req_code" 503
+[[ "$req_body" == *"$friendly"* ]] && _pass || _fail "labelled container without a route file: friendly body missing"
+req "$hostile_host" /_jobs
+expect_eq "labelled container without a route file: /_jobs status" "$req_code" 503
+hafter="$(docker logs "$hname" 2>&1 | grep -c 'url:' || true)"
+expect_eq "labelled container without a route file: the backend saw no request" "$hafter" "$hbefore"
 
 # Recorded per-variant codes in the dynamic.yml header.
 block_file="$T_TMP/observed-block"
@@ -475,12 +469,15 @@ done
 # App-originated failures keep their status and get the friendly body.
 # Through Traefik the app's 503 and the unmatched-host 503 look the same (both bodies become the friendly page), so
 # readiness is proven in two stages: the backend itself answers 'nope', then Traefik's access log shows a request for
-# the host served by the discovered docker route ($fname@docker) and not by the unmatched router.
+# the host served by the file route (app-fails@file) and not by the unmatched router. The route files are written only
+# now, while Traefik is already running: the file provider must pick them up without a restart.
 wait_direct "$fname" 8080 nope
+write_route "$dyn_plain" fails "fails.$fake_domain" "$fname"
+write_route "$dyn_plain" gone "gone.$fake_domain" "$gname"
 fails_end=$(( $(date +%s) + 30 ))
-until docker logs "$tname" 2>&1 | grep -F "\"RequestHost\":\"fails.$fake_domain\"" | grep -qF "\"RouterName\":\"$fname@docker\""; do
+until docker logs "$tname" 2>&1 | grep -F "\"RequestHost\":\"fails.$fake_domain\"" | grep -qF '"RouterName":"app-fails@file"'; do
   if [ "$(date +%s)" -ge "$fails_end" ]; then
-    echo "FAIL: route fails.$fake_domain never reached the discovered router $fname@docker within 30s"
+    echo "FAIL: route fails.$fake_domain never reached the file router app-fails@file within 30s"
     dump_logs
     exit 1
   fi
@@ -491,6 +488,8 @@ req "fails.$fake_domain" /
 expect_eq "app 503: status preserved" "$req_code" 503
 [[ "$req_body" == *"$friendly"* && "$req_body" != *nope* ]] && _pass || _fail "app 503: body not replaced by the friendly page"
 wait_route "gone.$fake_domain" / 200
+# Every app router comes from the file provider (the name ends @file).
+docker logs "$tname" 2>&1 | grep -F "\"RequestHost\":\"gone.$fake_domain\"" | grep -qF '"RouterName":"app-gone@file"' && _pass || _fail "gone route was not served by app-gone@file"
 docker exec "$gname" pkill -x httpd
 wait_route "gone.$fake_domain" / 502
 req "gone.$fake_domain" /

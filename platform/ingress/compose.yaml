@@ -1,18 +1,19 @@
 # Ingress stack: the single front door of the app host (no published ports; traffic arrives over the tunnel).
 #
 #   cloudflared  -> traefik -> app containers on the `platform` network
-#   traefik      -> socket-proxy (read-only, allowlisted Docker API) on the internal `ingress-proxy` network
+#   traefik      -> reads routes from files only (no Docker access of any kind)
 #   down-page    -> supplies the friendly "app is down" body that the errors middleware shows
 #
-# Host-side inputs (never written here): PLATFORM_DOMAIN (the env file), DOCKER_GID (derived by the installer
-# from the Docker socket's group), the tunnel token file mounted into cloudflared.
+# Host-side inputs (never written here): PLATFORM_DOMAIN (the env file), the tunnel token file mounted into
+# cloudflared.
 #
 # Rules this file keeps (platform/ingress/test_ingress_stack.sh enforces them):
 # - It stays inside a small YAML subset (block style only) so the tests can read it without a YAML library.
 # - Traefik is configured ONLY through TRAEFIK_* environment variables, and has no `command:`. Traefik ignores
 #   its environment as soon as any command-line flag is present, and `traefik healthcheck` (no --ping flag) reads
 #   the same environment, so the server and its healthcheck cannot drift apart.
-# - Apps carry the single label platform.app=<name> and no traefik.* labels. No service in this file has it.
+# - Apps carry the single label platform.app=<name> (for `platform ls` and scoping, not routing). No service in this
+#   file has it. Routes live in app-<app>.yml files in the dynamic directory.
 # - Every service drops all capabilities, cannot gain privileges, has a memory limit and restarts unless stopped.
 name: platform-ingress
 
@@ -76,12 +77,8 @@ services:
       TRAEFIK_PING: "true"
       TRAEFIK_PING_ENTRYPOINT: ping
       TRAEFIK_ENTRYPOINTS_PING_ADDRESS: 127.0.0.1:8082
-      # Routing comes from the single platform.app label: only labelled containers become routers.
-      TRAEFIK_PROVIDERS_DOCKER_ENDPOINT: tcp://socket-proxy:2375
-      TRAEFIK_PROVIDERS_DOCKER_NETWORK: platform
-      TRAEFIK_PROVIDERS_DOCKER_EXPOSEDBYDEFAULT: "true"
-      TRAEFIK_PROVIDERS_DOCKER_CONSTRAINTS: LabelRegex(`platform.app`, `.+`)
-      TRAEFIK_PROVIDERS_DOCKER_DEFAULTRULE: Host(`{{ index .Labels "platform.app" }}.${PLATFORM_DOMAIN}`)
+      # Routing comes only from files: dynamic.yml plus one app-<app>.yml per app, written by platform deploy.
+      # There is no Docker provider, so Traefik has no Docker API access and cannot read any container's environment.
       TRAEFIK_PROVIDERS_FILE_DIRECTORY: /etc/traefik/dynamic
       TRAEFIK_PROVIDERS_FILE_WATCH: "true"
       # Access log: JSON on stdout, no query strings, no headers except the client address Cloudflare sets.
@@ -95,7 +92,6 @@ services:
     user: "65532:65532"
     networks:
       - platform
-      - ingress-proxy
     restart: unless-stopped
     mem_limit: 256m
     cap_drop:
@@ -112,41 +108,6 @@ services:
       timeout: 5s
       retries: 3
       start_period: 10s
-
-  socket-proxy:
-    image: docker.io/wollomatic/socket-proxy:1.13.1@sha256:3935b709275e4ec35d6ed5a5c4a1f0d01ed31eec5e7234efc3357ecd47689002
-    # GET on /version, /containers/json, /containers/<id>/json and /events, HEAD on /_ping, each with an
-    # optional API version prefix (v and a number pair); every other method and path is denied. $$ is a literal $
-    # for Compose.
-    command:
-      - -listenip=0.0.0.0
-      - -allowfrom=traefik
-      - -allowGET=^(/v[0-9]+\.[0-9]+)?/(version|containers/json|containers/[a-zA-Z0-9]+/json|events)$$
-      - -allowHEAD=^(/v[0-9]+\.[0-9]+)?/_ping$$
-      - -allowhealthcheck
-      - -watchdoginterval=10
-    volumes:
-      - /var/run/docker.sock:/var/run/docker.sock:ro
-    user: "65534:65534"
-    group_add:
-      - "${DOCKER_GID}"
-    networks:
-      - ingress-proxy
-    restart: unless-stopped
-    mem_limit: 64m
-    cap_drop:
-      - ALL
-    security_opt:
-      - no-new-privileges:true
-    read_only: true
-    healthcheck:
-      test:
-        - CMD
-        - /healthcheck
-      interval: 15s
-      timeout: 5s
-      retries: 3
-      start_period: 5s
 
   down-page:
     image: docker.io/library/busybox:1.37.0@sha256:bdf57e528e45e4433820e045b29b4597825a1c9e38353532d90a01445013f82e
@@ -184,5 +145,3 @@ services:
 networks:
   platform:
     external: true
-  ingress-proxy:
-    internal: true
