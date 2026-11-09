@@ -1227,41 +1227,63 @@ wait "$holder" 2>/dev/null
 expect_rc "hold: ended by the timeout when the terminal stays silent" 0
 if [ "$elapsed" -ge 1 ] && [ "$elapsed" -lt 8 ]; then _pass; else _fail "hold: a silent terminal ends at the timeout" "took ${elapsed}s"; fi
 
+# start_bg_hold: runs the held verify in the background (BGPID) and waits until it prints HOLD: (a signal sent earlier
+# would hit a run that has created nothing). Returns 1, after one clear FAIL, when the run exits first or never gets
+# there within 60 s; the caller then skips the signal and its assertions instead of cascading into a second FAIL.
+start_bg_hold() {
+  local waited=0
+  : > "$T_TMP/bg.out"
+  "$script" verify --live --hold > "$T_TMP/bg.out" 2>&1 &
+  BGPID=$!
+  while ! grep -q 'HOLD:' "$T_TMP/bg.out"; do
+    if ! kill -0 "$BGPID" 2>/dev/null; then
+      rc=0
+      wait "$BGPID" || rc=$?
+      out="$(cat "$T_TMP/bg.out")"
+      _fail "the run exited (rc $rc) before it printed HOLD:"
+      return 1
+    fi
+    if [ "$waited" -ge 600 ]; then
+      kill -TERM "$BGPID" 2>/dev/null
+      wait "$BGPID" 2>/dev/null
+      out="$(cat "$T_TMP/bg.out")"
+      _fail "the run never printed HOLD: within 60 s"
+      return 1
+    fi
+    sleep 0.1
+    waited=$((waited + 1))
+  done
+  _pass
+}
+
 # a signal during the hold still removes every container, promptly
 hold_fresh
 traefik_line "$APP_HOST" yes > "$STATE/traefik_log_post"
 export INSTALL_INGRESS_HOLD_TTY="$T_TMP/no-such-tty"
 export INSTALL_INGRESS_HOLD_TIMEOUT=60
-: > "$T_TMP/bg.out"
-"$script" verify --live --hold > "$T_TMP/bg.out" 2>&1 &
-BGPID=$!
-waited=0
-while ! grep -q 'HOLD:' "$T_TMP/bg.out" && [ "$waited" -lt 600 ]; do sleep 0.1; waited=$((waited + 1)); done
-if grep -q 'HOLD:' "$T_TMP/bg.out"; then _pass; else _fail "the hold was reached before the signal (readiness poll, 60 s bound under parallel load)"; fi
-start=$SECONDS
-kill -TERM "$BGPID"
-wait "$BGPID"
-rc=$?
-elapsed=$((SECONDS - start))
-out="$(cat "$T_TMP/bg.out")"
-expect_rc "TERM during the hold exits 143" 143
-removed_all "after TERM during the hold"
-if [ "$elapsed" -lt 20 ]; then _pass; else _fail "TERM during the hold is prompt" "took ${elapsed}s"; fi
+if start_bg_hold; then
+  start=$SECONDS
+  kill -TERM "$BGPID"
+  wait "$BGPID"
+  rc=$?
+  elapsed=$((SECONDS - start))
+  out="$(cat "$T_TMP/bg.out")"
+  expect_rc "TERM during the hold exits 143" 143
+  removed_all "after TERM during the hold"
+  if [ "$elapsed" -lt 20 ]; then _pass; else _fail "TERM during the hold is prompt" "took ${elapsed}s"; fi
+fi
 hold_fresh
 traefik_line "$APP_HOST" yes > "$STATE/traefik_log_post"
 export INSTALL_INGRESS_HOLD_TTY="$T_TMP/no-such-tty"
 export INSTALL_INGRESS_HOLD_TIMEOUT=60
-"$script" verify --live --hold > "$T_TMP/bg.out" 2>&1 &
-BGPID=$!
-waited=0
-while ! grep -q 'HOLD:' "$T_TMP/bg.out" && [ "$waited" -lt 600 ]; do sleep 0.1; waited=$((waited + 1)); done
-if grep -q 'HOLD:' "$T_TMP/bg.out"; then _pass; else _fail "the hold was reached before the signal (readiness poll, 60 s bound under parallel load)"; fi
-kill -HUP "$BGPID"
-wait "$BGPID"
-rc=$?
-out="$(cat "$T_TMP/bg.out")"
-expect_rc "HUP during the hold exits 129" 129
-removed_all "after HUP during the hold"
+if start_bg_hold; then
+  kill -HUP "$BGPID"
+  wait "$BGPID"
+  rc=$?
+  out="$(cat "$T_TMP/bg.out")"
+  expect_rc "HUP during the hold exits 129" 129
+  removed_all "after HUP during the hold"
+fi
 
 # hold: the log window is a host-clock timestamp (docker logs --since), stdout only, and only the test host counts
 hold_fresh
