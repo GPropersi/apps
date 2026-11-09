@@ -54,11 +54,13 @@ Design and phases live in the stronghold: `~/code/plans/stronghold/open/app-host
   |---|---|
   | Help | `make help` |
   | Lint (public-repo hygiene + embed drift + app.yaml registry validation + per-app contract + shellcheck) | `make lint` |
-  | Tests (every `platform/**/test_*.sh` and `apps/<name>/test_*.sh`; knobs `TEST_JOBS`, `TEST_DOCKER_JOBS`, `TEST_VERBOSE`, `TEST_FILE_TIMEOUT`; `TEST_JOBS` and `TEST_DOCKER_JOBS` default to `auto`: sized from CPUs and memory, a hostq job takes `nproc / HOSTQ_SLOTS` CPUs (`HOSTQ_SLOTS` defaults to 2, mirroring hostq's configured slot count; update the default in `platform/test/run.sh` if hostq's changes), new files are held while memory is low, and the first output line names the decision) | `make test` |
+  | Tests (every `platform/**/test_*.sh`, `apps/<name>/test_*.sh` and `templates/<name>/test_*.sh`; knobs `TEST_JOBS`, `TEST_DOCKER_JOBS`, `TEST_VERBOSE`, `TEST_FILE_TIMEOUT`; `TEST_JOBS` and `TEST_DOCKER_JOBS` default to `auto`: sized from CPUs and memory, a hostq job takes `nproc / HOSTQ_SLOTS` CPUs (`HOSTQ_SLOTS` defaults to 2, mirroring hostq's configured slot count; update the default in `platform/test/run.sh` if hostq's changes), new files are held while memory is low, and the first output line names the decision) | `make test` |
   | Tests the change since `BASE` needs, per `platform/test/areas.map` (default `BASE=origin/main`; same `TEST_*` knobs as `make test`; a `.github/**`-only change runs just the lint and ci tests, and the selected files' images and Go toolchain are prewarmed once before the run) | `make test-changed` |
   | One app's tests | `make test-app APP=<name>` |
   | Regenerate embedded installer payloads | `make embed` |
   | List registered apps (registry only, offline) | `make app-ls` |
+  | Scaffold a new app from a template, offline: no network, ssh or `platform new-db`; refusals leave `apps/` unchanged | `make app-new NAME=<name> PURPOSE="<one line>" [TEMPLATE=go-react] [OWNER=gpropersi]` |
+  | Regenerate sqlc Go code with the pinned generator image (`TEMPLATE=<name>` or `APP=<name>`, exactly one; needs docker) | `make app-sqlc TEMPLATE=go-react` |
   | Live host: registered apps plus live state; needs the passwordless sudo the other `host-*` targets use (you run it; `HOST` required) | `make host-app-ls HOST=<alias>` |
   | Live host: deploy identity installer (you run it; `HOST` required) | `make host-deploy-user HOST=<alias> ARGS="install --pubkey-file PATH"` |
   | Live host: claude identity installer (you run it; `HOST` required) | `make host-claude-access HOST=<alias> ARGS="install --pubkey-file PATH"` |
@@ -74,7 +76,7 @@ Design and phases live in the stronghold: `~/code/plans/stronghold/open/app-host
 - **Issue labels:** n/a
 - **PR reviewer:** `GPropersi`
 - **Worktree policy:** `build-only`
-- **Worktree allowed targets:** `help, lint, test, test-changed, test-app, embed, app-ls`
+- **Worktree allowed targets:** `help, lint, test, test-changed, test-app, embed, app-ls, app-new, app-sqlc`
 - **Worktree link:** `n/a`
 - **Worktree setup:** `n/a`
 - **Worktree teardown:** `n/a`
