@@ -201,7 +201,7 @@ payload_backup_sh() {
 # platform-backup runner (root, host systemd oneshot or run by hand). Usage: backup.sh nightly|manual
 #
 # Framework (env, lock, logging, notify, state file, window, deadline) plus the data phases: preflight, pg-list,
-# pg-globals, pg-db:<db>, redis, restic-backup, restic-forget, restic-check, volumes (see PHASES).
+# pg-globals, pg-db:<db>, redis, app-volumes, restic-backup, restic-forget, restic-check, volumes (see PHASES).
 #
 # Exit codes: 0 ok, 1 failed, 2 usage or env/override problem.
 #
@@ -250,8 +250,8 @@ DISCORD_WEBHOOK=""
 # phase may refine CUR_PHASE (pg-db:<db>) and set PHASE_MSG for the failure text. run_phases calls each phase in a ||
 # context, so errexit is OFF inside a phase body: a phase must check the rc of every timed call and return non-zero
 # itself on failure.
-PHASES=(phase_preflight phase_pg_list phase_pg_globals phase_pg_db phase_redis phase_restic_backup phase_restic_forget
-  phase_restic_check phase_volumes)
+PHASES=(phase_preflight phase_pg_list phase_pg_globals phase_pg_db phase_redis phase_app_volumes phase_restic_backup
+  phase_restic_forget phase_restic_check phase_volumes)
 
 NOTIFY_PHASE_SECS=30
 UNLOCK_SECS=120
@@ -263,6 +263,11 @@ REDIS_POLL_SECS=60
 REDIS_CTR_ADMIN_FILE=/etc/platform/redis-admin.password
 # Docker volumes that are backed up logically (dumps), so the volume inventory does not warn about them.
 LOGICAL_VOLUMES=(platform-data-postgres platform-data-redis)
+# App volumes (declared in app.yaml, created by deploy as app_<app>_<name> with platform.app / platform.volume labels) are
+# backed up as files: phase_app_volumes fills these, phase_restic_backup adds the paths, phase_volumes skips the names.
+readonly APP_VOLUME_RE='^app_([a-z][a-z0-9-]{1,30})_([a-z][a-z0-9-]{0,30})$'
+APP_VOLUME_NAMES=()
+APP_VOLUME_PATHS=()
 # Caller-environment variables that could redirect or re-credential restic or the S3 SDK: removed in phase_env.
 SCRUB_ENV=(RESTIC_PASSWORD_FILE RESTIC_PASSWORD_COMMAND RESTIC_REPOSITORY_FILE RESTIC_FROM_REPOSITORY
   RESTIC_FROM_PASSWORD_FILE RESTIC_FROM_PASSWORD_COMMAND RESTIC_FROM_REPOSITORY_FILE RESTIC_KEY_HINT RESTIC_CACHE_DIR
@@ -952,6 +957,53 @@ phase_redis() {
   return "$rc"
 }
 
+# phase_app_volumes: every Docker volume labelled platform.app whose name is app_<app>_<volume> with <app> equal to the label
+# (declared or not any more, so data stays backed up until rm-db) goes into the restic paths by its mountpoint. A listing
+# failure fails the run (this is data now, not an inventory). A volume that vanished between the listing and its inspect
+# ("No such volume", rm-db --stop) is skipped and logged; any other inspect failure fails the run. staging/volumes.tsv
+# (name, app, mountpoint) goes into the snapshot so restore.sh finds the files even after the volume is gone.
+phase_app_volumes() {
+  local f="$WORK/app-volumes" mpf="$WORK/app-volume-mountpoint" rc=0 line name label mp shown manifest="$STAGING/volumes.tsv"
+  APP_VOLUME_NAMES=()
+  APP_VOLUME_PATHS=()
+  timed_io app-volumes-ls 60 - "$f" docker volume ls --filter label=platform.app --format '{{.Name}} {{.Label "platform.app"}}' || rc=$?
+  if [ "$rc" -ne 0 ]; then PHASE_MSG="cannot list the app volumes"; return "$rc"; fi
+  if ! : > "$manifest"; then PHASE_MSG="cannot write $manifest"; return 1; fi
+  while IFS= read -r line || [ -n "$line" ]; do
+    line="${line%$'\r'}"
+    if [ -z "$line" ]; then continue; fi
+    name="${line%% *}"
+    label=""
+    case "$line" in *' '*) label="${line#* }" ;; *) ;; esac
+    if [[ ! "$name" =~ $APP_VOLUME_RE ]] || [ "$label" != "${BASH_REMATCH[1]}" ]; then
+      shown="$(printf '%q' "${line:0:80}")"
+      log "app-volumes: skipping $shown (not app_<app>_<volume> with a matching platform.app label)"
+      continue
+    fi
+    rc=0
+    timed_io "app-volume-inspect:$name" 60 - "$mpf" docker volume inspect --format '{{.Mountpoint}}' "$name" || rc=$?
+    if [ "$rc" -ne 0 ]; then
+      if [ "$rc" -ne 124 ] && [ "$rc" -ne 137 ] && grep -qi 'no such volume' "$TIMED_LAST_FILE" 2> /dev/null; then
+        log "app-volumes: $name was removed before it could be inspected; skipped"
+        continue
+      fi
+      PHASE_MSG="cannot inspect app volume $name"
+      return "$rc"
+    fi
+    mp="$(tr -d '\r\n' < "$mpf")"
+    if [[ "$mp" != /* ]] || [[ "$mp" == *[[:space:]]* ]] || [[ "$mp/" == *"/../"* ]]; then
+      PHASE_MSG="app volume $name has an unusable mountpoint"
+      return 1
+    fi
+    APP_VOLUME_NAMES+=("$name")
+    APP_VOLUME_PATHS+=("$mp")
+    printf '%s\t%s\t%s\n' "$name" "$label" "$mp" >> "$manifest" || { PHASE_MSG="cannot write $manifest"; return 1; }
+    log "app-volumes: $name mountpoint=$mp"
+  done < "$f"
+  log "state app_volumes=${#APP_VOLUME_NAMES[@]}"
+  return 0
+}
+
 phase_restic_backup() {
   local rc=0 line sid="" sum_re='"message_type":"summary"' id_re='"snapshot_id":"([0-9a-f]{8,64})"' pre="$WORK/snapshots-before"
   local -a extra=()
@@ -964,8 +1016,12 @@ phase_restic_backup() {
   else
     log "WARN: cannot count the snapshots before the backup; the forget guard checks only that the new snapshot is listed"
   fi
+  # Lock and temp files are excluded only under the platform roots (anchored patterns): a slash-less pattern would match any
+  # basename anywhere and silently drop an app volume's own `.x.lock` or `.tmp.y` files from the snapshot.
   restic_timed restic-backup 3600 backup --json --host platform --tag platform --tag "$RUN_MODE" \
-    --exclude '.*.lock' --exclude '.tmp.*' "$STAGING" "$SECRETS_ROOT" "$JOB_SECRETS_ROOT" ${extra[@]+"${extra[@]}"} "$PG_ADMIN_FILE" "$REDIS_ADMIN_FILE" || rc=$?
+    --exclude "$STAGING/**/.*.lock" --exclude "$STAGING/**/.tmp.*" \
+    --exclude "$SECRETS_ROOT/**/.*.lock" --exclude "$SECRETS_ROOT/**/.tmp.*" \
+    --exclude "$JOB_SECRETS_ROOT/**/.*.lock" --exclude "$JOB_SECRETS_ROOT/**/.tmp.*" "$STAGING" "$SECRETS_ROOT" "$JOB_SECRETS_ROOT" ${extra[@]+"${extra[@]}"} "$PG_ADMIN_FILE" "$REDIS_ADMIN_FILE" ${APP_VOLUME_PATHS[@]+"${APP_VOLUME_PATHS[@]}"} || rc=$?
   if [ "$rc" -ne 0 ] && [ "$rc" -ne 3 ]; then return "$rc"; fi
   while IFS= read -r line || [ -n "$line" ]; do
     if [[ "$line" =~ $sum_re ]] && [[ "$line" =~ $id_re ]]; then sid="${BASH_REMATCH[1]}"; fi
@@ -1026,7 +1082,8 @@ phase_restic_check() {
   restic_timed restic-check 600 check
 }
 
-# phase_volumes: warn-only inventory of Docker volumes that no phase backs up.
+# phase_volumes: warn-only inventory of Docker volumes that no phase backs up (app volumes backed up by phase_app_volumes
+# and the logical data volumes are not reported).
 phase_volumes() {
   local f="$WORK/volumes" rc=0 v skip names="" k
   timed_io volumes 60 - "$f" docker volume ls --format '{{.Name}}' || rc=$?
@@ -1037,7 +1094,7 @@ phase_volumes() {
   while IFS= read -r v || [ -n "$v" ]; do
     if [ -z "$v" ] || [[ "$v" =~ ^[0-9a-f]{64}$ ]]; then continue; fi
     skip=0
-    for k in "${LOGICAL_VOLUMES[@]}"; do if [ "$v" = "$k" ]; then skip=1; fi; done
+    for k in "${LOGICAL_VOLUMES[@]}" ${APP_VOLUME_NAMES[@]+"${APP_VOLUME_NAMES[@]}"}; do if [ "$v" = "$k" ]; then skip=1; fi; done
     if [ "$skip" -eq 0 ]; then names="${names:+$names }$v"; fi
   done < "$f"
   if [ -n "$names" ]; then
@@ -1118,12 +1175,15 @@ payload_restore_sh() {
 #   restore.sh list
 #   restore.sh app <app> --into <db> [--snapshot <id>|latest] [--keep]
 #   restore.sh secrets <app> [--snapshot <id>|latest] [--keep]
+#   restore.sh volume <app> <name> --into <dir> [--snapshot <id>|latest] [--keep]
 #   restore.sh host-files [--snapshot <id>|latest] [--keep]
 #   restore.sh full --confirm-destroy [--snapshot <id>|latest] [--keep]
 # Exit codes: 0 ok, 1 failed (the step is named), 2 usage or refused (nothing was changed).
 #
 # Safety: every refusal is fail-closed and happens before the first mutating call. `app` only creates a NEW database
-# beside the live one; `secrets` and `host-files` never overwrite a differing file; `full` refuses unless the Postgres
+# beside the live one; `volume` only copies into an existing EMPTY directory, never into a live volume; `full` also
+# recreates every backed-up app volume (labels kept) and copies its files back with ownership preserved, after the
+# databases; `secrets` and `host-files` never overwrite a differing file; `full` refuses unless the Postgres
 # cluster holds only postgres and templates and Redis holds no key and no ACL user except default, admin and health.
 # `full` also validates the whole restored snapshot (globals.sql, dump names, Redis files, every app secrets directory,
 # the Redis image and /data mount) before it places the first secret. No override and no flag relaxes those refusals.
@@ -1180,6 +1240,8 @@ readonly REDIS_ADMIN_SNIPPET='f="$1"; shift; pw="$(cat "$f"; printf x)"; pw="${p
 
 readonly APP_RE='^[a-z][a-z0-9-]{1,30}$'
 readonly DB_RE='^[a-z][a-z0-9_]{1,30}$'
+readonly VOL_RE='^[a-z][a-z0-9-]{0,30}$'
+readonly APP_VOLUME_RE='^app_([a-z][a-z0-9-]{1,30})_([a-z][a-z0-9-]{0,30})$'
 readonly SNAP_RE='^(latest|[0-9a-f]{8,64})$'
 readonly SECRETS_GID=64323
 readonly JOBS_GID=64324
@@ -1190,6 +1252,12 @@ readonly POLL_PAUSE=2
 
 CMD=""
 APP=""
+VOLNAME=""
+# The snapshot's staging/volumes.tsv, parsed by read_volume_manifest (parallel arrays).
+VM_NAMES=()
+VM_APPS=()
+VM_VOLS=()
+VM_PATHS=()
 INTO=""
 SNAP="latest"
 CONFIRM=0
@@ -1473,6 +1541,7 @@ usage() {
 usage: restore.sh list
        restore.sh app <app> --into <db> [--snapshot <id>|latest] [--keep]
        restore.sh secrets <app> [--snapshot <id>|latest] [--keep]
+       restore.sh volume <app> <name> --into <dir> [--snapshot <id>|latest] [--keep]
        restore.sh host-files [--snapshot <id>|latest] [--keep]
        restore.sh full --confirm-destroy [--snapshot <id>|latest] [--keep]
 EOF
@@ -1490,6 +1559,12 @@ parse_args() {
       APP="$1"
       shift
       ;;
+    volume)
+      [ "$#" -ge 2 ] || usage
+      APP="$1"
+      VOLNAME="$2"
+      shift 2
+      ;;
     host-files | full) ;;
     *) usage ;;
   esac
@@ -1505,7 +1580,7 @@ parse_args() {
         shift
         ;;
       --into)
-        [ "$CMD" = app ] && [ "$#" -ge 2 ] || usage
+        { [ "$CMD" = app ] || [ "$CMD" = volume ]; } && [ "$#" -ge 2 ] || usage
         INTO="$2"
         shift 2
         ;;
@@ -1518,7 +1593,7 @@ parse_args() {
     esac
   done
   [[ "$SNAP" =~ $SNAP_RE ]] || { echo "restore: --snapshot must be latest or a hex snapshot id" >&2; exit 2; }
-  if [ "$CMD" = app ] && [ -z "$INTO" ]; then usage; fi
+  if { [ "$CMD" = app ] || [ "$CMD" = volume ]; } && [ -z "$INTO" ]; then usage; fi
   if [ "$CMD" = full ] && [ "$CONFIRM" -ne 1 ]; then
     echo "restore: full replaces the data layer: it needs --confirm-destroy and an empty stack" >&2
     exit 2
@@ -1866,6 +1941,116 @@ cmd_host_files() {
   done
 }
 
+# ---- app volumes ----
+
+# read_volume_manifest <file>: parses the snapshot's volumes.tsv (name, app, mountpoint; written by backup.sh) into the VM_*
+# arrays. Returns 1 when the file is absent (a snapshot from before volumes were backed up). Any malformed line fails
+# closed (exit 2): a name that is not app_<app>_<volume>, an app field that differs from the name, a mountpoint that is not
+# an absolute path without whitespace or "..".
+read_volume_manifest() {
+  local f="$1" name app mp extra n=0
+  VM_NAMES=()
+  VM_APPS=()
+  VM_VOLS=()
+  VM_PATHS=()
+  if [ -L "$f" ] || [ ! -f "$f" ]; then return 1; fi
+  while IFS=$'\t' read -r name app mp extra || [ -n "$name" ]; do
+    n=$((n + 1))
+    if [[ ! "$name" =~ $APP_VOLUME_RE ]] || [ "$app" != "${BASH_REMATCH[1]}" ] || [ -n "$extra" ] \
+      || [[ "$mp" != /* ]] || [[ "$mp" == *[[:space:]]* ]] || [[ "$mp/" == *"/../"* ]]; then
+      fail volumes-manifest "line $n of volumes.tsv is malformed" 2
+    fi
+    VM_NAMES+=("$name")
+    VM_APPS+=("$app")
+    VM_VOLS+=("${BASH_REMATCH[2]}")
+    VM_PATHS+=("$mp")
+  done < "$f"
+  return 0
+}
+
+# volume_mountpoint <name> <outfile>: the live volume's mountpoint into <outfile>. Returns 0 (printed), 1 when the volume does
+# not exist (docker "No such volume"); any other failure fails the run.
+volume_mountpoint() {
+  local name="$1" out="$2" rc=0
+  STEP="volume-inspect:$name"
+  timed_io "volume-inspect:$name" 60 - "$out" docker volume inspect --format '{{.Mountpoint}}' "$name" || rc=$?
+  if [ "$rc" -eq 0 ]; then return 0; fi
+  if [ "$rc" -ne 124 ] && [ "$rc" -ne 137 ] && grep -qi 'no such volume' "$TIMED_LAST_FILE" 2> /dev/null; then return 1; fi
+  fail "volume-inspect:$name" "docker volume inspect failed (rc=$rc)"
+}
+
+cmd_volume() {
+  local name real cur mpf="$WORK/vol-mp" i found=-1 src
+  [[ "$APP" =~ $APP_RE ]] || refuse "invalid app name (want $APP_RE)"
+  [[ "$VOLNAME" =~ $VOL_RE ]] || refuse "invalid volume name (want $VOL_RE)"
+  name="app_${APP}_${VOLNAME}"
+  [[ "$INTO" == /* ]] || refuse "--into must be an absolute path"
+  [ -d "$INTO" ] && [ ! -L "$INTO" ] || refuse "--into must be an existing directory and not a symlink"
+  real="$(realpath -e -- "$INTO")" || refuse "cannot resolve --into"
+  [ -z "$(find "$INTO" -mindepth 1 -print -quit)" ] || refuse "--into is not empty; restore into a new empty directory"
+  case "$real/" in
+    */docker/volumes/*) refuse "--into is inside a Docker volume directory; restore into a scratch directory, then copy" ;;
+    *) ;;
+  esac
+  if volume_mountpoint "$name" "$mpf"; then
+    cur="$(realpath -m -- "$(tr -d '\r\n' < "$mpf")")"
+    if [ -n "$cur" ] && { [ "$real" = "$cur" ] || [[ "$real/" == "$cur"/* ]]; }; then
+      refuse "--into is inside the live volume $name; restore into a scratch directory, then copy"
+    fi
+  fi
+  resolve_snapshot
+  prepare_restore_dir
+  restic_restore restic-restore-volumes-manifest "$BACKUP_ROOT/staging/volumes.tsv"
+  read_volume_manifest "$RDIR$BACKUP_ROOT/staging/volumes.tsv" || refuse "the snapshot holds no app-volume manifest (it predates volume backups)"
+  for i in "${!VM_NAMES[@]}"; do
+    if [ "${VM_NAMES[$i]}" = "$name" ]; then found="$i"; fi
+  done
+  [ "$found" -ge 0 ] || refuse "the snapshot holds no volume '$name'"
+  restic_restore restic-restore-volume "${VM_PATHS[$found]}"
+  src="$RDIR${VM_PATHS[$found]}"
+  [ -d "$src" ] && [ ! -L "$src" ] || refuse "the snapshot holds no files for volume '$name'"
+  STEP="volume-copy"
+  step_io volume-copy 1800 - - cp -a -- "$src/." "$INTO/"
+  log "volume: restored $name from snapshot $SNAP_ID into $INTO"
+  echo "restored volume $name into $INTO"
+}
+
+# full_volumes_prepare: before the first mutation, parse the manifest, refuse when a volume already exists (full restores
+# only onto an empty stack) and restore every volume's files into the restore dir.
+full_volumes_prepare() {
+  local i f="$WORK/vol-mp" src
+  if ! read_volume_manifest "$RDIR$BACKUP_ROOT/staging/volumes.tsv"; then
+    log "volumes: the snapshot holds no app-volume manifest; no app volumes to restore"
+    return 0
+  fi
+  if [ "${#VM_NAMES[@]}" -eq 0 ]; then log "volumes: the snapshot holds no app volumes"; return 0; fi
+  for i in "${!VM_NAMES[@]}"; do
+    if volume_mountpoint "${VM_NAMES[$i]}" "$f"; then
+      refuse "the volume ${VM_NAMES[$i]} already exists; full restores only onto an empty stack"
+    fi
+  done
+  restic_restore restic-restore-volumes "${VM_PATHS[@]}"
+  for i in "${!VM_NAMES[@]}"; do
+    src="$RDIR${VM_PATHS[$i]}"
+    [ -d "$src" ] && [ ! -L "$src" ] || fail volumes "the snapshot holds no files for volume ${VM_NAMES[$i]}" 2
+  done
+}
+
+# full_volumes_place: recreate each volume with the labels deploy gives it and copy the files back (cp -a: ownership, modes
+# and timestamps preserved; the restore runs as root).
+full_volumes_place() {
+  local i name f="$WORK/vol-mp" mp
+  for i in "${!VM_NAMES[@]}"; do
+    name="${VM_NAMES[$i]}"
+    step_io "volume-create:$name" 60 - - docker volume create --label "platform.app=${VM_APPS[$i]}" --label "platform.volume=${VM_VOLS[$i]}" "$name"
+    volume_mountpoint "$name" "$f" || fail "volume-create:$name" "the volume is missing right after it was created"
+    mp="$(tr -d '\r\n' < "$f")"
+    if [[ "$mp" != /* ]] || [[ "$mp" == *[[:space:]]* ]]; then fail "volume-create:$name" "unexpected mountpoint" 2; fi
+    step_io "volume-copy:$name" 1800 - - cp -a -- "$RDIR${VM_PATHS[$i]}/." "$mp/"
+    log "volumes: restored $name into $mp"
+  done
+}
+
 # ---- full ----
 
 # full_check_empty: Postgres holds only postgres and templates; Redis holds no key and no ACL user besides
@@ -2038,7 +2223,7 @@ cmd_full() {
   done
   resolve_snapshot
   prepare_restore_dir
-  restic_restore restic-restore-full "$BACKUP_ROOT/staging/postgres" "$BACKUP_ROOT/staging/redis" "$SECRETS_ROOT" "$JOB_SECRETS_ROOT" "$JOBS_REDIS_FILE" "${files[@]}"
+  restic_restore restic-restore-full "$BACKUP_ROOT/staging/postgres" "$BACKUP_ROOT/staging/redis" "$SECRETS_ROOT" "$JOB_SECRETS_ROOT" "$JOBS_REDIS_FILE" "$BACKUP_ROOT/staging/volumes.tsv" "${files[@]}"
   for f in "${files[@]}"; do
     [ -f "$RDIR$f" ] || fail host-files "the snapshot holds no $f"
     st="$(admin_state "$RDIR$f" "$f")"
@@ -2077,6 +2262,7 @@ cmd_full() {
     log "WARN: the snapshot holds no runner password but $JOBS_REDIS_FILE exists; the restored users.acl has no runner user, so rerun host-jobs install"
   fi
   full_prevalidate
+  full_volumes_prepare
   # Secrets first (the dumps and globals reference the roles whose passwords live there), then Postgres, then Redis.
   for app in "${apps[@]}"; do place_secrets "$app"; done
   for app in "${japps[@]}"; do
@@ -2091,6 +2277,7 @@ cmd_full() {
   restore_databases
   pg_sql pg-revoke postgres - "REVOKE CONNECT ON DATABASE postgres, template1 FROM PUBLIC;"
   redis_load
+  full_volumes_place
   if [ -f "$INSTALL_DATA" ]; then
     step_io verify 600 - - "$INSTALL_DATA" verify
   else
@@ -2119,6 +2306,7 @@ main() {
     list) cmd_list ;;
     app) cmd_app ;;
     secrets) cmd_secrets ;;
+    volume) cmd_volume ;;
     host-files) cmd_host_files ;;
     full) cmd_full ;;
     *) usage ;;

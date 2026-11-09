@@ -73,6 +73,38 @@ restores the password files alone; run `platform new-db` to create the job secre
 staged before either is moved; if a move still fails midway, `secrets/<app>/` may exist without `job-secrets/<app>/`:
 move the placed `secrets/<app>/` aside and run the command again.
 
+### Restore one app volume (stored files)
+
+Every Docker volume an app declares in `app.yaml` (`app_<app>_<name>`, labelled `platform.app` / `platform.volume`) is in
+every nightly snapshot, by its host mountpoint, together with a small manifest (`staging/volumes.tsv`). Volumes the app no
+longer declares stay backed up until `rm-db`. `restore.sh volume` never writes into a live volume: it copies into a new,
+empty scratch directory.
+
+1. Stop the app, so nothing writes while you copy (`docker stop` the app's container, found with `docker ps`; a CI redeploy starts it again).
+2. Restore into a scratch directory (it must exist, be empty, not a symlink and not inside a Docker volume directory):
+
+   ```sh
+   sudo mkdir /root/volrestore-<name>
+   sudo /opt/platform/backup/restore.sh volume <app> <name> --into /root/volrestore-<name> [--snapshot <id>]
+   ```
+
+3. Inspect the files, then copy them into the live volume, keeping owners and modes (find its path with
+   `docker volume inspect --format '{{.Mountpoint}}' app_<app>_<name>`):
+
+   ```sh
+   sudo cp -a /root/volrestore-<name>/. <mountpoint>/
+   ```
+
+   This merges: files absent from the snapshot are not deleted. If the volume itself is gone, create it first with
+   `docker volume create --label platform.app=<app> --label platform.volume=<name> app_<app>_<name>` (or redeploy the
+   app). The scratch directory needs free space equal to the volume.
+
+4. Start the app (`docker start <app>`, or redeploy it), then delete the scratch directory.
+
+Consistency caveat: the files are copied live while the app may be running, so a snapshot can hold a half-written file.
+An app that needs a consistent snapshot of some data keeps that data in Postgres (backed up with a transactional dump),
+not in a volume.
+
 The runner Redis password (`/etc/platform/jobs-redis.password`, `root:64324 0640`) is in every nightly once the runner
 is installed, and `restore.sh full` puts it back. It only works as a pair with `users.acl` (restored from the Redis
 copy in the same snapshot): the ACL line carries the hash of that password, so restoring one without the other leaves
@@ -103,7 +135,9 @@ no key and no ACL user besides `default`, `admin` and `health`, and the admin pa
 snapshot. There is no override. It restores the secrets and job secrets (and the runner password file when the snapshot
 holds one; a live copy that differs refuses), loads the Postgres globals, restores every database, re-applies
 the `REVOKE CONNECT ... FROM PUBLIC` hardening on `postgres` and `template1`, loads Redis through a one-shot container
-(the stack runs `appendonly yes`, which would ignore a bare RDB), and runs `install-data.sh verify` when that script is
+(the stack runs `appendonly yes`, which would ignore a bare RDB), recreates every backed-up app volume with its labels and
+copies its files back with owners and modes kept (it refuses before changing anything when such a volume already exists;
+a snapshot from before volume backups simply has none), and runs `install-data.sh verify` when that script is
 present. No installer places `install-data.sh` on the host (it runs from the workstation), so on the Pi that step is
 skipped and logged: run `make host-data HOST=<alias> ARGS="verify"` yourself as step 7.
 
@@ -148,8 +182,8 @@ Remove `apps/<name>/` by PR first, so nothing redeploys it, then run
 `make host-app-rm HOST=<alias> ARGS="<app> --confirm <app> [--stop]"`. It deletes the app's containers, registry entry,
 Redis keys and user, database and role, secrets, deploy state and local images (see
 [`../data/README.md`](../data/README.md) "Removing an app"). The nightly snapshots keep the app's data until the restic
-retention prunes them, so a removal made in error is recoverable with `restore.sh app` and `restore.sh secrets` until
-then.
+retention prunes them, so a removal made in error is recoverable with `restore.sh app`, `restore.sh secrets` and
+`restore.sh volume` until then.
 
 ## 5. Wipe procedure (acceptance drill and any in-place recovery)
 
@@ -160,8 +194,9 @@ In this order:
    `last-run.tsv`.
 2. **Record the snapshot id** to restore (from `restore.sh list` or the preceding `run-now`) and pass
    `--snapshot <id>` to `host-files` and `full`; `full` prints the snapshot it chose.
-3. Compose down with `-v`, remove the disposable apps' secret and job-secrets dirs, **and remove the two admin password files**, so
-   the drill exercises the rebuilt-host order above.
+3. Compose down with `-v`, remove the disposable apps' secret and job-secrets dirs, **remove the two admin password files**,
+   **and remove every app volume** (`docker volume ls --filter label=platform.app`, then `docker volume rm` each), so
+   the drill exercises the rebuilt-host order above. `full` refuses while a volume it would recreate still exists.
 4. Follow section 4 from step 3 on. The final `install-backup install` re-enables the timer; `verify` FAILs if it was
    left off.
 5. Expect a `Persistent=` catch-up run when the timer is re-enabled after a missed 03:35 (the installer never invokes
@@ -185,5 +220,9 @@ In this order:
 - `full` validates the whole snapshot (globals, dump names, Redis files, every app secrets and job-secrets directory, the Redis image and
   `/data` mount) before it changes anything, so a refusal (exit 2) at that point needs no wipe: fix the cause (for
   example pick a complete `--snapshot`) and re-run.
+- `full` refusing with a volume that "already exists", or failing at `volume-create` / `volume-copy` (after the databases
+  and Redis were loaded): remove the named app volume(s) (`docker volume rm`), then re-run `full` after wiping the data
+  layer as above; or leave the loaded data alone and restore the files of the missing volume with `restore.sh volume`
+  (create it first: `docker volume create --label platform.app=<app> --label platform.volume=<name> app_<app>_<name>`).
 - `--keep` leaves the restore directory (`/var/lib/platform/backup/restore/<stamp>`, root only; it holds restored dumps
   and secrets) in place for inspection; delete it when done.

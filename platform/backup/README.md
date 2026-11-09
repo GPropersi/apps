@@ -8,13 +8,16 @@ What is here:
 
 - **`backup.sh`**: the run framework (logging, Discord notify, last-run state file, backup window, total deadline) and
   the phases, in order: `env`, `lock`, `preflight`, `pg-list`, `pg-globals`, `pg-db:<db>` (one dump per database),
-  `redis` (BGSAVE and copy), `restic-backup`, `restic-forget`, `restic-check`, `volumes` (warn-only inventory of
-  Docker volumes nothing backs up).
+  `redis` (BGSAVE and copy), `app-volumes` (every volume labelled `platform.app` named `app_<app>_<name>` with a matching
+  label: its host mountpoint joins the restic paths, even when `app.yaml` no longer declares it; a listing failure or an
+  inspect failure fails the run, a volume removed in between is skipped and logged), `restic-backup`, `restic-forget`,
+  `restic-check`, `volumes` (warn-only inventory of Docker volumes nothing backs up).
 - **Snapshots**: one restic snapshot per run, host `platform`, tags `platform` and the run mode (`nightly` or
-  `manual`), holding the Postgres dumps and globals, the Redis files, the secrets and job-secrets roots, the runner password file (when present) and the two admin password
-  files. Retention: `forget --prune` keeps 7 daily, 4 weekly and 6 monthly snapshots; it is skipped (and the run
+  `manual`), holding the Postgres dumps and globals, the Redis files, the secrets and job-secrets roots, the runner password file (when present), the two admin password
+  files, and the files of every app volume (copied live, so an app that needs a consistent snapshot keeps that data in
+  Postgres) with a `staging/volumes.tsv` manifest. Retention: `forget --prune` keeps 7 daily, 4 weekly and 6 monthly snapshots; it is skipped (and the run
   fails, naming the reason) unless the repository lists the snapshot just created and at least one more than before.
-- **`restore.sh`**: run as root, modes `list`, `app APP --into DB`, `secrets APP`, `host-files` and
+- **`restore.sh`**: run as root, modes `list`, `app APP --into DB`, `secrets APP`, `volume APP NAME --into DIR`, `host-files` and
   `full --confirm-destroy`; steps and refusals are in [`RUNBOOK.md`](RUNBOOK.md).
 - **Units**: `platform-backup.service` (oneshot) and `platform-backup.timer`, firing at 03:35 inside the window. `window.env` holds the window.
 - **Installer**: `../host/install-backup.sh` (`make host-backup`), which embeds all of the above.

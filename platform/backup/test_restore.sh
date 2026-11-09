@@ -128,6 +128,27 @@ case "$1" in
     ;;
   stop) inject stop; exit 0 ;;
   rm) inject rm; exit 0 ;;
+  volume)
+    # inspect: the mountpoint from $CASE_DIR/volume_<name> (rc 1 "no such volume" when absent; fail_volume_inspect forces another
+    # error). create: records the labels and makes <case>/vols/<name>/_data the mountpoint.
+    case "$2" in
+      inspect)
+        inject volume_inspect
+        vn="${*: -1}"
+        if [ -f "$CASE_DIR/volume_$vn" ]; then cat "$CASE_DIR/volume_$vn"; exit 0; fi
+        echo "Error response from daemon: get $vn: no such volume" >&2
+        exit 1
+        ;;
+      create)
+        inject volume_create
+        vn="${*: -1}"
+        mkdir -p "$CASE_DIR/vols/$vn/_data"
+        printf '%s' "$CASE_DIR/vols/$vn/_data" > "$CASE_DIR/volume_$vn"
+        exit 0
+        ;;
+    esac
+    exit 0
+    ;;
   exec) ;;
   *) exit 0 ;;
 esac
@@ -1159,6 +1180,178 @@ for frag in "${TIMED_FRAGS[@]}"; do
   case "$(timed_body "$SCRIPT" timed)" in *"$frag"*) _pass ;; *) _fail "restore.sh timed() keeps the shared fragment $frag" ;; esac
   case "$(timed_body "$BACKUP_SCRIPT" _timed_run)" in *"$frag"*) _pass ;; *) _fail "backup.sh _timed_run() keeps the shared fragment $frag" ;; esac
 done
+
+# ---- 12. app volumes: `volume` mode and the volume part of `full` ----
+
+# add_vol <app> <vol>: a volume's files in the snapshot fixture plus its line in staging/volumes.tsv (name, app, mountpoint).
+add_vol() {
+  local n="app_$1_$2" mp="$C/hostvols/app_$1_$2/_data"
+  mkdir -p "$S$mp/sub"
+  printf 'hello-%s' "$n" > "$S$mp/hello.txt"
+  printf 'deep' > "$S$mp/sub/x"
+  printf '%s\t%s\t%s\n' "$n" "$1" "$mp" >> "$S$R/staging/volumes.tsv"
+}
+
+new_case
+add_vol my-app files
+add_vol my-app cache
+mkdir "$C/out"
+rs volume my-app files --into "$C/out"
+expect_rc "volume restores one volume into an empty directory" 0
+expect_eq "volume: the file is restored byte-for-byte" "$(cat "$C/out/hello.txt" 2> /dev/null)" "hello-app_my-app_files"
+expect_eq "volume: a nested file is restored" "$(cat "$C/out/sub/x" 2> /dev/null)" "deep"
+expect_eq "volume: the other volume is not copied" "$([ -e "$C/out/cache" ] && echo yes || echo no)" "no"
+expect_calls_has "volume: the manifest is restored first" "--include $R/staging/volumes.tsv"
+expect_calls_has "volume: the volume's mountpoint is restored" "--include $C/hostvols/app_my-app_files/_data"
+expect_calls_lacks "volume: the other volume's files are not restored" "app_my-app_cache/_data"
+expect_calls_has "volume: the default snapshot selector is host-filtered latest" "restic restore $SID --target"
+expect_calls_lacks "volume: no volume is created" "docker volume create"
+expect_no_mut "volume: no mutating call"
+expect_no_exclude "volume: no restic restore carries --exclude"
+if [ -e "$R/restore" ] && [ -n "$(ls -A "$R/restore")" ]; then _fail "volume: the restore dir is removed on exit"; else _pass; fi
+
+new_case
+add_vol my-app files
+mkdir "$C/out"
+rs volume my-app files --into "$C/out" --snapshot "$SID2"
+expect_rc "volume with an explicit snapshot succeeds" 0
+expect_calls_has "volume: the explicit snapshot id is used" "restic restore $SID2 --target"
+
+new_case
+add_vol my-app files
+mkdir "$C/out"
+printf 'precious' > "$C/out/existing.txt"
+rs volume my-app files --into "$C/out"
+expect_rc "volume refuses a non-empty --into" 2
+expect_eq "volume: the existing file is untouched" "$(cat "$C/out/existing.txt")" "precious"
+expect_calls_lacks "volume: a refused --into restores nothing" "restic restore"
+new_case
+add_vol my-app files
+rs volume my-app files --into "$C/does-not-exist"
+expect_rc "volume refuses a missing --into" 2
+expect_calls_lacks "volume: a missing --into restores nothing" "restic restore"
+new_case
+add_vol my-app files
+mkdir "$C/out"
+rs volume my-app files --into "out"
+expect_rc "volume refuses a relative --into" 2
+new_case
+add_vol my-app files
+mkdir "$C/out"
+ln -s "$C/out" "$C/link"
+rs volume my-app files --into "$C/link"
+expect_rc "volume refuses a symlink --into" 2
+expect_calls_lacks "volume: a symlink --into restores nothing" "restic restore"
+new_case
+add_vol my-app files
+mkdir -p "$C/docker/volumes/other/_data"
+rs volume my-app files --into "$C/docker/volumes/other/_data"
+expect_rc "volume refuses an --into inside a Docker volume directory" 2
+expect_calls_lacks "volume: a Docker-volume --into restores nothing" "restic restore"
+new_case
+add_vol my-app files
+mkdir -p "$C/live/_data/inner"
+printf '%s\n' "$C/live/_data" > "$C/volume_app_my-app_files"
+rs volume my-app files --into "$C/live/_data/inner"
+expect_rc "volume refuses an --into inside the live volume" 2
+expect_calls_has "volume: the live volume was looked up (positive control)" "docker volume inspect"
+expect_calls_lacks "volume: a live-volume --into restores nothing" "restic restore"
+new_case
+add_vol my-app files
+mkdir "$C/out"
+printf '%s\n' "$C/live/_data" > "$C/volume_app_my-app_files"
+rs volume my-app files --into "$C/out"
+expect_rc "volume restores while the live volume exists elsewhere (positive control)" 0
+expect_eq "volume: the live volume path was not written" "$([ -e "$C/live" ] && echo yes || echo no)" "no"
+
+new_case
+add_vol my-app files
+mkdir "$C/out"
+rs volume my-app nope --into "$C/out"
+expect_rc "volume refuses a volume the snapshot does not hold" 2
+expect_calls_has "volume: unknown volume did reach restic (positive control)" "restic restore"
+expect_eq "volume: nothing copied for an unknown volume" "$(find "$C/out" -mindepth 1 | wc -l)" "0"
+new_case
+mkdir "$C/out"
+rs volume my-app files --into "$C/out"
+expect_rc "volume refuses a snapshot with no volume manifest" 2
+expect_out_has "volume: the missing manifest is explained" "predates volume backups"
+new_case
+add_vol my-app files
+printf 'app_my-app_files\tother-app\t/x/_data\n' >> "$S$R/staging/volumes.tsv"
+mkdir "$C/out"
+rs volume my-app files --into "$C/out"
+expect_rc "volume refuses a manifest line whose app differs from the name" 2
+expect_eq "volume: nothing copied from a bad manifest" "$(find "$C/out" -mindepth 1 | wc -l)" "0"
+new_case
+add_vol my-app files
+printf 'app_my-app_evil\tmy-app\t/x/../../etc\n' >> "$S$R/staging/volumes.tsv"
+mkdir "$C/out"
+rs volume my-app files --into "$C/out"
+expect_rc "volume refuses a manifest mountpoint with .." 2
+new_case
+mkdir "$C/out"
+rs volume 'Bad_App' files --into "$C/out"
+expect_rc "volume refuses a bad app name" 2
+rs volume my-app 'Bad_Vol' --into "$C/out"
+expect_rc "volume refuses a bad volume name" 2
+rs volume my-app files
+expect_rc "volume without --into is a usage error" 2
+rs volume my-app --into "$C/out"
+expect_rc "volume without a name is a usage error" 2
+expect_calls_lacks "volume usage and name refusals make no restic call" "restic"
+
+new_case
+add_vol my-app files
+add_vol app-one data
+rs full --confirm-destroy
+expect_rc "full restores the app volumes" 0
+expect_calls_has "full: the manifest is restored with the other paths" "--include $R/staging/volumes.tsv"
+expect_calls_has "full: the volume files are restored by their recorded mountpoint" "--include $C/hostvols/app_my-app_files/_data"
+expect_calls_has "full: a volume is recreated with both labels" "docker volume create --label platform.app=my-app --label platform.volume=files app_my-app_files"
+expect_calls_has "full: every manifest volume is recreated" "docker volume create --label platform.app=app-one --label platform.volume=data app_app-one_data"
+expect_eq "full: the files are copied into the new volume" "$(cat "$C/vols/app_my-app_files/_data/hello.txt" 2> /dev/null)" "hello-app_my-app_files"
+expect_eq "full: nested files are copied too" "$(cat "$C/vols/app_app-one_data/_data/sub/x" 2> /dev/null)" "deep"
+expect_order "full: volumes come after the databases" "$(line_of 'pg_restore')" "$(line_of 'docker volume create')"
+expect_order "full: volumes come after Redis is back" "$(last_line_of 'compose -f')" "$(line_of 'docker volume create')"
+expect_order "full: the install-data verify is last" "$(last_line_of 'docker volume create')" "$(line_of 'INSTALL-DATA verify')"
+
+new_case
+add_vol my-app files
+printf 'x\n' > "$C/volume_app_my-app_files"
+rs full --confirm-destroy
+expect_rc "full refuses when an app volume already exists" 2
+expect_out_has "full: the existing volume is named" "app_my-app_files already exists"
+expect_no_mut "full: an existing volume changes nothing"
+expect_calls_lacks "full: an existing volume creates nothing" "docker volume create"
+new_case
+add_vol my-app files
+printf '1' > "$C/fail_volume_inspect"
+rs full --confirm-destroy
+expect_rc "full fails when docker volume inspect fails for another reason" 1
+expect_no_mut "full: a failed volume inspect changes nothing"
+new_case
+add_vol my-app files
+rm -rf "${S:?}$C/hostvols"
+rs full --confirm-destroy
+expect_rc "full refuses when the snapshot lacks a volume's files" 2
+expect_no_mut "full: missing volume files change nothing"
+new_case
+rs full --confirm-destroy
+expect_rc "full without a volume manifest still succeeds (older snapshot)" 0
+expect_calls_lacks "full: no manifest creates no volume" "docker volume create"
+new_case
+add_vol my-app files
+printf 'app_my-app_files\tother-app\t/x/_data\n' >> "$S$R/staging/volumes.tsv"
+rs full --confirm-destroy
+expect_rc "full refuses a malformed volume manifest" 2
+expect_no_mut "full: a malformed manifest changes nothing"
+new_case
+add_vol my-app files
+printf '1' > "$C/fail_volume_create"
+rs full --confirm-destroy
+expect_rc "full fails when the volume cannot be created" 1
+expect_out_has "full: the failing volume step is named" "volume-create:app_my-app_files"
 
 # ---- 11. usage ----
 

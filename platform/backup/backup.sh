@@ -2,7 +2,7 @@
 # platform-backup runner (root, host systemd oneshot or run by hand). Usage: backup.sh nightly|manual
 #
 # Framework (env, lock, logging, notify, state file, window, deadline) plus the data phases: preflight, pg-list,
-# pg-globals, pg-db:<db>, redis, restic-backup, restic-forget, restic-check, volumes (see PHASES).
+# pg-globals, pg-db:<db>, redis, app-volumes, restic-backup, restic-forget, restic-check, volumes (see PHASES).
 #
 # Exit codes: 0 ok, 1 failed, 2 usage or env/override problem.
 #
@@ -51,8 +51,8 @@ DISCORD_WEBHOOK=""
 # phase may refine CUR_PHASE (pg-db:<db>) and set PHASE_MSG for the failure text. run_phases calls each phase in a ||
 # context, so errexit is OFF inside a phase body: a phase must check the rc of every timed call and return non-zero
 # itself on failure.
-PHASES=(phase_preflight phase_pg_list phase_pg_globals phase_pg_db phase_redis phase_restic_backup phase_restic_forget
-  phase_restic_check phase_volumes)
+PHASES=(phase_preflight phase_pg_list phase_pg_globals phase_pg_db phase_redis phase_app_volumes phase_restic_backup
+  phase_restic_forget phase_restic_check phase_volumes)
 
 NOTIFY_PHASE_SECS=30
 UNLOCK_SECS=120
@@ -64,6 +64,11 @@ REDIS_POLL_SECS=60
 REDIS_CTR_ADMIN_FILE=/etc/platform/redis-admin.password
 # Docker volumes that are backed up logically (dumps), so the volume inventory does not warn about them.
 LOGICAL_VOLUMES=(platform-data-postgres platform-data-redis)
+# App volumes (declared in app.yaml, created by deploy as app_<app>_<name> with platform.app / platform.volume labels) are
+# backed up as files: phase_app_volumes fills these, phase_restic_backup adds the paths, phase_volumes skips the names.
+readonly APP_VOLUME_RE='^app_([a-z][a-z0-9-]{1,30})_([a-z][a-z0-9-]{0,30})$'
+APP_VOLUME_NAMES=()
+APP_VOLUME_PATHS=()
 # Caller-environment variables that could redirect or re-credential restic or the S3 SDK: removed in phase_env.
 SCRUB_ENV=(RESTIC_PASSWORD_FILE RESTIC_PASSWORD_COMMAND RESTIC_REPOSITORY_FILE RESTIC_FROM_REPOSITORY
   RESTIC_FROM_PASSWORD_FILE RESTIC_FROM_PASSWORD_COMMAND RESTIC_FROM_REPOSITORY_FILE RESTIC_KEY_HINT RESTIC_CACHE_DIR
@@ -753,6 +758,53 @@ phase_redis() {
   return "$rc"
 }
 
+# phase_app_volumes: every Docker volume labelled platform.app whose name is app_<app>_<volume> with <app> equal to the label
+# (declared or not any more, so data stays backed up until rm-db) goes into the restic paths by its mountpoint. A listing
+# failure fails the run (this is data now, not an inventory). A volume that vanished between the listing and its inspect
+# ("No such volume", rm-db --stop) is skipped and logged; any other inspect failure fails the run. staging/volumes.tsv
+# (name, app, mountpoint) goes into the snapshot so restore.sh finds the files even after the volume is gone.
+phase_app_volumes() {
+  local f="$WORK/app-volumes" mpf="$WORK/app-volume-mountpoint" rc=0 line name label mp shown manifest="$STAGING/volumes.tsv"
+  APP_VOLUME_NAMES=()
+  APP_VOLUME_PATHS=()
+  timed_io app-volumes-ls 60 - "$f" docker volume ls --filter label=platform.app --format '{{.Name}} {{.Label "platform.app"}}' || rc=$?
+  if [ "$rc" -ne 0 ]; then PHASE_MSG="cannot list the app volumes"; return "$rc"; fi
+  if ! : > "$manifest"; then PHASE_MSG="cannot write $manifest"; return 1; fi
+  while IFS= read -r line || [ -n "$line" ]; do
+    line="${line%$'\r'}"
+    if [ -z "$line" ]; then continue; fi
+    name="${line%% *}"
+    label=""
+    case "$line" in *' '*) label="${line#* }" ;; *) ;; esac
+    if [[ ! "$name" =~ $APP_VOLUME_RE ]] || [ "$label" != "${BASH_REMATCH[1]}" ]; then
+      shown="$(printf '%q' "${line:0:80}")"
+      log "app-volumes: skipping $shown (not app_<app>_<volume> with a matching platform.app label)"
+      continue
+    fi
+    rc=0
+    timed_io "app-volume-inspect:$name" 60 - "$mpf" docker volume inspect --format '{{.Mountpoint}}' "$name" || rc=$?
+    if [ "$rc" -ne 0 ]; then
+      if [ "$rc" -ne 124 ] && [ "$rc" -ne 137 ] && grep -qi 'no such volume' "$TIMED_LAST_FILE" 2> /dev/null; then
+        log "app-volumes: $name was removed before it could be inspected; skipped"
+        continue
+      fi
+      PHASE_MSG="cannot inspect app volume $name"
+      return "$rc"
+    fi
+    mp="$(tr -d '\r\n' < "$mpf")"
+    if [[ "$mp" != /* ]] || [[ "$mp" == *[[:space:]]* ]] || [[ "$mp/" == *"/../"* ]]; then
+      PHASE_MSG="app volume $name has an unusable mountpoint"
+      return 1
+    fi
+    APP_VOLUME_NAMES+=("$name")
+    APP_VOLUME_PATHS+=("$mp")
+    printf '%s\t%s\t%s\n' "$name" "$label" "$mp" >> "$manifest" || { PHASE_MSG="cannot write $manifest"; return 1; }
+    log "app-volumes: $name mountpoint=$mp"
+  done < "$f"
+  log "state app_volumes=${#APP_VOLUME_NAMES[@]}"
+  return 0
+}
+
 phase_restic_backup() {
   local rc=0 line sid="" sum_re='"message_type":"summary"' id_re='"snapshot_id":"([0-9a-f]{8,64})"' pre="$WORK/snapshots-before"
   local -a extra=()
@@ -765,8 +817,12 @@ phase_restic_backup() {
   else
     log "WARN: cannot count the snapshots before the backup; the forget guard checks only that the new snapshot is listed"
   fi
+  # Lock and temp files are excluded only under the platform roots (anchored patterns): a slash-less pattern would match any
+  # basename anywhere and silently drop an app volume's own `.x.lock` or `.tmp.y` files from the snapshot.
   restic_timed restic-backup 3600 backup --json --host platform --tag platform --tag "$RUN_MODE" \
-    --exclude '.*.lock' --exclude '.tmp.*' "$STAGING" "$SECRETS_ROOT" "$JOB_SECRETS_ROOT" ${extra[@]+"${extra[@]}"} "$PG_ADMIN_FILE" "$REDIS_ADMIN_FILE" || rc=$?
+    --exclude "$STAGING/**/.*.lock" --exclude "$STAGING/**/.tmp.*" \
+    --exclude "$SECRETS_ROOT/**/.*.lock" --exclude "$SECRETS_ROOT/**/.tmp.*" \
+    --exclude "$JOB_SECRETS_ROOT/**/.*.lock" --exclude "$JOB_SECRETS_ROOT/**/.tmp.*" "$STAGING" "$SECRETS_ROOT" "$JOB_SECRETS_ROOT" ${extra[@]+"${extra[@]}"} "$PG_ADMIN_FILE" "$REDIS_ADMIN_FILE" ${APP_VOLUME_PATHS[@]+"${APP_VOLUME_PATHS[@]}"} || rc=$?
   if [ "$rc" -ne 0 ] && [ "$rc" -ne 3 ]; then return "$rc"; fi
   while IFS= read -r line || [ -n "$line" ]; do
     if [[ "$line" =~ $sum_re ]] && [[ "$line" =~ $id_re ]]; then sid="${BASH_REMATCH[1]}"; fi
@@ -827,7 +883,8 @@ phase_restic_check() {
   restic_timed restic-check 600 check
 }
 
-# phase_volumes: warn-only inventory of Docker volumes that no phase backs up.
+# phase_volumes: warn-only inventory of Docker volumes that no phase backs up (app volumes backed up by phase_app_volumes
+# and the logical data volumes are not reported).
 phase_volumes() {
   local f="$WORK/volumes" rc=0 v skip names="" k
   timed_io volumes 60 - "$f" docker volume ls --format '{{.Name}}' || rc=$?
@@ -838,7 +895,7 @@ phase_volumes() {
   while IFS= read -r v || [ -n "$v" ]; do
     if [ -z "$v" ] || [[ "$v" =~ ^[0-9a-f]{64}$ ]]; then continue; fi
     skip=0
-    for k in "${LOGICAL_VOLUMES[@]}"; do if [ "$v" = "$k" ]; then skip=1; fi; done
+    for k in "${LOGICAL_VOLUMES[@]}" ${APP_VOLUME_NAMES[@]+"${APP_VOLUME_NAMES[@]}"}; do if [ "$v" = "$k" ]; then skip=1; fi; done
     if [ "$skip" -eq 0 ]; then names="${names:+$names }$v"; fi
   done < "$f"
   if [ -n "$names" ]; then

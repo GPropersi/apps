@@ -14,6 +14,11 @@
 # deploy:64323, a root-only restore (EUID 0 without PLATFORM_RESTORE_ALLOW_NONROOT), the R2 S3 path, timer persistence.
 # Here the chown is a recording stub and a stat stub reports the recorded owner for the paths the stub chowned.
 #
+# App volumes: a real labelled Docker volume is backed up, restored with `volume` mode and recreated by `full`. Because
+# an unprivileged user cannot touch /var/lib/docker/volumes, the docker stub reports a mountpoint under the test's own
+# directory (labels and existence still come from the daemon). Root-owned volume files (a different owner than the test
+# user) are a Pi acceptance item; here the group is moved to a second group of the test user when it has one.
+#
 # Isolation: every container, network, volume and compose project carries the unique prefix br2test-<pid>-<random>. The
 # compose file under test is generated from the data stack's compose.yaml, changing only mount sources, names and project
 # (asserted by reversing the substitutions). Nothing real is touched: not the platform network, not the platform-data-*
@@ -90,6 +95,10 @@ cleanup() {
   # shellcheck disable=SC2086
   [ -z "$ids" ] || docker rm -fv $ids > /dev/null 2>&1
   docker volume rm -f "$rid-postgres" "$rid-redis" > /dev/null 2>&1
+  # the app volumes of this run (app_<rid>-a_files): by the unique prefix only
+  ids="$(docker volume ls -q --filter "name=^app_${rid}-" 2> /dev/null)"
+  # shellcheck disable=SC2086
+  [ -z "$ids" ] || docker volume rm -f $ids > /dev/null 2>&1
   docker network rm "$net" > /dev/null 2>&1
   t_cleanup
 }
@@ -221,13 +230,29 @@ chmod +x "$STUB_BIN/stat"
 t_stub curl 0
 
 # docker stub: logs argv (one line per call) and forwards to the real docker, so the run can prove which image, volume and
-# container names every call used.
+# container names every call used. Two app-volume adjustments, because an unprivileged test user cannot read or write
+# /var/lib/docker/volumes: `volume ls --filter label=...` is narrowed to this run's volumes (app_<rid>*, so a real app
+# volume on the host is never listed), and `volume inspect --format {{.Mountpoint}} app_<rid>*` reports a directory under
+# $vroot (created on demand) instead of the daemon's. Labels and existence still come from the real daemon.
 docker_log="$T_TMP/docker-calls.log"
+vroot="$T_TMP/vroot"
+mkdir -p "$vroot"
 : > "$docker_log"
 {
   printf '#!/usr/bin/env bash\n'
   printf 'printf "%%s\\n" "$*" >> %q\n' "$docker_log"
-  printf 'exec %q "$@"\n' "$real_docker"
+  printf 'real=%q\nvroot=%q\nrid=%q\n' "$real_docker" "$vroot" "$rid"
+  # shellcheck disable=SC2016 # the stub body is a literal
+  printf '%s\n' \
+    'if [ "${1:-}" = volume ] && [ "${2:-}" = ls ] && [[ " $* " == *" --filter label="* ]]; then' \
+    '  exec "$real" volume ls --filter "name=^app_$rid" "${@:3}"' \
+    'fi' \
+    'if [ "${1:-}" = volume ] && [ "${2:-}" = inspect ] && [ "${3:-}" = --format ] && [ "${4:-}" = "{{.Mountpoint}}" ] && [[ "${5:-}" == app_$rid* ]]; then' \
+    '  "$real" volume inspect --format "{{.Name}}" "$5" > /dev/null || exec "$real" volume inspect --format "{{.Mountpoint}}" "$5"' \
+    '  mkdir -p "$vroot/$5/_data" && echo "$vroot/$5/_data"' \
+    '  exit $?' \
+    'fi' \
+    'exec "$real" "$@"'
 } > "$STUB_BIN/docker"
 chmod +x "$STUB_BIN/docker"
 
@@ -345,6 +370,36 @@ expect_eq "A seeds a Redis string" "$(redis_as "$app_a" "$rpa" set "$app_a:k1" v
 expect_eq "A seeds a Redis list" "$(redis_as "$app_a" "$rpa" rpush "$app_a:q" j1 j2 j3)" 3
 expect_eq "B seeds a Redis string" "$(redis_as "$app_b" "$rpb" set "$app_b:k1" valueB)" OK
 
+# App volume: created exactly as deploy does (both labels), with files of several modes, a nested file and, when the test
+# user has a second group, a group that differs from the primary one (restic and cp -a must keep it). A volume whose
+# platform.app label differs from the middle of its name must NOT be backed up (negative control).
+vol_a="app_${app_a}_files"
+vol_x="app_${app_a}_stray"
+expect_eq "docker volume create (labels as deploy sets them)" "$(docker volume create --label "platform.app=$app_a" --label "platform.volume=files" "$vol_a")" "$vol_a"
+expect_eq "docker volume create (mismatching platform.app label)" "$(docker volume create --label "platform.app=$app_b" --label "platform.volume=stray" "$vol_x")" "$vol_x"
+mp_a="$(docker volume inspect --format '{{.Mountpoint}}' "$vol_a")"
+mp_x="$(docker volume inspect --format '{{.Mountpoint}}' "$vol_x")"
+expect_re "the stubbed mountpoint is under the test volume root" "$mp_a" "^$vroot/$vol_a/_data\$"
+mkdir -p "$mp_a/sub/deeper" "$mp_x"
+vol_marker="vol-marker-$RANDOM-$RANDOM"
+printf '%s' "$vol_marker" > "$mp_a/marker.txt"
+printf 'nested-%s' "$vol_marker" > "$mp_a/sub/deeper/n.txt"
+printf '#!/bin/sh\n' > "$mp_a/run.sh"
+chmod 0750 "$mp_a/run.sh"
+chmod 0640 "$mp_a/marker.txt"
+printf 'stray' > "$mp_x/stray.txt"
+# Files named like the platform's own lock/temp files: dropped under the secrets roots, KEPT inside an app volume.
+printf 'vl' > "$mp_a/.keep.lock"
+printf 'vt' > "$mp_a/sub/.tmp.keep"
+printf 'sl' > "$secrets/$app_a/.x.lock"
+printf 'st' > "$secrets/.tmp.top"
+printf 'jl' > "$jobsec/$app_a/.y.lock"
+alt_gid=""
+for g in $(id -G); do if [ "$g" != "$test_gid" ]; then alt_gid="$g"; break; fi; done
+if [ -n "$alt_gid" ]; then chgrp "$alt_gid" "$mp_a/marker.txt" "$mp_a/sub"; else echo "NOTE: test user has one group; group and uid preservation is checked only as a mode/owner round trip (Pi acceptance item, Steps 5-6)"; fi
+vol_owner_before="$(stat -c '%u:%g %a' "$mp_a/marker.txt")|$(stat -c '%u:%g %a' "$mp_a/sub")|$(stat -c '%a' "$mp_a/run.sh")"
+vol_sum_before="$(cd "$mp_a" && find . -type f -exec sha256sum {} + | sort -k2)"
+
 # ---- 2. the same invocations without the overrides are refused (exit 2) ----
 
 rc=0
@@ -379,7 +434,18 @@ for p in "$broot/staging/postgres/globals.sql" "$broot/staging/postgres/$role_a.
   "$jobsec/$app_a/jobs-secret" "$jobsec/$app_b/jobs-secret" "$T_TMP/jobs-redis.password"; do
   expect_re "snapshot holds ${p#"$T_TMP"/}" "$ls_out" "^${p//./\\.}\$"
 done
-expect_lacks "snapshot holds no lock file" "$ls_out" ".lock"
+expect_lacks "snapshot holds no platform lock file (secrets roots)" "$ls_out" "$secrets/$app_a/.x.lock"
+expect_lacks "snapshot holds no platform temp file at the secrets root" "$ls_out" "$secrets/.tmp.top"
+expect_lacks "snapshot holds no job-secrets lock file" "$ls_out" "$jobsec/$app_a/.y.lock"
+expect_re "snapshot KEEPS an app volume file named like a lock file" "$ls_out" "^${mp_a//./\\.}/\\.keep\\.lock\$"
+expect_re "snapshot KEEPS an app volume file named like a temp file" "$ls_out" "^${mp_a//./\\.}/sub/\\.tmp\\.keep\$"
+expect_has "backup log: the app-volume listing ran and ended rc=0" "$(< "$T_TMP/backup1.txt")" "phase=app-volumes-ls end rc=0"
+expect_has "backup log: the matching app volume was inspected and counted" "$(< "$T_TMP/backup1.txt")" "state app_volumes=1"
+for p in "$mp_a/marker.txt" "$mp_a/sub/deeper/n.txt" "$mp_a/run.sh" "$broot/staging/volumes.tsv"; do
+  expect_re "snapshot holds ${p#"$T_TMP"/}" "$ls_out" "^${p//./\\.}\$"
+done
+expect_lacks "snapshot holds nothing of the volume whose platform.app label mismatches its name" "$ls_out" "$vol_x"
+expect_eq "the manifest names the volume, its app and its mountpoint" "$(rcmd dump latest --host platform "$broot/staging/volumes.tsv")" "$(printf '%s\t%s\t%s' "$vol_a" "$app_a" "$mp_a")"
 expect_eq "staging was wiped after the successful backup" "$([ -e "$broot/staging" ] && echo present || echo gone)" gone
 cap_snap="$(grep -o '"short_id":"[0-9a-f]*"' <<< "$snaps" | head -n 1 | cut -d'"' -f4)"
 
@@ -406,12 +472,38 @@ run_restore "$T_TMP/restore-app2.txt" app "$app_a" --into "${role_a}_r"
 rc=$?
 expect_eq "a second restore into the same name is refused (exit 2)" "$rc" 2
 
+# ---- 4b. single-volume restore into an empty scratch directory; the live volume is untouched ----
+
+volout="$T_TMP/volout"
+mkdir "$volout"
+run_restore "$T_TMP/restore-vol.txt" volume "$app_a" files --into "$volout"
+rc=$?
+expect_eq "restore.sh volume exits 0" "$rc" 0
+[ "$rc" -eq 0 ] || tail -n 40 "$T_TMP/restore-vol.txt"
+expect_eq "the restored files are byte-for-byte the originals" "$(cd "$volout" && find . -type f -exec sha256sum {} + | sort -k2)" "$vol_sum_before"
+expect_eq "the restored marker file is the one written before the backup" "$(< "$volout/marker.txt")" "$vol_marker"
+expect_eq "restored owner, group and mode match the originals" "$(stat -c '%u:%g %a' "$volout/marker.txt")|$(stat -c '%u:%g %a' "$volout/sub")|$(stat -c '%a' "$volout/run.sh")" "$vol_owner_before"
+expect_eq "the live volume still holds its marker (volume mode never writes into it)" "$(< "$mp_a/marker.txt")" "$vol_marker"
+run_restore "$T_TMP/restore-vol2.txt" volume "$app_a" files --into "$volout"
+rc=$?
+expect_eq "volume restore into the now non-empty directory is refused (exit 2)" "$rc" 2
+mkdir "$T_TMP/volout2"
+run_restore "$T_TMP/restore-vol3.txt" volume "$app_a" stray --into "$T_TMP/volout2"
+rc=$?
+expect_eq "the mismatching-label volume was never backed up: volume mode refuses it (exit 2)" "$rc" 2
+expect_eq "the refused volume restore leaves its directory empty" "$(find "$T_TMP/volout2" -mindepth 1 | wc -l)" 0
+rm -rf "$volout" "$T_TMP/volout2"
+
 # ---- 5. tear down with -v, drop the secrets, fresh stack ----
 
 dc down -v > "$T_TMP/down.txt" 2>&1 || { echo "FAIL: compose down -v"; cat "$T_TMP/down.txt"; }
 expect_eq "down -v removed both containers" "$(docker ps -aq --filter "name=^${rid}-" | wc -l)" 0
 expect_eq "down -v removed both volumes" "$(docker volume ls -q --filter "name=^${rid}-" | wc -l)" 0
 find "$secrets" "$jobsec" -mindepth 1 -delete
+# The app volume is lost too: removed from the daemon and its files gone (the full restore must recreate both).
+docker volume rm "$vol_a" "$vol_x" > /dev/null || echo "FAIL: docker volume rm"
+rm -rf "${vroot:?}/$vol_a" "${vroot:?}/$vol_x"
+expect_eq "the app volume is gone before the full restore" "$(docker volume ls -q --filter "name=^app_${rid}-" | wc -l)" 0
 rm -f "$T_TMP/jobs-redis.password"
 expect_eq "the throwaway secrets are gone" "$(find "$secrets" "$jobsec" -mindepth 1 | wc -l)" 0
 # Rebuilt host: the admin files are gone too, and `host-files` (RUNBOOK order) brings them back before the stack starts.
@@ -464,6 +556,15 @@ done
 expect_eq "the runner password is restored with its original content" "$(< "$T_TMP/jobs-redis.password")" "jobspass"
 expect_re "full chowned the runner password to root:64324 (stub record)" "$(< "$chown_log")" "^0:64324 -- .*\\.tmp\\.restore\\."
 expect_has "full reports done" "$full_out" "full restore done from snapshot"
+# The app volume is back: recreated with BOTH labels (from the real daemon), the files byte-for-byte, owners and modes kept.
+expect_eq "full recreated the app volume with both labels" "$(docker volume inspect --format '{{index .Labels "platform.app"}}/{{index .Labels "platform.volume"}}' "$vol_a" 2> /dev/null)" "$app_a/files"
+mp_a2="$(docker volume inspect --format '{{.Mountpoint}}' "$vol_a" 2> /dev/null)"
+expect_eq "the recreated volume has the same (stubbed) mountpoint" "$mp_a2" "$mp_a"
+expect_eq "full restored the volume's files byte-for-byte" "$(cd "$mp_a2" && find . -type f -exec sha256sum {} + | sort -k2)" "$vol_sum_before"
+expect_eq "full restored the volume's marker" "$(< "$mp_a2/marker.txt")" "$vol_marker"
+expect_eq "full restored owner, group and mode" "$(stat -c '%u:%g %a' "$mp_a2/marker.txt")|$(stat -c '%u:%g %a' "$mp_a2/sub")|$(stat -c '%a' "$mp_a2/run.sh")" "$vol_owner_before"
+expect_eq "full did not recreate the volume that was never backed up" "$(docker volume ls -q --filter "name=^${vol_x}\$" | wc -l)" 0
+expect_has "the full restore logged the volume" "$full_out" "volumes: restored $vol_a into"
 vout="$(verify)"
 expect_has "verify on the restored stack: both containers healthy" "$vout" "PASS: both containers are running and healthy"
 expect_has "verify on the restored stack: Redis ACL users" "$vout" "PASS: Redis ACL users"
@@ -540,5 +641,25 @@ rc=$?
 expect_eq "a second backup.sh manual exits 0 after the restore" "$rc" 0
 expect_eq "two snapshots exist" "$(rcmd snapshots --json | grep -o '"short_id"' | wc -l)" 2
 : "${cap_snap:=}"
+# The second nightly (taken after the volume came back) still lists the volume's files: the path set may change run to run.
+expect_has "the second backup logs the app volume" "$(< "$T_TMP/backup2.txt")" "state app_volumes=1"
+
+# ---- 10. retention across a changed path set (a separate local repo): forget --prune groups by host only ----
+
+repo2="$T_TMP/repo2"
+rcmd2() { timeout 120 env RESTIC_REPOSITORY="$repo2" RESTIC_PASSWORD="$restic_pw" restic "$@" 2>&1; }
+mkdir -p "$T_TMP/ret/a" "$T_TMP/ret/b"
+printf 'a' > "$T_TMP/ret/a/f"
+printf 'b' > "$T_TMP/ret/b/f"
+expect_has "retention repo: init" "$(rcmd2 init)" "created restic repository"
+rcmd2 backup --host platform --tag platform "$T_TMP/ret/a" > /dev/null
+sleep 1
+rcmd2 backup --host platform --tag platform "$T_TMP/ret/a" "$T_TMP/ret/b" > /dev/null
+new_snap="$(rcmd2 snapshots --json --host platform | grep -o '"short_id":"[0-9a-f]*"' | tail -n 1 | cut -d'"' -f4)"
+expect_eq "retention: two snapshots with different path sets exist before forget" "$(rcmd2 snapshots --json --host platform | grep -o '"short_id"' | wc -l)" 2
+rcmd2 forget --prune --host platform --tag platform --group-by host --keep-last 1 > "$T_TMP/forget.txt"
+snaps2="$(rcmd2 snapshots --json --host platform)"
+expect_eq "retention: forget --prune --group-by host leaves one snapshot across path sets" "$(grep -o '"short_id"' <<< "$snaps2" | wc -l)" 1
+expect_has "retention: the surviving snapshot is the newer one" "$snaps2" "\"short_id\":\"$new_snap\""
 
 t_finish
