@@ -22,12 +22,14 @@ dummy_test() { # path: a passing dummy test
   mkdir -p "$(dirname "$S/$1")"
   printf '#!/usr/bin/env bash\nexit 0\n' > "$S/$1"
 }
-for a in host data jobs lint registry ingress backup deploy ci; do dummy_test "platform/$a/test_$a.sh"; done
+for a in host data jobs lint registry ingress backup deploy ci scaffold; do dummy_test "platform/$a/test_$a.sh"; done
 dummy_test platform/test/test_t.sh
 mkdir -p "$S/platform/lib" "$S/docs"
 echo lib > "$S/platform/lib/l.sh"
 dummy_test apps/foo/test_a.sh
 dummy_test apps/foo-bar/test_b.sh
+TPL=templates/go-react/test_tpl.sh
+dummy_test "$TPL"
 echo r > "$S/README.md"
 echo r > "$S/apps/foo/README.md"
 echo d > "$S/docs/x.md"
@@ -40,9 +42,16 @@ g commit -q -m base
 
 APPS=(apps/foo-bar/test_b.sh apps/foo/test_a.sh)
 ALL=(platform/backup/test_backup.sh platform/ci/test_ci.sh platform/data/test_data.sh platform/deploy/test_deploy.sh platform/host/test_host.sh platform/ingress/test_ingress.sh
-  platform/jobs/test_jobs.sh platform/lint/test_lint.sh platform/registry/test_registry.sh platform/test/test_t.sh "${APPS[@]}")
+  platform/jobs/test_jobs.sh platform/scaffold/test_scaffold.sh platform/lint/test_lint.sh platform/registry/test_registry.sh platform/test/test_t.sh "${APPS[@]}" "$TPL")
 
-want() { printf '%s\n' "$@" | LC_ALL=C sort -u | paste -sd' ' -; }
+# want <files...>: the sorted list. Every area that lists scaffold also lists templates (the template tests read the same
+# inputs), so a list naming the scaffold test gets the template test too; the templates-only cases below name it explicitly.
+want() {
+  local f has=0
+  for f in "$@"; do [ "$f" = platform/scaffold/test_scaffold.sh ] && has=1; done
+  if [ "$has" -eq 1 ]; then set -- "$@" "$TPL"; fi
+  printf '%s\n' "$@" | LC_ALL=C sort -u | paste -sd' ' -
+}
 touch_file() { mkdir -p "$(dirname "$S/$1")"; printf 'x\n' >> "$S/$1"; }
 
 # branch_with <path...>: a fresh branch off main in which each path is appended to and committed.
@@ -73,27 +82,27 @@ case_sel() { # label, "changed paths", expected files...
 
 # Each map row, in the order of the file.
 case_sel "docs-only selects nothing" "README.md docs/x.md apps/foo/README.md"
-case_sel "Makefile selects test, host, lint and registry" "Makefile" platform/test/test_t.sh platform/host/test_host.sh \
-  platform/lint/test_lint.sh platform/registry/test_registry.sh
+case_sel "Makefile selects test, host, lint, registry and scaffold" "Makefile" platform/test/test_t.sh platform/host/test_host.sh \
+  platform/lint/test_lint.sh platform/registry/test_registry.sh platform/scaffold/test_scaffold.sh
 case_sel ".github selects lint and ci" ".github/workflows/ci.yml" platform/lint/test_lint.sh platform/ci/test_ci.sh
 case_sel "platform/test/lib.sh selects all" "platform/test/lib.sh" "${ALL[@]}"
 case_sel "platform/test/prewarm.sh selects all (the all row beats platform/test/**)" "platform/test/prewarm.sh" "${ALL[@]}"
 case_sel "platform/test/run.sh selects all (the all row beats platform/test/**)" "platform/test/run.sh" "${ALL[@]}"
-case_sel "another platform/test file selects test, host and lint" "platform/test/test_t.sh" platform/test/test_t.sh \
-  platform/host/test_host.sh platform/lint/test_lint.sh
+case_sel "another platform/test file selects test, host, lint and scaffold" "platform/test/test_t.sh" platform/test/test_t.sh \
+  platform/host/test_host.sh platform/lint/test_lint.sh platform/scaffold/test_scaffold.sh
 case_sel "CLAUDE.md selects host" "CLAUDE.md" platform/host/test_host.sh
 case_sel "platform/lib row" "platform/lib/l.sh" platform/registry/test_registry.sh platform/data/test_data.sh platform/host/test_host.sh \
-  platform/backup/test_backup.sh platform/jobs/test_jobs.sh platform/ingress/test_ingress.sh platform/deploy/test_deploy.sh platform/test/test_t.sh "${APPS[@]}"
+  platform/backup/test_backup.sh platform/jobs/test_jobs.sh platform/scaffold/test_scaffold.sh platform/ingress/test_ingress.sh platform/deploy/test_deploy.sh platform/test/test_t.sh "${APPS[@]}"
 case_sel "platform/registry row" "platform/registry/r.txt" platform/registry/test_registry.sh platform/data/test_data.sh \
-  platform/host/test_host.sh platform/backup/test_backup.sh platform/jobs/test_jobs.sh platform/lint/test_lint.sh \
+  platform/host/test_host.sh platform/backup/test_backup.sh platform/jobs/test_jobs.sh platform/scaffold/test_scaffold.sh platform/lint/test_lint.sh \
   platform/deploy/test_deploy.sh platform/test/test_t.sh "${APPS[@]}"
 case_sel "platform/data row" "platform/data/d.txt" platform/data/test_data.sh platform/host/test_host.sh \
-  platform/backup/test_backup.sh platform/jobs/test_jobs.sh platform/lint/test_lint.sh platform/deploy/test_deploy.sh \
+  platform/backup/test_backup.sh platform/jobs/test_jobs.sh platform/scaffold/test_scaffold.sh platform/lint/test_lint.sh platform/deploy/test_deploy.sh \
   platform/test/test_t.sh "${APPS[@]}"
 case_sel "platform/deploy row: deploy, host, lint and data (the removal tests run in data), no apps" "platform/deploy/d.txt" \
-  platform/data/test_data.sh platform/deploy/test_deploy.sh platform/host/test_host.sh platform/lint/test_lint.sh
+  platform/data/test_data.sh platform/deploy/test_deploy.sh platform/scaffold/test_scaffold.sh platform/host/test_host.sh platform/lint/test_lint.sh
 case_sel "platform/ci row: ci only" "platform/ci/c.txt" platform/ci/test_ci.sh
-case_sel "platform/jobs row: jobs, host, lint and every app" "platform/jobs/j.txt" platform/jobs/test_jobs.sh \
+case_sel "platform/jobs row: jobs, host, lint, scaffold and every app" "platform/jobs/j.txt" platform/jobs/test_jobs.sh platform/scaffold/test_scaffold.sh \
   platform/host/test_host.sh platform/lint/test_lint.sh platform/test/test_t.sh "${APPS[@]}"
 case_sel "platform/backup row" "platform/backup/b.txt" platform/backup/test_backup.sh platform/host/test_host.sh \
   platform/data/test_data.sh platform/lint/test_lint.sh "${APPS[@]}"
@@ -101,13 +110,17 @@ case_sel "platform/ingress row" "platform/ingress/i.txt" platform/ingress/test_i
   platform/lint/test_lint.sh platform/test/test_t.sh "${APPS[@]}"
 case_sel "platform/host row" "platform/host/h.txt" platform/host/test_host.sh platform/data/test_data.sh \
   platform/backup/test_backup.sh platform/jobs/test_jobs.sh platform/lint/test_lint.sh "${APPS[@]}"
-case_sel "platform/lint row is lint only" "platform/lint/l.txt" platform/lint/test_lint.sh
+case_sel "platform/lint row: lint and scaffold" "platform/lint/l.txt" platform/lint/test_lint.sh platform/scaffold/test_scaffold.sh
+case_sel "templates row: scaffold, the template tests and lint, not the full suite" "templates/go-react/main.txt" platform/scaffold/test_scaffold.sh platform/lint/test_lint.sh
+expect_eq "a templates-only change selects the template test explicitly" "$sel" "$(want platform/lint/test_lint.sh platform/scaffold/test_scaffold.sh "$TPL")"
+case " $sel " in *" platform/host/test_host.sh "* | *" apps/foo/test_a.sh "*) _fail "a templates-only change does not select the whole suite" "got: $sel" ;; *) _pass ;; esac
+case_sel "platform/scaffold row: scaffold and lint" "platform/scaffold/s.txt" platform/scaffold/test_scaffold.sh platform/lint/test_lint.sh
 case_sel "the catch-all selects all for an unknown path" "weird/file.txt" "${ALL[@]}"
 
 # Apps.
 case_sel "an app-only change selects only that app" "apps/foo/main.txt" apps/foo/test_a.sh
 case_sel "apps/foo-bar never selects apps/foo" "apps/foo-bar/main.txt" apps/foo-bar/test_b.sh
-case_sel "an app plus a platform change" "apps/foo/main.txt platform/lint/l.txt" apps/foo/test_a.sh platform/lint/test_lint.sh
+case_sel "an app plus a platform change" "apps/foo/main.txt platform/lint/l.txt" apps/foo/test_a.sh platform/lint/test_lint.sh platform/scaffold/test_scaffold.sh
 case_sel "an app README selects nothing" "apps/foo/README.md"
 case_sel "a new app without tests selects nothing" "apps/newapp/main.txt"
 
@@ -125,7 +138,7 @@ mkdir -p "$S/docs"
 g mv platform/lint/m.txt docs/m.txt
 g commit -q -m "rename m"
 run_select work
-expect_eq "a rename out of an area selects the old area" "$sel" "platform/lint/test_lint.sh"
+expect_eq "a rename out of an area selects the old area" "$sel" "$(want platform/lint/test_lint.sh platform/scaffold/test_scaffold.sh)"
 expect_eq "a rename: exit 0 and no warning" "$srcrc:$err" "0:"
 
 # A rename between two test-bearing areas selects both: lint (lint only) to ingress (ingress, host, lint, apps).
@@ -137,7 +150,7 @@ g checkout -q -B base3 work
 g mv platform/lint/m2.txt platform/ingress/m2.txt
 g commit -q -m "rename m2"
 run_select work
-expect_eq "a rename between areas selects both areas" "$sel" "$(want platform/lint/test_lint.sh platform/ingress/test_ingress.sh platform/host/test_host.sh platform/test/test_t.sh "${APPS[@]}")"
+expect_eq "a rename between areas selects both areas" "$sel" "$(want platform/lint/test_lint.sh platform/scaffold/test_scaffold.sh platform/ingress/test_ingress.sh platform/host/test_host.sh platform/test/test_t.sh "${APPS[@]}")"
 
 # Fail toward more tests: a bad ref, an unreadable map, a malformed row, an unknown area, a path no row matches.
 branch_with README.md

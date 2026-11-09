@@ -126,7 +126,7 @@ jobs:
           path: |
             ~/go/pkg/mod
             ~/.cache/go-build
-          key: go-${{ runner.os }}-${{ hashFiles('platform/jobs/GO_VERSION') }}-${{ hashFiles('platform/jobs/go.sum') }}
+          key: go-${{ runner.os }}-${{ hashFiles('platform/jobs/GO_VERSION') }}-${{ hashFiles('platform/jobs/go.sum', 'templates/*/go.sum', 'apps/*/go.sum') }}
           restore-keys: |
             go-${{ runner.os }}-${{ hashFiles('platform/jobs/GO_VERSION') }}-
       - name: Lint
@@ -160,4 +160,4 @@ jobs:
           path: |
             ~/go/pkg/mod
             ~/.cache/go-build
-          key: go-${{ runner.os }}-${{ hashFiles('platform/jobs/GO_VERSION') }}-${{ hashFiles('platform/jobs/go.sum') }}
+          key: go-${{ runner.os }}-${{ hashFiles('platform/jobs/GO_VERSION') }}-${{ hashFiles('platform/jobs/go.sum', 'templates/*/go.sum', 'apps/*/go.sum') }}

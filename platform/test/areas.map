@@ -3,7 +3,8 @@
 # "none" here selects only that app's apps/<name>/test_*.sh, whatever its row says.
 # Globs (space-separated): anchored; **/ is zero or more directories; a trailing /** is everything beneath;
 # * and ? stop at /.
-# Targets (comma-separated): a platform/<area> directory name, apps (every app), none, or all.
+# Targets (comma-separated): a platform/<area> directory name, apps (every app), templates (every
+# templates/<name>/test_*.sh), none, or all.
 # A test that reads another area (../<area>/ or ../lib/) needs that area's row to list the test's own area;
 # test_areas_map.sh enforces it.
 # Why each row is what it is:
@@ -19,21 +20,28 @@
 #     check-test-classes.sh line), `registry` holds test_validate_app_yaml.sh (greps it for the validate-tracked.sh line).
 #   lib, registry, data, jobs, ingress also list `test`: test_prewarm.sh reads platform/lib/yaml-subset.sh, the data, jobs
 #     and ingress compose files and the jobs Dockerfiles, and test_areas_map.sh mentions ../data/, ../lib/ and ../registry/.
+#   templates (templates/<name>/test_*.sh: unit, web, sqlc and image tests, run by run.sh, not under platform/) is listed
+#     wherever scaffold is, because those tests read the same inputs as the scaffold tests; a templates/** change selects
+#     it beside scaffold and lint, so a template-only PR runs the template tests and not the whole suite.
+#   scaffold (templates/** and platform/scaffold/**) is also listed by the rows its tests read: jobs (go-env.sh, GO_VERSION),
+#     registry, lib, test, lint (check-go.sh), and by data, deploy and Makefile (test_image.sh mirrors new-db.sh, the data
+#     compose file and deploy.sh's run flags; test_app_new.sh runs `make -n app-new`).
 #   A push to main still runs everything (CI runs `make test` there), which catches a wrong map.
 README.md **/README.md docs/** .claude/**	none
 CLAUDE.md	host
 platform/test/lib.sh platform/test/prewarm.sh platform/test/run.sh	all
-platform/test/**	test,host,lint
+platform/test/**	test,host,lint,scaffold,templates
 .github/**	lint,ci
-Makefile	test,host,lint,registry
-platform/lib/**	registry,data,host,backup,jobs,ingress,deploy,apps,test
-platform/registry/**	registry,data,host,backup,jobs,lint,deploy,apps,test
-platform/data/**	data,host,backup,jobs,lint,deploy,apps,test
-platform/jobs/**	jobs,host,lint,apps,test
+Makefile	test,host,lint,registry,scaffold,templates
+platform/lib/**	registry,data,host,backup,jobs,scaffold,templates,ingress,deploy,apps,test
+platform/registry/**	registry,data,host,backup,jobs,scaffold,templates,lint,deploy,apps,test
+platform/data/**	data,host,backup,jobs,scaffold,templates,lint,deploy,apps,test
+platform/jobs/**	jobs,host,lint,scaffold,templates,apps,test
 platform/backup/**	backup,host,data,lint,apps
 platform/ingress/**	ingress,host,lint,apps,test
 platform/host/**	host,data,backup,jobs,lint,apps
-platform/deploy/**	deploy,host,lint,data
-platform/lint/**	lint
+platform/deploy/**	deploy,host,lint,data,scaffold,templates
+platform/lint/**	lint,scaffold,templates
+platform/scaffold/** templates/**	scaffold,templates,lint
 platform/ci/**	ci
 **	all
