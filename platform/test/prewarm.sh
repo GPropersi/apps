@@ -4,7 +4,8 @@
 #   images: when `docker info` succeeds, pull (3 at a time, `timeout 300` each) every image pinned in the data, jobs and
 #           ingress compose files (read with platform/lib/yaml-subset.sh) and the FROM images of the jobs Dockerfiles,
 #           skipping any that `docker image inspect` finds already present and any reference with a variable in it
-#           (the locally built runner image).
+#           (the locally built runner image). The go-react template Dockerfile adds the node, sqlc, golang and distroless
+#           images (its `sqlc` stage exists so test_sqlc.sh and this list share one pin).
 #   go:     source platform/jobs/go-env.sh in a subshell, which downloads the pinned toolchain into the module cache.
 # One line per item: `prewarm: <item> rc=<n> <secs>s`, followed on failure by `: <error text>` (the item is the image
 # reference or `go`). A failure is logged and never fails the run: prewarm always exits 0, so the tests' own pull, skip
@@ -52,7 +53,7 @@ image_refs() {
     fi
     awk -F'\t' '$1 ~ /^services\/[^\/]+\/image$/ { print $2 }' "$flat"
   done
-  for df in "$root/platform/jobs/Dockerfile" "$root/platform/jobs/Dockerfile.testapp"; do
+  for df in "$root/platform/jobs/Dockerfile" "$root/platform/jobs/Dockerfile.testapp" "$root/templates/go-react/Dockerfile"; do
     [ -f "$df" ] || continue
     # FROM [--platform=x] <ref> [AS <alias>]; a later FROM that names an earlier alias is not an image.
     awk '
