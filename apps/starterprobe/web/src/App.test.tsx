@@ -552,7 +552,7 @@ describe("expired and unconfirmed sign-in", () => {
     expect(addButton()).toBeDisabled();
     expect(screen.queryByRole("button", { name: "Run background task" })).not.toBeInTheDocument();
     expect(screen.queryByText("Background task")).not.toBeInTheDocument();
-    expect(reload).toHaveFocus();
+    await waitFor(() => expect(reload).toHaveFocus());
     expect(screen.queryByText("Checking sign-in…")).not.toBeInTheDocument();
   });
 
@@ -566,7 +566,7 @@ describe("expired and unconfirmed sign-in", () => {
     expect(screen.queryByText("Your sign-in has expired.")).not.toBeInTheDocument();
     expect(input()).toBeDisabled();
     expect(screen.queryByRole("button", { name: "Run background task" })).not.toBeInTheDocument();
-    expect(reload).toHaveFocus();
+    await waitFor(() => expect(reload).toHaveFocus());
   });
 
   it("keeps the last list read-only, the typed text and no identity on a mid-session 401 from an add", async () => {
@@ -584,7 +584,7 @@ describe("expired and unconfirmed sign-in", () => {
     expect(screen.queryByText("Signed in as", { exact: false })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Run background task" })).not.toBeInTheDocument();
     expect(addAlert()).toHaveTextContent("");
-    expect(screen.getByRole("button", { name: "Reload" })).toHaveFocus();
+    await waitFor(() => expect(screen.getByRole("button", { name: "Reload" })).toHaveFocus());
   });
 
   it("keeps the last list and hides the task section on a mid-session 403 from Refresh notes", async () => {
@@ -609,7 +609,7 @@ describe("expired and unconfirmed sign-in", () => {
     expect(await screen.findByText("We couldn't confirm your sign-in.")).toBeInTheDocument();
     expect(within(document.body).queryByTestId("task-alert")).not.toBeInTheDocument();
     expect(input()).toBeDisabled();
-    expect(screen.getByRole("button", { name: "Reload" })).toHaveFocus();
+    await waitFor(() => expect(screen.getByRole("button", { name: "Reload" })).toHaveFocus());
   });
 
   it("keeps the last list and typed text on a mid-session JSON 401 (noidentity) from an add", async () => {
@@ -625,7 +625,7 @@ describe("expired and unconfirmed sign-in", () => {
     expect(input()).toHaveValue("typed");
     expect(input()).toBeDisabled();
     expect(screen.queryByRole("button", { name: "Run background task" })).not.toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Reload" })).toHaveFocus();
+    await waitFor(() => expect(screen.getByRole("button", { name: "Reload" })).toHaveFocus());
   });
 
   it("keeps the typed text and disabled input on a mid-session 403 from Refresh notes", async () => {
