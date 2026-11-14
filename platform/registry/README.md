@@ -26,7 +26,7 @@ The file is written in the small YAML subset read by `platform/lib/yaml-subset.s
 | `template` | yes | One of `go-react`, `go-htmx`, `fastapi-react`, `flask`, `node-hono`. |
 | `memory_cap` | yes | A number of MiB with the unit `m`, from `16m` to `512m`. |
 | `port` | yes | Integer 1 to 65535, unquoted. |
-| `health_path` | no | Starts with `/`; only letters, digits and `. _ ~ / % -` after it. |
+| `health_path` | no | Starts with `/`; only letters, digits and `. _ ~ / % -` after it. Also gates routing: keep it cheap, unauthenticated and answering 2xx or 3xx within 3s, because Traefik probes it every 5s and a failing or slow response drops the app to the down page until it recovers. |
 | `access` | no | `family` (default when absent), `public` or `restricted`. Records intent only: no email lists belong in the file. |
 | `jobs` | no | A non-empty list of maps (below). |
 | `volumes` | no | A non-empty list of 1 to 4 maps (below). |

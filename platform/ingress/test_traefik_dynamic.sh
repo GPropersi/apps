@@ -171,10 +171,12 @@ dump_logs() {
 # write_route <dir> <name> <host> <backend container>: a route file in the shape platform deploy writes
 # (app-<name>.yml), placed atomically (temp name + rename) in the directory Traefik watches.
 write_route() {
-  local dir="$1" name="$2" host="$3" backend="$4"
+  local dir="$1" name="$2" host="$3" backend="$4" health="${5:-}" hcblock=""
+  # An optional <health path> adds the healthCheck block platform deploy renders from the app's health_path.
+  [ -z "$health" ] || hcblock="$(printf '        healthCheck:\n          path: %s\n          interval: 5s\n          timeout: 3s\n' "$health")"$'\n'
   # shellcheck disable=SC2016 # the backticks are Traefik rule syntax, not a command substitution
-  printf 'http:\n  routers:\n    app-%s:\n      rule: Host(`%s`)\n      entryPoints: [web]\n      service: app-%s\n  services:\n    app-%s:\n      loadBalancer:\n        servers:\n          - url: http://%s:8080\n' \
-    "$name" "$host" "$name" "$name" "$backend" > "$dir/app-$name.tmp" && mv -f "$dir/app-$name.tmp" "$dir/app-$name.yml"
+  printf 'http:\n  routers:\n    app-%s:\n      rule: Host(`%s`)\n      entryPoints: [web]\n      service: app-%s\n  services:\n    app-%s:\n      loadBalancer:\n%s        servers:\n          - url: http://%s:8080\n' \
+    "$name" "$host" "$name" "$name" "$hcblock" "$backend" > "$dir/app-$name.tmp" && mv -f "$dir/app-$name.tmp" "$dir/app-$name.yml"
 }
 
 # wait_route <host> <path> <want-code> [secs]: poll until Traefik answers <want-code>; exit 1 with a named failure.
@@ -495,6 +497,11 @@ expect_eq "app 503: status preserved" "$req_code" 503
 wait_route "gone.$fake_domain" / 200
 # Every app router comes from the file provider (the name ends @file).
 docker logs "$tname" 2>&1 | grep -F "\"RequestHost\":\"gone.$fake_domain\"" | grep -qF '"RouterName":"app-gone@file"' && _pass || _fail "gone route was not served by app-gone@file"
+# A route carrying the rendered healthCheck block loads and still routes while its backend is healthy (the 503 once
+# the container stops is covered by the live check recorded in the commit message).
+write_route "$dyn_plain" hc "hc.$fake_domain" "$gname" /
+wait_route "hc.$fake_domain" / 200
+docker logs "$tname" 2>&1 | grep -F "\"RequestHost\":\"hc.$fake_domain\"" | grep -qF '"RouterName":"app-hc@file"' && _pass || _fail "health-check route was not served by app-hc@file"
 docker exec "$gname" pkill -x httpd
 wait_route "gone.$fake_domain" / 502
 req "gone.$fake_domain" /
