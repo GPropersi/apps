@@ -5,7 +5,9 @@
 #     which Traefik answers with 503, so the request never reaches an app;
 #   - the `errors` middleware, attached to the web entrypoint in compose.yaml (errors@file), replaces the body of
 #     any 502 to 504 (status preserved) with the page fetched from the down-page service;
-#   - the down-page service serves that page with 200 and no router targets it.
+#   - the down-page service serves that page with 200 and no router targets it;
+#   - a stopped app answers 503 (not 502, which Cloudflare replaces with its own page) only because its route file
+#     carries a health check, rendered by platform/deploy/deploy.sh from the app's health_path.
 #
 # Primitives: PathRegexp with an inline (?i) flag for the deny rule (a regex, not PathPrefix, because it must be
 # case-insensitive and treat a ";" suffix as under the prefix); maximum explicit priority so the deny outranks
