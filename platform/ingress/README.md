@@ -137,8 +137,14 @@ make host-verify-ingress HOST=<alias> ARGS="--domain <your domain>"
 - **`/_jobs` is denied** at the edge for every app (case-insensitive, and the normalised and encoded variants
   recorded in `dynamic.yml`); it never reaches the app. The jobs runner is reached another way.
 - **502, 503 and 504 are replaced by the friendly page.** Any app response with one of these statuses gets the down
-  page body with the status preserved, so templates must not rely on custom 502 to 504 bodies. A stopped or unknown
-  app answers 503 from Traefik.
+  page body with the status preserved, so templates must not rely on custom 502 to 504 bodies. An unknown app answers
+  503 from Traefik (the catch-all). A stopped app answers 503 only because `platform deploy` renders a Traefik health
+  check on the app's `health_path` into its route file: Traefik then drops the unhealthy server within a few seconds
+  (interval 5s, timeout 3s) and answers 503, which Cloudflare passes through with the friendly body. Cloudflare
+  replaces an origin 502 or 504 with its own error page (overriding that needs an Enterprise plan or a paid
+  Custom Error Rule), so a stopped app with no `health_path`, and the first seconds after a crash, show Cloudflare's
+  "Bad gateway" page instead. `install-ingress.sh verify` accepts exactly the health check lines `platform deploy`
+  renders, with the path restricted to what `validate-app-yaml.sh` allows.
 
 ## Guarantee scope
 
