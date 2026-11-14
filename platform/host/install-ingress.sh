@@ -533,6 +533,8 @@ chk_deploy_dir() {
 # chk_dynamic_files: the deploy login can create any file in dynamic/, so every file but root's dynamic.yml must be named
 # app-<valid-name>.yml and have exactly the shape platform/deploy/deploy.sh renders (render_route): no priority, middlewares
 # or other key, only that app's own router and service. Prints one line per problem; never a file's content.
+# The check is deliberately a per-line allowlist, insensitive to order and count: a duplicated or misplaced key is
+# refused by Traefik's own parser, not by this guard.
 # shellcheck disable=SC2329 # invoked by name through run_check
 chk_dynamic_files() {
   local d="$ROOT$INSTALL_DIR/dynamic" names f app body line ln

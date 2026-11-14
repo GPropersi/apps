@@ -143,8 +143,15 @@ make host-verify-ingress HOST=<alias> ARGS="--domain <your domain>"
   (interval 5s, timeout 3s) and answers 503, which Cloudflare passes through with the friendly body. Cloudflare
   replaces an origin 502 or 504 with its own error page (overriding that needs an Enterprise plan or a paid
   Custom Error Rule), so a stopped app with no `health_path`, and the first seconds after a crash, show Cloudflare's
-  "Bad gateway" page instead. `install-ingress.sh verify` accepts exactly the health check lines `platform deploy`
+  "Bad gateway" page instead. `install-ingress.sh verify` accepts only the health check lines `platform deploy`
   renders, with the path restricted to what `validate-app-yaml.sh` allows.
+  - `health_path` therefore also gates routing: it must stay cheap, unauthenticated and answer 2xx or 3xx within 3s,
+    because Traefik probes it every 5s and a failing or slow response drops the app to the down page until it recovers.
+  - An app deployed before this change keeps its old route file, and a stopped one still shows Cloudflare's 502 page,
+    until its next deploy.
+  - Rollout order: CI runs the copy of `deploy.sh` installed by `make host-deploy-user`, so a merge changes nothing
+    live until that runs. Run `make host-ingress ARGS="install"` (the guard that accepts the health check lines)
+    before `make host-deploy-user`, otherwise a later `verify` fails on the new lines.
 
 ## Guarantee scope
 

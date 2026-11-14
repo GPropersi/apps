@@ -1030,6 +1030,13 @@ expect_out_has "and names health" "phase 'health' failed"
 expect_eq "and the old container is restored" "$(ctr_img app-alpha)" "$REF2"
 rm -f "$STUB_BIN/sleep"
 
+# ---- a non-default health_path is rendered into the route health check ----
+
+snap_load
+deploy_app alpha v3 /status/ready
+expect_rc "a deploy with a non-default health_path succeeds" 0
+expect_eq "a non-default health_path renders the route with that path" "$(cmp -s "$W/routes/app-alpha.yml" <(want_route alpha 8080 "" /status/ready) && echo same)" "same"
+
 # ---- a leftover app-alpha-old from an interrupted deploy ----
 
 snap_load
