@@ -6,7 +6,7 @@ toolchain go1.26.0
 
 require (
 	github.com/coreos/go-oidc/v3 v3.14.1
-	github.com/go-chi/chi/v5 v5.2.3
+	github.com/go-chi/chi/v5 v5.4.0
 	github.com/jackc/pgx/v5 v5.7.6
 	github.com/oklog/ulid/v2 v2.1.0
 	github.com/pressly/goose/v3 v3.26.0
