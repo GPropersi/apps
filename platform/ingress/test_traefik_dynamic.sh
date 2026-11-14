@@ -171,12 +171,12 @@ dump_logs() {
 # write_route <dir> <name> <host> <backend container>: a route file in the shape platform deploy writes
 # (app-<name>.yml), placed atomically (temp name + rename) in the directory Traefik watches.
 write_route() {
-  local dir="$1" name="$2" host="$3" backend="$4" health="${5:-}" hc=""
+  local dir="$1" name="$2" host="$3" backend="$4" health="${5:-}" hcblock=""
   # An optional <health path> adds the healthCheck block platform deploy renders from the app's health_path.
-  [ -z "$health" ] || hc="$(printf '        healthCheck:\n          path: %s\n          interval: 5s\n          timeout: 3s\n' "$health")"$'\n'
+  [ -z "$health" ] || hcblock="$(printf '        healthCheck:\n          path: %s\n          interval: 5s\n          timeout: 3s\n' "$health")"$'\n'
   # shellcheck disable=SC2016 # the backticks are Traefik rule syntax, not a command substitution
   printf 'http:\n  routers:\n    app-%s:\n      rule: Host(`%s`)\n      entryPoints: [web]\n      service: app-%s\n  services:\n    app-%s:\n      loadBalancer:\n%s        servers:\n          - url: http://%s:8080\n' \
-    "$name" "$host" "$name" "$name" "$hc" "$backend" > "$dir/app-$name.tmp" && mv -f "$dir/app-$name.tmp" "$dir/app-$name.yml"
+    "$name" "$host" "$name" "$name" "$hcblock" "$backend" > "$dir/app-$name.tmp" && mv -f "$dir/app-$name.tmp" "$dir/app-$name.yml"
 }
 
 # wait_route <host> <path> <want-code> [secs]: poll until Traefik answers <want-code>; exit 1 with a named failure.
