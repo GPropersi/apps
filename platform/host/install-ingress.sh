@@ -445,7 +445,7 @@ access_values() {
 # shellcheck disable=SC2329 # invoked by name through run_check
 chk_access_file() {
   local p="$ROOT$ACCESS_FILE" meta mode g o vals
-  if ! priv test -e "$p"; then echo "access env file missing: $ACCESS_FILE (see platform/ingress/README.md, Host files you create by hand)"; return 0; fi
+  if ! priv test -e "$p"; then echo "access env file missing: $ACCESS_FILE (run make host-access-env HOST=<alias>, or create it by hand, see platform/ingress/README.md)"; return 0; fi
   if priv test -L "$p"; then echo "access env file is a symlink: $ACCESS_FILE"; return 0; fi
   if ! priv test -f "$p"; then echo "access env file is not a regular file: $ACCESS_FILE"; return 0; fi
   meta="$(priv stat -c '%u:%g %a' -- "$p")" || { echo "cannot stat the access env file"; return 0; }

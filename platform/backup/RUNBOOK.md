@@ -159,6 +159,9 @@ above; apps come back by redeploying them from CI, and their data comes back fro
 4. **Install the host pieces** in the order of section 4 above (deploy user with
    `make host-deploy-user HOST=<alias> ARGS="install --pubkey-file PATH"`, restore-only backup, `host-files`, data
    stack, `full` restore, normal backup install, verify). Then, before any redeploy:
+   `make host-access-env HOST=<alias>` (writes `/etc/platform/access.env` from the `ACCESS_TEAM_DOMAIN` and `ACCESS_AUD`
+   variables of the GitHub environment `production`, so nothing is typed on the new host; without the file every deploy
+   refuses to start),
    `make host-ingress HOST=<alias> ARGS="install"` (it creates the Docker network the deploy preflight needs) and
    `make host-jobs HOST=<alias> ARGS=install` (it creates the image registry root; without it every deploy exits 1
    naming `preflight`).

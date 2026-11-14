@@ -65,6 +65,7 @@ Design and phases live in the stronghold: `~/code/plans/stronghold/open/app-host
   | Live host: deploy identity installer (you run it; `HOST` required) | `make host-deploy-user HOST=<alias> ARGS="install --pubkey-file PATH"` |
   | Live host: claude identity installer (you run it; `HOST` required) | `make host-claude-access HOST=<alias> ARGS="install --pubkey-file PATH"` |
   | Live host: ingress stack installer (you run it; `HOST` required) | `make host-ingress HOST=<alias> ARGS="install"` |
+  | Live host: write `/etc/platform/access.env` from `ACCESS_TEAM_DOMAIN` / `ACCESS_AUD` in the environment, else the GitHub `production` environment variables; idempotent, `--force` to replace different values, `--check` is read-only (you run it; `HOST` required) | `make host-access-env HOST=<alias> ARGS="--check"` |
   | Live host: shared Postgres and Redis installer (you run it; `HOST` required) | `make host-data HOST=<alias> ARGS="install"` |
   | Live host: jobs runner installer, incl. the explicit `testapp-up` / `testapp-down` (you run it; `HOST` required) | `make host-jobs HOST=<alias> ARGS="install"` |
   | Live host: nightly backup installer and checks, incl. `run-now` and `init-repo` (you run it; `HOST` required) | `make host-backup HOST=<alias> ARGS="install"` |
