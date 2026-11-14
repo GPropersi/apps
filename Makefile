@@ -1,5 +1,5 @@
 .DEFAULT_GOAL := help
-.PHONY: help lint test test-changed test-app embed app-ls app-sqlc app-new host-app-ls host-deploy-user host-claude-access host-verify-egress host-ingress host-data host-jobs host-backup host-restore host-app-rm host-verify-ingress
+.PHONY: help lint test test-changed test-app embed app-ls app-sqlc app-new host-app-ls host-deploy-user host-claude-access host-verify-egress host-ingress host-access-env host-data host-jobs host-backup host-restore host-app-rm host-verify-ingress
 
 # Live-host targets (host-*) stream a script to the app host over SSH. HOST (an ssh alias) is required, with no
 # default alias; ARGS is passed to the script. They are for you to run, never inside a worktree.
@@ -65,6 +65,10 @@ host-claude-access: ## LIVE: claude identity installer (HOST=<alias> ARGS="insta
 host-ingress: ## LIVE: ingress stack installer (HOST=<alias> ARGS="install | verify | verify --live [--hold]"; default status)
 	@[ -n "$$HOST" ] || { echo 'usage: make host-ingress HOST=<ssh-alias> [ARGS="install | status | verify | verify --live [--hold]"]' >&2; exit 2; }
 	@platform/host/install-ingress.sh $${ARGS:-status} --host "$$HOST"
+
+host-access-env: ## LIVE: write /etc/platform/access.env from ACCESS_* env or the GitHub environment variables (HOST=<alias> [ARGS="--force | --check | --env NAME"])
+	@[ -n "$$HOST" ] || { echo 'usage: make host-access-env HOST=<ssh-alias> [ARGS="--force | --check | --env NAME"]' >&2; exit 2; }
+	@platform/host/write-access-env.sh $$ARGS --host "$$HOST"
 
 host-data: ## LIVE: shared Postgres and Redis installer (HOST=<alias> ARGS="install | verify"; default status)
 	@[ -n "$$HOST" ] || { echo 'usage: make host-data HOST=<ssh-alias> [ARGS="install | status | verify"]' >&2; exit 2; }

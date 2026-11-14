@@ -55,6 +55,8 @@ dry_case "verify-egress with ARGS" host-verify-egress verify-egress.sh ARGS='--p
 dry_case "verify-ingress with ARGS" host-verify-ingress verify-ingress.sh ARGS='--domain example.test'
 dry_case "ingress, ARGS unset" host-ingress install-ingress.sh
 dry_case "ingress with ARGS" host-ingress install-ingress.sh ARGS='verify --live --hold'
+dry_case "access-env, ARGS unset" host-access-env write-access-env.sh
+dry_case "access-env with ARGS" host-access-env write-access-env.sh ARGS='--check'
 dry_case "data, ARGS unset" host-data install-data.sh
 dry_case "data with ARGS" host-data install-data.sh ARGS='verify'
 dry_case "jobs, ARGS unset" host-jobs install-jobs.sh
@@ -67,7 +69,7 @@ stub_tree="$T_TMP/stub-tree"
 rm -rf "$stub_tree"
 mkdir -p "$stub_tree/platform/host"
 cp -- "$root/Makefile" "$stub_tree/Makefile"
-for stub in install-deploy-user.sh install-claude-access.sh install-ingress.sh install-data.sh install-jobs.sh install-backup.sh verify-egress.sh verify-ingress.sh; do
+for stub in install-deploy-user.sh install-claude-access.sh install-ingress.sh install-data.sh install-jobs.sh install-backup.sh verify-egress.sh verify-ingress.sh write-access-env.sh; do
   printf '#!/usr/bin/env bash\nprintf "%%s\\n" "$*" > "$STUB_ARGV"\n' > "$stub_tree/platform/host/$stub"
   chmod +x "$stub_tree/platform/host/$stub"
 done
@@ -95,6 +97,11 @@ expect_rc "stub run: ingress, ARGS unset" 0
 expect_eq "ARGS unset: ingress defaults to status" "$(cat "$stub_argv")" "status --host alias"
 stub_run host-ingress 'verify --live --hold'
 expect_eq "ARGS set: ingress receives ARGS then --host" "$(cat "$stub_argv")" "verify --live --hold --host alias"
+stub_run host-access-env
+expect_rc "stub run: access-env, ARGS unset" 0
+expect_eq "ARGS unset: access-env gets only --host" "$(cat "$stub_argv")" "--host alias"
+stub_run host-access-env '--force'
+expect_eq "ARGS set: access-env receives ARGS then --host" "$(cat "$stub_argv")" "--force --host alias"
 stub_run host-data
 expect_rc "stub run: data, ARGS unset" 0
 expect_eq "ARGS unset: data defaults to status" "$(cat "$stub_argv")" "status --host alias"

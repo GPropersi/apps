@@ -390,7 +390,7 @@ host_file_ok() {
 # Anything missing or invalid fails the deploy in preflight; the log names the key and the file, never the value.
 load_host_settings() {
   host_file_ok "$INGRESS_ENV" || fail preflight "the ingress env file $INGRESS_ENV $HOST_FILE_WHY: run \`make host-ingress HOST=<alias> ARGS=verify\`"
-  host_file_ok "$ACCESS_ENV" || fail preflight "the access env file $ACCESS_ENV $HOST_FILE_WHY: create it by hand (platform/ingress/README.md, Host files you create by hand)"
+  host_file_ok "$ACCESS_ENV" || fail preflight "the access env file $ACCESS_ENV $HOST_FILE_WHY: run make host-access-env HOST=<alias> (or create it by hand, see platform/ingress/README.md)"
   DOMAIN="$(env_value PLATFORM_DOMAIN "$INGRESS_ENV")"
   ACC_TEAM="$(env_value ACCESS_TEAM_DOMAIN "$ACCESS_ENV")"
   ACC_AUD="$(env_value ACCESS_AUD "$ACCESS_ENV")"

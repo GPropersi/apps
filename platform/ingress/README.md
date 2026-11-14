@@ -54,11 +54,28 @@ hostname Access app overrides the wildcard, test it live before relying on it.
 #### Host files you create by hand
 
 `/etc/platform/access.env` (root-owned, `0644`, not group or world writable) holds the Cloudflare Access settings
-`platform deploy` hands to every app. Copy `access.env.example` and fill in two values from the Zero Trust dashboard:
+`platform deploy` hands to every app. It needs two values from the Zero Trust dashboard:
 
 - `ACCESS_TEAM_DOMAIN=<team>.cloudflareaccess.com`: the team domain (Zero Trust, Settings, Custom Pages).
 - `ACCESS_AUD=<64 hex characters>`: the Application Audience tag (Zero Trust, Access, Applications, the wildcard app,
   Overview).
+
+**Preferred: let `make host-access-env` write it.** Keep the two values once as GitHub environment variables on the
+`production` environment (they are identifiers, not credentials, but this repo is public, so never commit them). From
+the repo, logged in with `gh`, `gh variable set ACCESS_TEAM_DOMAIN --env production` and the same for `ACCESS_AUD` each
+prompt for the value, so it never lands in your shell history. Then, for any host, new or rebuilt:
+
+```
+make host-access-env HOST=<alias>
+```
+
+It reads the variables (or `ACCESS_TEAM_DOMAIN` and `ACCESS_AUD` from your environment when both are set), validates them
+with the rules below, writes the file over ssh with sudo (temp file, `root:root`, `0644`, one `mv`), re-reads it, and
+never prints a value. A repeat reports `already`; a file with different content is replaced only with `ARGS="--force"`;
+`ARGS="--check"` only compares. It is deliberately a command you run, not a CI step: CI reaches the host only as the
+restricted `deploy` login, and this file must stay unwritable by it because it decides how Access identities are checked.
+
+By hand (the fallback, same result): copy `access.env.example`, fill in the two values and
 
 ```
 sudo tee /etc/platform/access.env >/dev/null
