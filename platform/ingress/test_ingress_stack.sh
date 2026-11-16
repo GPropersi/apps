@@ -94,6 +94,7 @@ host_files="$host_files platform.sh login-shell.sh install-deploy-user.sh claude
 host_files="$host_files install-backup.sh restore.sh backup.sh platform-backup.service platform-backup.timer RUNBOOK.md "
 host_files="$host_files install-data.sh install-jobs.sh jobs-redis.password deploy.sh validate-app-yaml.sh new-db.sh rm-db.sh pg_hba.conf redis-entrypoint.sh postgres-admin.password redis-admin.password "
 host_files="$host_files verify-egress.sh verify-ingress.sh server-host-base.sh authorized_keys.d egress-deny.cidrs egress-allow.cidrs "
+host_files="$host_files write-access-env.sh "
 host_files="$host_files docker-user.rules.bak docker-user.rules docker-user-firewall.service "
 # Docker inspect template fields used by test_traefik_dynamic.sh.
 host_files="$host_files NetworkSettings.Networks State.Health.Status "
