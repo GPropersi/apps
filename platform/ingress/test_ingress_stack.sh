@@ -94,6 +94,7 @@ host_files="$host_files platform.sh login-shell.sh install-deploy-user.sh claude
 host_files="$host_files install-backup.sh restore.sh backup.sh platform-backup.service platform-backup.timer RUNBOOK.md "
 host_files="$host_files install-data.sh install-jobs.sh jobs-redis.password deploy.sh validate-app-yaml.sh new-db.sh rm-db.sh pg_hba.conf redis-entrypoint.sh postgres-admin.password redis-admin.password "
 host_files="$host_files verify-egress.sh verify-ingress.sh server-host-base.sh authorized_keys.d egress-deny.cidrs egress-allow.cidrs "
+host_files="$host_files write-access-env.sh "
 host_files="$host_files docker-user.rules.bak docker-user.rules docker-user-firewall.service "
 # Docker inspect template fields used by test_traefik_dynamic.sh.
 host_files="$host_files NetworkSettings.Networks State.Health.Status "
@@ -420,7 +421,7 @@ mutate "network_mode host" "network_mode is not allowed" compose traefik 2 after
 mutate "cap_add" "cap_add is not allowed" compose traefik 2 after '^  traefik:' '    cap_add:\n      - NET_ADMIN'
 mutate "a second service" "service set is not exactly" compose - - before '^networks:' '  extra:\n    image: docker.io/library/busybox:1.37.0@sha256:bdf57e528e45e4433820e045b29b4597825a1c9e38353532d90a01445013f82e\n'
 mutate "floating image tag" "floating or unpinned" compose traefik 2 replace '^    image:' '    image: docker.io/library/traefik:latest'
-mutate "tag without digest" "floating or unpinned" compose cloudflared 2 replace '^    image:' '    image: docker.io/cloudflare/cloudflared:2026.10.1'
+mutate "tag without digest" "floating or unpinned" compose cloudflared 2 replace '^    image:' '    image: docker.io/cloudflare/cloudflared:2026.11.0'
 mutate "unqualified image" "fully qualified" compose down-page 2 replace '^    image:' '    image: busybox:1.37.0@sha256:bdf57e528e45e4433820e045b29b4597825a1c9e38353532d90a01445013f82e'
 mutate "docker socket on traefik" "Docker socket" compose traefik 2 after '^    volumes:' '      - /var/run/docker.sock:/var/run/docker.sock:ro'
 mutate "platform.app label on cloudflared" "platform.app label" compose cloudflared 2 after '^  cloudflared:' '    labels:\n      platform.app: cloudflared'
