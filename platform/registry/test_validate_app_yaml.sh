@@ -83,6 +83,18 @@ mutate "port too large" "port '70000'" 's/^port: 8080/port: 70000/'
 mutate "port not a number" "port 'http'" 's/^port: 8080/port: http/'
 mutate "port as a string" "port must be an unquoted value" 's/^port: 8080/port: "8080"/'
 mutate "unknown access" "access 'everyone'" 's/^access: family/access: everyone/'
+mutate "notifs yes" "notifs 'yes' must be true or false" 's/^access: family/access: family\nnotifs: yes/'
+mutate "notifs 1" "notifs '1' must be true or false" 's/^access: family/access: family\nnotifs: 1/'
+mutate "notifs quoted" "notifs must be an unquoted value" 's/^access: family/access: family\nnotifs: "true"/'
+mutate "notifs single-quoted" "notifs must be an unquoted value" "s/^access: family/access: family\nnotifs: 'true'/"
+mutate "notifs empty" "notifs must not be empty" 's/^access: family/access: family\nnotifs:/'
+for nv in true false; do
+  rm -rf "${cases:?}/chores"
+  mkdir -p "$cases/chores"
+  sed -e "s/^access: family/access: family\nnotifs: $nv/" "$example" > "$cases/chores/app.yaml"
+  run_cmd "$validator" "$cases/chores/app.yaml"
+  expect_rc "notifs: $nv is valid" 0
+done
 mutate "owner as an email" "owner must be a short handle, not an email" "s/^owner: family/owner: bob${at}home/"
 mutate "owner bad shape" "owner 'Bob'" 's/^owner: family/owner: Bob/'
 mutate "duplicate job name" "duplicate job name 'daily-digest'" 's/name: send-reminder/name: daily-digest/'

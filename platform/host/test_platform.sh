@@ -46,17 +46,21 @@ reject_case() {
 # at a stub helper and a state tree in the scratch dir. The real paths are asserted below.
 HELPER="$T_TMP/new-db-helper.sh"
 HELPER_ARGS="$T_TMP/new-db-helper.args"
+NK_HELPER="$T_TMP/notifs-key-helper.sh"
+NK_REC="$T_TMP/notifs-key-helper.rec"
 DEPLOY_STUB="$T_TMP/deploy-helper.sh"
 DEPLOY_REC="$T_TMP/deploy-helper.rec"
 STATE_TREE="$T_TMP/state-tree"
 copy="$T_TMP/platform-under-test.sh"
 sed -e "s#^readonly NEW_DB_HELPER=.*#readonly NEW_DB_HELPER='$HELPER'#" \
+  -e "s#^readonly NOTIFS_KEY_HELPER=.*#readonly NOTIFS_KEY_HELPER='$NK_HELPER'#" \
   -e "s#^readonly DEPLOY_HELPER=.*#readonly DEPLOY_HELPER='$DEPLOY_STUB'#" \
   -e "s#^readonly DEPLOY_STATE_DIR=.*#readonly DEPLOY_STATE_DIR='$STATE_TREE'#" "$script" > "$copy"
 if grep -qF "readonly NEW_DB_HELPER='$HELPER'" "$copy" && grep -qF "readonly DEPLOY_HELPER='$DEPLOY_STUB'" "$copy" &&
   grep -qF "readonly DEPLOY_STATE_DIR='$STATE_TREE'" "$copy"; then _pass; else _fail "the helper and state paths in the test copy were rewritten"; fi
 run_copy() { run_cmd env LC_ALL=en_US.UTF-8 SSH_ORIGINAL_COMMAND="$1" bash "$copy"; }
 if grep -qF "readonly NEW_DB_HELPER='/opt/platform/data/new-db.sh'" "$script"; then _pass; else _fail "the real helper path is /opt/platform/data/new-db.sh"; fi
+if grep -qF "readonly NOTIFS_KEY_HELPER='/opt/platform/data/notifs-key.sh'" "$script"; then _pass; else _fail "the real notifs-key helper path is /opt/platform/data/notifs-key.sh"; fi
 if grep -qF "readonly DEPLOY_HELPER='/opt/platform/deploy/deploy.sh'" "$script"; then _pass; else _fail "the real deploy helper path is /opt/platform/deploy/deploy.sh"; fi
 if grep -qF "readonly DEPLOY_STATE_DIR='/var/lib/platform/deploy'" "$script"; then _pass; else _fail "the real deploy state path is /var/lib/platform/deploy"; fi
 
@@ -188,6 +192,31 @@ if [ -e "$HELPER_ARGS" ]; then _fail "an invalid app never reaches the helper"; 
 run_copy "new-db myapp extra"
 expect_rc "new-db with an extra argument is rejected before the helper" 2
 if [ -e "$HELPER_ARGS" ]; then _fail "an extra argument never reaches the helper"; else _pass; fi
+
+# notifs-key hands over to its installed helper: the app name only as argv, stdin passed through, environment scrubbed.
+rm -f "$NK_HELPER" "$NK_REC"
+t_reset_calls
+run_copy "notifs-key myapp"
+expect_rc "notifs-key with the helper absent exits 1" 1
+expect_out_has "notifs-key with the helper absent says how to install it" "make host-data"
+expect_eq "notifs-key with the helper absent makes no stub call" "$(t_calls)" ""
+printf '#!/usr/bin/env bash\nprintf "%%s\\n" "$#:$1:${NOTIFS_KEY_SECRETS_ROOT-unset}:$(cat)" > "%s"\necho "nk helper ran"\nexit 5\n' "$NK_REC" > "$NK_HELPER"
+chmod 644 "$NK_HELPER"
+run_copy "notifs-key myapp"
+expect_rc "notifs-key with a non-executable helper exits 1" 1
+chmod 755 "$NK_HELPER"
+NOTIFS_KEY_SECRETS_ROOT=/caller/chosen run_cmd bash -c 'printf "L1\nL2\n" | env LC_ALL=en_US.UTF-8 SSH_ORIGINAL_COMMAND="notifs-key my-app" bash "$0"' "$copy"
+expect_rc "notifs-key returns the helper's exit code" 5
+expect_out_has "notifs-key runs the helper" "nk helper ran"
+expect_eq "notifs-key passes only the app name, stdin through, and scrubs NOTIFS_KEY_*" "$(tr '\n' '|' < "$NK_REC")" "1:my-app:unset:L1|L2|"
+rm -f "$NK_REC"
+run_copy "notifs-key My_App"
+expect_rc "notifs-key with an invalid app is rejected before the helper" 2
+run_copy "notifs-key"
+expect_rc "notifs-key with no argument is rejected" 2
+run_copy "notifs-key myapp extra"
+expect_rc "notifs-key with an extra argument is rejected" 2
+if [ -e "$NK_REC" ]; then _fail "a rejected notifs-key never reaches the helper"; else _pass; fi
 
 # deploy and rollback: stdin reaches the helper unchanged, and no DEPLOY_* variable does, hook by hook. DEPLOY_VALIDATOR
 # and DEPLOY_SKIP_REGISTRY would let a caller swap the validator or skip the registry login, so each is asserted alone.

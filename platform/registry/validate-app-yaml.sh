@@ -19,7 +19,7 @@ here="$(cd "$(dirname "$0")" && pwd)"
 APP_RE='^[a-z][a-z0-9-]{1,30}$'
 JOB_RE='^[a-z][a-z0-9_-]{0,62}$'
 TEMPLATES=" go-react go-htmx fastapi-react flask node-hono "
-TOP_KEYS=" schema_version name owner purpose template memory_cap port health_path access jobs volumes "
+TOP_KEYS=" schema_version name owner purpose template memory_cap port health_path access notifs jobs volumes "
 TOP_REQUIRED="schema_version name owner purpose template memory_cap port"
 JOB_KEYS=" name schedule timeout catch_up "
 VOL_KEYS=" name path "
@@ -70,7 +70,7 @@ raw_checks() {
     {
       s = $0
       sub(/^[ ]*(-[ ]+)?/, "", s)
-      if (match(s, /^(port|schema_version|catch_up):[ ]*["\047]/)) {
+      if (match(s, /^(port|schema_version|catch_up|notifs):[ ]*["\047]/)) {
         k = s; sub(/:.*/, "", k)
         printf("%s must be an unquoted value, not a string (line %d)\n", k, NR)
       }
@@ -376,6 +376,9 @@ check_scalar_keys() {
         elif ! [[ "$v" =~ ^/[A-Za-z0-9._~/%-]*$ ]]; then
           err "health_path '$v' may only contain letters, digits and . _ ~ / % -"
         fi
+        ;;
+      notifs)
+        case "$v" in true | false) ;; *) err "notifs '$v' must be true or false" ;; esac
         ;;
       access)
         case "$v" in family | public | restricted) ;; *) err "access '$v' must be family, public or restricted" ;; esac

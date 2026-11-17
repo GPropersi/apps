@@ -6,8 +6,9 @@
 # a case allowlist. This script is the only guard for the deploy identity, so it fails closed:
 # anything not explicitly accepted is rejected.
 #
-# Exit codes: 0 accepted and done, 1 accepted but failed (the helper is not installed for deploy, rollback and new-db;
-# or `current` found an unreadable or malformed tag file), 2 rejected. deploy, rollback and new-db hand over to their
+# Exit codes: 0 accepted and done, 1 accepted but failed (the helper is not installed for deploy, rollback, new-db and
+# notifs-key; or `current` found an unreadable or malformed tag file), 2 rejected. deploy, rollback, new-db and
+# notifs-key (stdin: 4 key lines) hand over to their
 # helper, whose exit code is the result. `current <app>` is the one read-only arm without a helper.
 set -euo pipefail
 
@@ -19,13 +20,14 @@ readonly APP_RE='^[a-z][a-z0-9-]{1,30}$'
 readonly TAG_RE='^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$'
 # Installed by install-data.sh (a fixed path: the dispatcher takes no override, it is the deploy identity's only guard).
 readonly NEW_DB_HELPER='/opt/platform/data/new-db.sh'
+readonly NOTIFS_KEY_HELPER='/opt/platform/data/notifs-key.sh'
 # Installed by install-deploy-user.sh (fixed paths, no override, for the same reason).
 readonly DEPLOY_HELPER='/opt/platform/deploy/deploy.sh'
 readonly DEPLOY_STATE_DIR='/var/lib/platform/deploy'
 
 usage() {
   cat >&2 <<'EOF'
-usage: platform deploy <app> <tag> | rollback <app> | current <app> | new-db <app> | ls
+usage: platform deploy <app> <tag> | rollback <app> | current <app> | new-db <app> | notifs-key <app> | ls
 EOF
 }
 
@@ -186,6 +188,17 @@ case "$sub" in
     fi
     # Scrubbed environment: the helper honours NEW_DB_* test overrides, which a caller must never be able to set.
     exec env -i "PATH=$PATH" "HOME=${HOME:-/}" LC_ALL=C "$NEW_DB_HELPER" "${words[1]}"
+    ;;
+  notifs-key)
+    need_args 1
+    valid_app
+    if [ ! -f "$NOTIFS_KEY_HELPER" ] || [ ! -x "$NOTIFS_KEY_HELPER" ]; then
+      logger -t platform "notifs-key helper missing: $NOTIFS_KEY_HELPER" || true
+      echo "platform: notifs-key is not installed on this host: run \`make host-data HOST=<alias> ARGS=install\`" >&2
+      exit 1
+    fi
+    # Scrubbed environment (the helper honours NOTIFS_KEY_* test overrides); stdin (the 4 key lines) passes through.
+    exec env -i "PATH=$PATH" "HOME=${HOME:-/}" LC_ALL=C "$NOTIFS_KEY_HELPER" "${words[1]}"
     ;;
   ls)
     need_args 0

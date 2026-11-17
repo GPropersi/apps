@@ -53,10 +53,26 @@ func TestMinimalAppWithoutJobs(t *testing.T) {
 	}
 }
 
+func TestNotifsKeyIsAccepted(t *testing.T) {
+	for _, v := range []string{"true", "false"} {
+		if _, err := parse(t, base+"notifs: "+v+"\n"); err != nil {
+			t.Fatalf("notifs: %s rejected: %v", v, err)
+		}
+	}
+	if _, err := parse(t, base); err != nil {
+		t.Fatalf("a file without notifs must still load: %v", err)
+	}
+}
+
 func TestInvalidFilesAreRejected(t *testing.T) {
 	jobs := func(body string) string { return base + "jobs:\n" + body }
 	cases := map[string]string{
 		"unknown top-level key":   base + "extra: 1\n",
+		"notifs yes":              base + "notifs: yes\n",
+		"notifs 1":                base + "notifs: 1\n",
+		"quoted notifs":           base + "notifs: \"true\"\n",
+		"single-quoted notifs":    base + "notifs: 'true'\n",
+		"empty notifs":            base + "notifs:\n",
 		"unknown job key":         jobs("  - name: a\n    timeout: 5s\n    retries: 3\n"),
 		"quoted catch_up":         jobs("  - name: a\n    timeout: 5s\n    catch_up: \"true\"\n"),
 		"catch_up not a bool":     jobs("  - name: a\n    timeout: 5s\n    catch_up: yes\n"),

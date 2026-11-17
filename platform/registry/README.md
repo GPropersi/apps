@@ -28,6 +28,7 @@ The file is written in the small YAML subset read by `platform/lib/yaml-subset.s
 | `port` | yes | Integer 1 to 65535, unquoted. |
 | `health_path` | no | Starts with `/`; only letters, digits and `. _ ~ / % -` after it. Also gates routing: keep it cheap, unauthenticated and answering 2xx or 3xx within 3s, because Traefik probes it every 5s and a failing or slow response drops the app to the down page until it recovers. |
 | `access` | no | `family` (default when absent), `public` or `restricted`. Records intent only: no email lists belong in the file. |
+| `notifs` | no | `true` or `false` (default `false`), unquoted. `true` opts the app in to 4irl-notifs: only then does `platform notifs-key <app>` accept a key for it (see `../data/README.md`). The jobs runner accepts and ignores it. Anything else (`yes`, `1`, a quoted value) is an error. |
 | `jobs` | no | A non-empty list of maps (below). |
 | `volumes` | no | A non-empty list of 1 to 4 maps (below). |
 
