@@ -132,6 +132,17 @@ expect_out_has_text "$modinfo" "CGO_ENABLED=0" "go version -m reads the binary (
 if grep -qE '^\s+build\s+-tags=' <<< "$modinfo"; then _fail "the binary was built with -tags" "$(grep -E 'build\s+-tags' <<< "$modinfo")"; else _pass; fi
 if grep -aq 'ACCESS_DEV_EMAIL' "$T_TMP/server"; then _fail "the dev identity code (ACCESS_DEV_EMAIL) is compiled into the image"; else _pass; fi
 
+# The binary carries its own zoneinfo (platform.ScheduleZone needs America/Los_Angeles). distroless/static ships zoneinfo
+# and a dev host's go test passes either way, so neither proves the `time/tzdata` import is still there: the package
+# must be in the server's dependency list, and the zone table it embeds (a zone name no other part of the binary
+# carries) must be in the binary built above, which is the stripped Dockerfile output.
+if deps="$(cd "$here" && go list -deps ./cmd/server 2> "$T_TMP/go-list-err")"; then
+  if grep -qx 'time/tzdata' <<< "$deps"; then _pass; else _fail "the server does not import time/tzdata (go list -deps ./cmd/server)"; fi
+else
+  _fail "go list -deps ./cmd/server" "$(cat "$T_TMP/go-list-err")"
+fi
+if grep -aq 'Antarctica/Troll' "$T_TMP/server"; then _pass; else _fail "the built binary does not embed the time/tzdata zoneinfo (no zone-name table in it)"; fi
+
 # ---- Postgres and Redis ----
 
 docker network create "$NET" > /dev/null || { echo "FAIL: network create"; exit 1; }
@@ -292,7 +303,7 @@ fi
 if grep -q -- '--- SKIP' "$T_TMP/go-live.txt"; then _fail "a live test was skipped (a skip is not a pass)" "$(grep -- '--- SKIP' "$T_TMP/go-live.txt")"; fi
 live_passed="$(grep -c -E '^--- PASS: TestLive' "$T_TMP/go-live.txt")"
 echo "test_image: $live_passed live tests passed"
-if [ "$live_passed" -ge 3 ]; then _pass; else _fail "fewer than 3 live tests passed ($live_passed): the live tests did not really run"; fi
+if [ "$live_passed" -ge 4 ]; then _pass; else _fail "fewer than 4 live tests passed ($live_passed): the live tests did not really run"; fi
 
 # ---- missing Access settings make the container exit, not serve ----
 

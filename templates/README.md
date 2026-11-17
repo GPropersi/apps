@@ -22,6 +22,43 @@ The placeholder is `tmplgoreact`. It appears in `app.yaml`, the Go module path, 
 underscores), so a name such as `go` or `map` never collides with a Go keyword. The string must not appear anywhere else
 in a template: `app-new` refuses a scaffold that still carries it, and `internal/platform/` must never name it.
 
+## Files a new app rewrites
+
+A scaffold is a working sample (a notes list and one `add-note` job), not a skeleton. The first real app replaces
+the sample, and these starter files carry assumptions about it:
+
+- `migrations/00001_init.sql`, `sql/queries.sql` and the generated `internal/app/db/` (run `make app-sqlc APP=<name>`):
+  the sample `items` and `job_runs` tables and queries.
+- `internal/app/server.go` routes and handlers, and `internal/app/jobs.go` (`Funcs()` and the `add-note` handler);
+  `app.yaml` `jobs[]` must keep matching `Funcs()` (`platform.VerifyJobs` fails startup otherwise).
+- `internal/app/fakes_test.go` (`fakeStore` implements the sample `db.Querier`; `fakeQueue.Enqueue` and
+  `fakeQueue.EnqueueUnique` accept only `add-note`) and the tests that use them (`server_test.go`, `jobs_test.go`, `run_test.go`).
+- `test_image.sh`: its job and table assertions (`/_jobs/add-note`, `select count(*) from items`, the `items` rows) and
+  the `/api/me` probe.
+- `web/src/` pages and tests, and `web/index.html`'s title.
+
+`internal/platform/` is not rewritten: it is shared and byte-identical (see below).
+
+## Reaching 4irl-notifs (`notifs: true`)
+
+An app that sends notifications (phone push, or a person's Discord or webhook destinations) opts in with `notifs: true`
+in `app.yaml` (default false). Only those apps get a `dak_` key written to the host, and it arrives as the files
+`/run/platform/secrets/notifs-key`, `notifs-access-client-id`, `notifs-access-client-secret` and `notifs-base-url`
+after the platform's manual notifs-exchange workflow has run. The files do not exist on a first deploy, and the app
+must be healthy without them.
+
+Use `platform.NewNotifsClient(platform.NotifsSecretsDir, appID)` with `appID` from `platform.NotifsAppID(<app name>)`
+(`birthdays` -> `apps_birthdays`). It re-reads the files on every call, so a rotated key needs no restart; construct it
+freely, and call `Configured()` (no network) only where a missing key should fail the run, such as a scheduled scan,
+before queueing work. Errors are `ErrNotifsUnconfigured`, `ErrNotifsRetryable` (network or 5xx) and `*NotifsError`
+(`Status`, delivery-api's message); it logs the operation, status and duration, never a key, email or URL.
+
+Other helpers a scheduled job needs: `Jobs.Queue` (the app's queue client, set by `Run`) with `EnqueueUnique(ctx, job,
+key, payload, ttl)` to queue at most one job per key (key matches `[A-Za-z0-9._:-]{1,128}`, ttl 1s to 7 days, else
+`ErrInvalidDedupeKey`; the key is stored at `<prefix>jobs:dedupe:<job>:<key>`; an ambiguous LPUSH failure can
+double-enqueue, so the consumer must be idempotent), and `platform.ScheduleZone()` (America/Los_Angeles, embedded
+zoneinfo) to decide "today" for a daily job.
+
 ## Updating the shared helpers
 
 `templates/go-react/internal/platform/` is copied byte-for-byte into every go-react app (an app's Docker build context

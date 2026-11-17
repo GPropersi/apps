@@ -14,10 +14,11 @@ type Transactor interface {
 	InTx(ctx context.Context, fn func(db.Querier) error) error
 }
 
-// Jobs holds the handlers for the jobs declared in app.yaml. Tx is set once the database is up, before the listener
-// opens.
+// Jobs holds the handlers for the jobs declared in app.yaml. Tx and Queue are set by Run (the database and the queue
+// client) before the listener opens, so a scheduled job can hand work to a queued job through Queue.
 type Jobs struct {
 	Tx     Transactor
+	Queue  Enqueuer
 	Logger *slog.Logger
 }
 

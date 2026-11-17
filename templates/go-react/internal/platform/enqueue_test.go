@@ -19,6 +19,38 @@ type fakeRedis struct {
 	pushErr  error
 	commands []string
 	pushed   map[string][]string
+
+	keys        map[string]string        // dedupe keys currently set
+	ttls        map[string]time.Duration // ttl each key was set with
+	setErr      error
+	delCtxErrs  []error // ctx.Err() seen by each Del
+	delCtxHasDL []bool  // whether each Del context carried a deadline
+}
+
+func (f *fakeRedis) SetNX(_ context.Context, key string, value any, expiration time.Duration) *redis.BoolCmd {
+	f.commands = append(f.commands, "SETNX "+key)
+	if f.setErr != nil {
+		return redis.NewBoolResult(false, f.setErr)
+	}
+	if f.keys == nil {
+		f.keys, f.ttls = map[string]string{}, map[string]time.Duration{}
+	}
+	if _, ok := f.keys[key]; ok {
+		return redis.NewBoolResult(false, nil)
+	}
+	f.keys[key], f.ttls[key] = value.(string), expiration
+	return redis.NewBoolResult(true, nil)
+}
+
+func (f *fakeRedis) Del(ctx context.Context, keys ...string) *redis.IntCmd {
+	for _, k := range keys {
+		f.commands = append(f.commands, "DEL "+k)
+		delete(f.keys, k)
+	}
+	f.delCtxErrs = append(f.delCtxErrs, ctx.Err())
+	_, hasDL := ctx.Deadline()
+	f.delCtxHasDL = append(f.delCtxHasDL, hasDL)
+	return redis.NewIntResult(int64(len(keys)), nil)
 }
 
 func (f *fakeRedis) LLen(_ context.Context, key string) *redis.IntCmd {
@@ -261,5 +293,127 @@ func TestNewRedisClientOptions(t *testing.T) {
 	o := c.Options()
 	if o.PoolSize != 2 || o.DialTimeout == 0 || o.ReadTimeout == 0 || o.WriteTimeout == 0 || o.MaxRetries != 0 || o.Addr != "redis:6379" {
 		t.Fatalf("options %+v", o)
+	}
+}
+
+const testDedupeKey = "myapp:jobs:dedupe:add-note:rem-1"
+
+func TestEnqueueUniqueQueuesOnceForTheSameKey(t *testing.T) {
+	f := &fakeRedis{}
+	e := newTestEnqueuer(t, f)
+	id, queued, err := e.EnqueueUnique(context.Background(), "add-note", "rem-1", map[string]int{"a": 1}, 20*time.Hour)
+	if err != nil || !queued || !testULIDRE.MatchString(id) {
+		t.Fatalf("first call = %q %v %v", id, queued, err)
+	}
+	if f.keys[testDedupeKey] != id || f.ttls[testDedupeKey] != 20*time.Hour {
+		t.Fatalf("dedupe key = %q ttl %v, want the job id and 20h (keys %v)", f.keys[testDedupeKey], f.ttls[testDedupeKey], f.keys)
+	}
+	id2, queued, err := e.EnqueueUnique(context.Background(), "add-note", "rem-1", map[string]int{"a": 1}, 20*time.Hour)
+	if err != nil || queued || id2 != "" {
+		t.Fatalf("second call = %q %v %v, want a no-op", id2, queued, err)
+	}
+	if got := len(f.pushed["myapp:jobs:queue"]); got != 1 {
+		t.Fatalf("queued %d jobs, want 1", got)
+	}
+	if _, queued, _ := e.EnqueueUnique(context.Background(), "add-note", "rem-2", nil, time.Hour); !queued {
+		t.Fatal("a different key must queue")
+	}
+	if _, queued, _ := e.EnqueueUnique(context.Background(), "other-job", "rem-1", nil, time.Hour); !queued {
+		t.Fatal("the same key under another job must queue")
+	}
+	for _, c := range f.commands {
+		if !strings.Contains(c, " myapp:") {
+			t.Errorf("command %q touches a key outside the prefix", c)
+		}
+	}
+}
+
+func TestEnqueueUniqueFullQueueStoresNoKey(t *testing.T) {
+	f := &fakeRedis{llen: MaxQueueLen}
+	_, queued, err := newTestEnqueuer(t, f).EnqueueUnique(context.Background(), "add-note", "rem-1", nil, time.Hour)
+	if !errors.Is(err, ErrQueueFull) || queued {
+		t.Fatalf("err = %v queued = %v, want ErrQueueFull", err, queued)
+	}
+	if len(f.keys) != 0 || len(f.pushed) != 0 {
+		t.Fatalf("stored keys %v / pushed %v", f.keys, f.pushed)
+	}
+	for _, c := range f.commands {
+		if strings.HasPrefix(c, "SETNX") {
+			t.Fatalf("SET issued on a full queue: %v", f.commands)
+		}
+	}
+}
+
+func TestEnqueueUniqueLPushFailureDeletesTheKeyOnAFreshContext(t *testing.T) {
+	f := &fakeRedis{pushErr: errors.New("OOM x")}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // the caller's context is already dead when the cleanup runs
+	_, queued, err := newTestEnqueuer(t, f).EnqueueUnique(ctx, "add-note", "rem-1", nil, time.Hour)
+	if err == nil || queued || !strings.Contains(err.Error(), "OOM") {
+		t.Fatalf("err = %v queued = %v, want the LPUSH error", err, queued)
+	}
+	if _, ok := f.keys[testDedupeKey]; ok {
+		t.Fatal("the dedupe key survived a failed LPUSH")
+	}
+	if len(f.delCtxErrs) != 1 || f.delCtxErrs[0] != nil || !f.delCtxHasDL[0] {
+		t.Fatalf("Del contexts: errs %v deadlines %v, want one live context with a deadline", f.delCtxErrs, f.delCtxHasDL)
+	}
+	// A retry (healthy Redis) can enqueue again.
+	f.pushErr = nil
+	if _, queued, err := newTestEnqueuer(t, f).EnqueueUnique(context.Background(), "add-note", "rem-1", nil, time.Hour); err != nil || !queued {
+		t.Fatalf("retry = %v %v, want queued", queued, err)
+	}
+}
+
+func TestEnqueueUniqueRefusesBadInputBeforeAnyRedisCommand(t *testing.T) {
+	cases := map[string]struct {
+		job, key string
+		ttl      time.Duration
+		want     error
+	}{
+		"undeclared job": {"nope", "k", time.Hour, ErrUndeclaredJob},
+		"empty key":      {"add-note", "", time.Hour, ErrInvalidDedupeKey},
+		"space in key":   {"add-note", "a b", time.Hour, ErrInvalidDedupeKey},
+		"glob in key":    {"add-note", "a*", time.Hour, ErrInvalidDedupeKey},
+		"long key":       {"add-note", strings.Repeat("a", 129), time.Hour, ErrInvalidDedupeKey},
+		"ttl too short":  {"add-note", "k", time.Second - 1, ErrInvalidDedupeKey},
+		"zero ttl":       {"add-note", "k", 0, ErrInvalidDedupeKey},
+		"ttl too long":   {"add-note", "k", 7*24*time.Hour + time.Second, ErrInvalidDedupeKey},
+	}
+	for name, c := range cases {
+		f := &fakeRedis{}
+		_, queued, err := newTestEnqueuer(t, f).EnqueueUnique(context.Background(), c.job, c.key, nil, c.ttl)
+		if !errors.Is(err, c.want) || queued {
+			t.Errorf("%s: err = %v queued = %v, want %v", name, err, queued, c.want)
+		}
+		if len(f.commands) != 0 {
+			t.Errorf("%s: redis commands issued: %v", name, f.commands)
+		}
+	}
+	for _, ok := range []struct {
+		key string
+		ttl time.Duration
+	}{{"a", time.Second}, {strings.Repeat("A", 128), 7 * 24 * time.Hour}, {"A.b_c:d-e", time.Hour}} {
+		if _, queued, err := newTestEnqueuer(t, &fakeRedis{}).EnqueueUnique(context.Background(), "add-note", ok.key, nil, ok.ttl); err != nil || !queued {
+			t.Errorf("key %q ttl %v refused: %v", ok.key, ok.ttl, err)
+		}
+	}
+}
+
+func TestEnqueueUniqueOversizeAndSetErrorStoreNothing(t *testing.T) {
+	f := &fakeRedis{}
+	if _, _, err := newTestEnqueuer(t, f).EnqueueUnique(context.Background(), "add-note", "k", strings.Repeat("a", MaxEnvelopeBytes), time.Hour); !errors.Is(err, ErrEnvelopeTooLarge) {
+		t.Fatalf("err = %v, want ErrEnvelopeTooLarge", err)
+	}
+	if len(f.commands) != 0 {
+		t.Fatalf("commands %v", f.commands)
+	}
+	g := &fakeRedis{setErr: errors.New("NOPERM nope")}
+	_, queued, err := newTestEnqueuer(t, g).EnqueueUnique(context.Background(), "add-note", "k", nil, time.Hour)
+	if err == nil || queued || !strings.Contains(err.Error(), "NOPERM") {
+		t.Fatalf("err = %v queued = %v", err, queued)
+	}
+	if len(g.pushed) != 0 {
+		t.Fatalf("pushed %v after a failed SET", g.pushed)
 	}
 }

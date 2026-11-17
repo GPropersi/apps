@@ -127,6 +127,53 @@ func TestLiveFullQueueRefusesAt1000(t *testing.T) {
 	}
 }
 
+func TestLiveEnqueueUniqueQueuesOnceAndKeepsKeysInThePrefix(t *testing.T) {
+	l := loadLive(t)
+	admin := liveReset(t, l)
+	ctx := context.Background()
+	e, _ := l.enqueuer(t, l.app+":", "add-note")
+	id, queued, err := e.EnqueueUnique(ctx, "add-note", "rem-1:2026", nil, time.Hour)
+	if err != nil || !queued || id == "" {
+		t.Fatalf("first call = %q %v %v, want queued", id, queued, err)
+	}
+	if _, queued, err := e.EnqueueUnique(ctx, "add-note", "rem-1:2026", nil, time.Hour); err != nil || queued {
+		t.Fatalf("second call queued=%v err=%v, want a no-op", queued, err)
+	}
+	if n, _ := admin.LLen(ctx, l.app+":jobs:queue").Result(); n != 1 {
+		t.Fatalf("queue length %d, want 1", n)
+	}
+	key := l.app + ":jobs:dedupe:add-note:rem-1:2026"
+	if got, _ := admin.Get(ctx, key).Result(); got != id {
+		t.Fatalf("dedupe key holds %q, want the job id %q", got, id)
+	}
+	if ttl, _ := admin.TTL(ctx, key).Result(); ttl <= 0 || ttl > time.Hour {
+		t.Fatalf("dedupe key ttl = %v, want within (0, 1h]", ttl)
+	}
+	// An enqueuer on another prefix is refused by the ACL (already at the LLEN room check, before any SET), and a
+	// refused call must leave nothing behind.
+	other, _ := l.enqueuer(t, "zz"+l.app+":", "add-note")
+	if _, _, err := other.EnqueueUnique(ctx, "add-note", "k", nil, time.Hour); err == nil || !strings.Contains(err.Error(), "NOPERM") {
+		t.Fatalf("err = %v, want NOPERM", err)
+	}
+	if keys, _ := admin.Keys(ctx, "zz*").Result(); len(keys) != 0 {
+		t.Fatalf("keys left by the refused call: %v", keys)
+	}
+	// The app's ACL must permit both commands EnqueueUnique issues on the dedupe key, and refuse them outside the prefix.
+	_, app := l.enqueuer(t, l.app+":", "add-note")
+	if ok, err := app.SetNX(ctx, l.app+":jobs:dedupe:x", "id", time.Minute).Result(); err != nil || !ok {
+		t.Fatalf("SetNX in prefix = %v, %v", ok, err)
+	}
+	if err := app.Del(ctx, l.app+":jobs:dedupe:x").Err(); err != nil {
+		t.Fatalf("Del in prefix: %v", err)
+	}
+	if err := app.Del(ctx, "zz"+l.app+":jobs:dedupe:x").Err(); err == nil || !strings.Contains(err.Error(), "NOPERM") {
+		t.Fatalf("Del outside prefix err = %v, want NOPERM", err)
+	}
+	if err := app.SetNX(ctx, "zz"+l.app+":jobs:dedupe:x", "id", time.Minute).Err(); err == nil || !strings.Contains(err.Error(), "NOPERM") {
+		t.Fatalf("SetNX outside prefix err = %v, want NOPERM", err)
+	}
+}
+
 func TestLiveNoPermOutsideThePrefix(t *testing.T) {
 	l := loadLive(t)
 	admin := liveReset(t, l)
