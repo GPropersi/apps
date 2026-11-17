@@ -1,0 +1,18 @@
+# name -> 4irl-notifs app_id vectors, read by BOTH the shell function (platform/lib/notifs-app-id.sh, tested in
+# platform/registry/test_notifs_app_id.sh) and the Go helper, so the two cannot drift.
+# Format: <name> TAB <app_id>, or <name> TAB REFUSED when the name must be rejected. Blank lines and # lines are ignored.
+birthdays	apps_birthdays
+my-app	apps_my_app
+chores	apps_chores
+a-b	apps_a_b
+a1	apps_a1
+abcdefghijklmnopqrstuvwxyz-ab-c	apps_abcdefghijklmnopqrstuvwxyz_ab_c
+Birthdays	REFUSED
+a	REFUSED
+-lead	REFUSED
+1lead	REFUSED
+my_app	REFUSED
+has space	REFUSED
+dot.ted	REFUSED
+abcdefghijklmnopqrstuvwxyz0123456789	REFUSED
+abcdefghijklmnopqrstuvwxyz-ab-cd	REFUSED
