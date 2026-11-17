@@ -94,8 +94,9 @@ func (s *fakeStore) count() int {
 }
 
 type fakeQueue struct {
-	err   error
-	calls []map[string]string
+	err      error
+	calls    []map[string]string
+	seenKeys map[string]bool
 }
 
 func (q *fakeQueue) Enqueue(_ context.Context, job string, payload any) (string, error) {
@@ -107,6 +108,21 @@ func (q *fakeQueue) Enqueue(_ context.Context, job string, payload any) (string,
 	}
 	q.calls = append(q.calls, payload.(map[string]string))
 	return "01JTESTULID0000000000000000", nil
+}
+
+func (q *fakeQueue) EnqueueUnique(ctx context.Context, job, key string, payload any, _ time.Duration) (string, bool, error) {
+	if q.seenKeys == nil {
+		q.seenKeys = map[string]bool{}
+	}
+	if q.seenKeys[job+":"+key] {
+		return "", false, nil
+	}
+	id, err := q.Enqueue(ctx, job, payload)
+	if err != nil {
+		return "", false, err
+	}
+	q.seenKeys[job+":"+key] = true
+	return id, true, nil
 }
 
 type testIdentityKey struct{}

@@ -64,6 +64,7 @@ func fakeDeps(t *testing.T, backend *fakeBackend, allowListen bool) (Deps, *[]st
 			order = append(order, "queue")
 			return &fakeQueue{}, nil, nil
 		},
+		LoadZone: platform.ScheduleZone,
 		Listen: func(addr string) (net.Listener, error) {
 			if !allowListen {
 				t.Error("the listener was opened although startup failed")
@@ -129,6 +130,13 @@ func TestRunStopsOnEachStartupError(t *testing.T) {
 		"queue": func(d *Deps) {
 			d.NewQueue = func(platform.Config, []string) (Enqueuer, io.Closer, error) { return nil, nil, boom }
 		},
+		"queue not wired": func(d *Deps) {
+			d.NewQueue = func(platform.Config, []string) (Enqueuer, io.Closer, error) { return nil, nil, nil }
+		},
+		"schedule zone": func(d *Deps) {
+			d.LoadZone = func() (*time.Location, error) { return nil, boom }
+		},
+		"no schedule zone loader": func(d *Deps) { d.LoadZone = nil },
 	} {
 		d, _ := fakeDeps(t, &fakeBackend{fakeStore: newFakeStore()}, false)
 		mutate(&d)
@@ -173,6 +181,86 @@ func TestRunClosesTheQueueClientOnShutdown(t *testing.T) {
 	if got := cc.n.Load(); got != 1 {
 		t.Fatalf("queue client closed %d times, want 1", got)
 	}
+}
+
+// startRun runs Run with d until the listener is open, calls check, then shuts it down and requires a clean exit.
+func startRun(t *testing.T, d Deps, check func(baseURL string)) {
+	t.Helper()
+	lnCh := make(chan net.Listener, 1)
+	inner := d.Listen
+	d.Listen = func(addr string) (net.Listener, error) {
+		ln, err := inner(addr)
+		lnCh <- ln
+		return ln, err
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- Run(ctx, d) }()
+	select {
+	case ln := <-lnCh:
+		if ln == nil {
+			cancel()
+			t.Fatal("the listener was not opened")
+		}
+		check("http://" + ln.Addr().String())
+	case err := <-done:
+		cancel()
+		t.Fatalf("Run returned before listening: %v", err)
+	case <-time.After(15 * time.Second):
+		cancel()
+		t.Fatal("Run never opened the listener")
+	}
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("graceful shutdown returned %v", err)
+		}
+	case <-time.After(15 * time.Second):
+		t.Fatal("Run did not return after cancel")
+	}
+}
+
+func TestRunWiresTheQueueIntoJobsBeforeTheListenerOpens(t *testing.T) {
+	d, _ := fakeDeps(t, &fakeBackend{fakeStore: newFakeStore()}, true)
+	jobs := &Jobs{}
+	d.Jobs = jobs
+	queue := &fakeQueue{}
+	d.NewQueue = func(platform.Config, []string) (Enqueuer, io.Closer, error) { return queue, nil, nil }
+	var atListen Enqueuer
+	inner := d.Listen
+	d.Listen = func(addr string) (net.Listener, error) {
+		atListen = jobs.Queue
+		return inner(addr)
+	}
+	startRun(t, d, func(string) {})
+	if atListen == nil || atListen != Enqueuer(queue) {
+		t.Fatalf("Jobs.Queue when the listener opened = %v, want the queue client", atListen)
+	}
+	if jobs.Tx == nil || jobs.Logger == nil {
+		t.Fatalf("Jobs.Tx = %v, Jobs.Logger = %v, want both set", jobs.Tx, jobs.Logger)
+	}
+}
+
+func TestRunStartsAndServesWithNoNotifsFiles(t *testing.T) {
+	// Run reads no notifs-* file today (the app wires the client in a later step), so this guards the contract: with
+	// no notifs-* files (a first deploy before the key is delivered) constructing the client and starting the app
+	// must both work; only Configured() reports the missing key, and only the reminder scan calls it.
+	client := platform.NewNotifsClient(t.TempDir(), "apps_example")
+	if err := client.Configured(); !errors.Is(err, platform.ErrNotifsUnconfigured) {
+		t.Fatalf("Configured on an empty directory = %v, want ErrNotifsUnconfigured", err)
+	}
+	d, _ := fakeDeps(t, &fakeBackend{fakeStore: newFakeStore()}, true)
+	startRun(t, d, func(base string) {
+		resp, err := http.Get(base + "/healthz")
+		if err != nil {
+			t.Fatal(err)
+		}
+		_ = resp.Body.Close()
+		if resp.StatusCode != 200 {
+			t.Fatalf("healthz = %d", resp.StatusCode)
+		}
+	})
 }
 
 func TestRunServesThenShutsDownOnCancel(t *testing.T) {

@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	_ "time/tzdata" // embeds zoneinfo so platform.ScheduleZone works on any base image (test_image.sh asserts it)
 
 	"github.com/gpropersi/apps/apps/tmplgoreact/internal/app"
 )

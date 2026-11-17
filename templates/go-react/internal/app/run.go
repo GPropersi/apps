@@ -39,6 +39,8 @@ type Deps struct {
 	NewAuth    func(ctx context.Context, cfg platform.Config) (Auth, error)
 	NewQueue   func(cfg platform.Config, declared []string) (Enqueuer, io.Closer, error) // closer may be nil
 	Listen     func(addr string) (net.Listener, error)
+	LoadZone   func() (*time.Location, error) // the schedule zone; Run fails startup if it cannot load
+	Jobs       *Jobs                          // optional: a test passes one to inspect it; Run creates one when nil
 }
 
 // ProductionDeps wires the real config, Postgres, Cloudflare Access, Redis and embedded files.
@@ -77,7 +79,8 @@ func ProductionDeps(version string, logger *slog.Logger) (Deps, error) {
 			}
 			return q, rdb, nil
 		},
-		Listen: func(addr string) (net.Listener, error) { return net.Listen("tcp", addr) },
+		Listen:   func(addr string) (net.Listener, error) { return net.Listen("tcp", addr) },
+		LoadZone: platform.ScheduleZone,
 	}, nil
 }
 
@@ -89,6 +92,14 @@ func Run(ctx context.Context, d Deps) error {
 	log := d.Logger
 	started := time.Now()
 
+	// Daily jobs decide "today" in the schedule zone; refuse to start without it (zoneinfo is embedded in the binary).
+	if d.LoadZone == nil {
+		return errors.New("startup: no schedule zone loader")
+	}
+	if _, err := d.LoadZone(); err != nil {
+		return fmt.Errorf("startup: %w", err)
+	}
+
 	cfg, err := d.LoadConfig()
 	if err != nil {
 		return fmt.Errorf("startup: %w", err)
@@ -97,7 +108,11 @@ func Run(ctx context.Context, d Deps) error {
 	if err != nil {
 		return fmt.Errorf("startup: %w", err)
 	}
-	jobs := &Jobs{Logger: log}
+	jobs := d.Jobs
+	if jobs == nil {
+		jobs = &Jobs{}
+	}
+	jobs.Logger = log
 	jobFuncs := jobs.Funcs()
 	if err := platform.VerifyJobs(declared, jobFuncs); err != nil {
 		return fmt.Errorf("startup: %w", err)
@@ -131,6 +146,10 @@ func Run(ctx context.Context, d Deps) error {
 	if queueCloser != nil {
 		defer func() { _ = queueCloser.Close() }()
 	}
+	if queue == nil {
+		return errors.New("startup: queue is not wired")
+	}
+	jobs.Queue = queue
 
 	srv := &Server{Store: backend, Queue: queue, Jobs: jobsHandler, Static: d.Static, Logger: log,
 		Auth: auth.Middleware, EmailOf: auth.EmailOf}

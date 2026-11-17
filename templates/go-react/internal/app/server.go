@@ -31,6 +31,9 @@ const (
 // Enqueuer queues a background job (platform.Enqueuer satisfies it).
 type Enqueuer interface {
 	Enqueue(ctx context.Context, job string, payload any) (string, error)
+	// EnqueueUnique queues the job at most once per key within ttl; it returns enqueued=false (and no error) when
+	// the key already exists.
+	EnqueueUnique(ctx context.Context, job, key string, payload any, ttl time.Duration) (id string, enqueued bool, err error)
 }
 
 // Server holds what the HTTP handlers need.
