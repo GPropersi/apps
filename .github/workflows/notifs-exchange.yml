@@ -1,0 +1,137 @@
+name: Notifs exchange
+
+# Manual only. After the first deploy of an app that sets `notifs: true` in its app.yaml, an operator runs this workflow
+# (inputs: `app`, empty for every registered notifs app; `dry-run`). Per app it exchanges this run's GitHub OIDC token
+# with 4irl-notifs for a fresh delivery key (registrar mode: name -> apps_<name>) and writes the key set to the host
+# through the restricted `notifs-key` command. Keys rotate on every exchange (the previous one stays valid for 24 h), so
+# after a failed write run it again within 24 h. It is a separate workflow on purpose: a failed exchange never breaks or
+# rolls back a deploy, and the registrar binding is exact on this one file, so this stable file is the identity.
+# `dry-run` runs only the exchange and prints the OIDC claims (workflow_ref, ref, environment) for the one-time approval;
+# it writes nothing. The deploy chain's rules apply (`make lint`, check-workflows.sh): main guard on the job that holds the
+# environment, values reach steps through env: only, a pinned SHA for every action. See apps/README.md, "Notifications".
+
+on:
+  workflow_dispatch:
+    inputs:
+      app:
+        description: "App name (empty: every app with notifs: true)"
+        type: string
+        required: false
+        default: ""
+      dry-run:
+        description: "Exchange only: print the OIDC claims, write nothing"
+        type: boolean
+        required: false
+        default: false
+
+permissions: {}
+
+jobs:
+  resolve:
+    name: resolve
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    outputs:
+      apps: ${{ steps.resolve.outputs.apps }}
+      has_apps: ${{ steps.resolve.outputs.has_apps }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Resolve the opted-in apps
+        id: resolve
+        env:
+          APP_INPUT: ${{ inputs.app }}
+        run: platform/ci/notifs-resolve.sh "$APP_INPUT"
+
+  exchange:
+    name: exchange
+    needs: resolve
+    if: github.ref == 'refs/heads/main' && needs.resolve.outputs.has_apps == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    # The OIDC token is minted for this job: its environment claim is `production`, the same environment the deploy job
+    # uses for the tailnet and host secrets, so the registrar binding is approved with it.
+    environment: production
+    permissions:
+      contents: read
+      id-token: write
+    strategy:
+      fail-fast: false
+      matrix:
+        app: ${{ fromJSON(needs.resolve.outputs.apps) }}
+    # One exchange per app at a time; a running exchange is never cancelled (a cancelled write after a minted key would
+    # leave the host holding the superseded key).
+    concurrency:
+      group: notifs-exchange-${{ matrix.app }}
+      cancel-in-progress: false
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Require the deploy host
+        env:
+          DEPLOY_HOST: ${{ vars.PLATFORM_DEPLOY_HOST }}
+        run: |
+          # A repository variable is never masked by Actions; keep the host name out of a public log if ssh echoes it.
+          if [ -n "$DEPLOY_HOST" ]; then echo "::add-mask::$DEPLOY_HOST"; fi
+          if [ -z "$DEPLOY_HOST" ]; then
+            echo "notifs-exchange: the repository variable PLATFORM_DEPLOY_HOST is empty; set it before running" >&2
+            exit 1
+          fi
+      - name: Derive the registrar name
+        id: name
+        env:
+          APP: ${{ matrix.app }}
+        run: |
+          name="$(platform/ci/notifs-exchange-name.sh "$APP")"
+          echo "name=$name" >> "$GITHUB_OUTPUT"
+      # The claim values come from decoding the OIDC token here, never from the action. The token is masked first.
+      - name: Print the OIDC claims (dry run)
+        if: inputs.dry-run
+        run: |
+          # The runner puts the OIDC request URL and token in the step's environment (id-token: write).
+          response="$(curl -fsS --max-time 30 -H "Authorization: Bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=notifs-delivery")"
+          token="$(jq -r '.value' <<< "$response")"
+          if [ -z "$token" ] || [ "$token" = null ]; then
+            echo "oidc: no token in the response" >&2
+            exit 1
+          fi
+          echo "::add-mask::$token"
+          platform/ci/oidc-claims.sh <<< "$token"
+      # continue-on-error is not used: a failed exchange fails this job (and only this workflow).
+      - name: Exchange the OIDC token for a key
+        id: notifs
+        uses: 4IRL/4irl-notifs/.github/actions/notifs-app@b29154bd75cd4c4db8ff2fafbde672f68928aadf # 4irl-notifs main @ b29154b
+        with:
+          name: ${{ steps.name.outputs.name }}
+          delivery_url: ${{ vars.NOTIFS_DELIVERY_URL }}
+          access_client_id: ${{ secrets.NOTIFS_ACCESS_CLIENT_ID }}
+          access_client_secret: ${{ secrets.NOTIFS_ACCESS_CLIENT_SECRET }}
+      # The action masks the key; this masks it again before any later step can echo it.
+      - name: Mask the key
+        env:
+          NOTIFS_KEY: ${{ steps.notifs.outputs.key }}
+        run: |
+          if [ -n "$NOTIFS_KEY" ]; then echo "::add-mask::$NOTIFS_KEY"; fi
+      - name: Join the tailnet
+        if: inputs.dry-run == false
+        uses: tailscale/github-action@064b10558093f38325e838ddea35486bdc6b1d5c # v4.4.0
+        with:
+          oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
+          oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
+          tags: tag:ci
+      - name: Install the key on the host
+        env:
+          APP: ${{ matrix.app }}
+          DRY_RUN: ${{ inputs.dry-run }}
+          DEPLOY_HOST: ${{ vars.PLATFORM_DEPLOY_HOST }}
+          NOTIFS_KEY: ${{ steps.notifs.outputs.key }}
+          NOTIFS_ACCESS_CLIENT_ID: ${{ secrets.NOTIFS_ACCESS_CLIENT_ID }}
+          NOTIFS_ACCESS_CLIENT_SECRET: ${{ secrets.NOTIFS_ACCESS_CLIENT_SECRET }}
+          NOTIFS_BASE_URL: ${{ vars.NOTIFS_DELIVERY_URL }}
+        run: platform/ci/notifs-key-install.sh "$APP"

@@ -190,7 +190,7 @@ real_wf="$(cd "$here/../.." && pwd)/.github/workflows"
 # real_root: a scratch repo holding copies of the real chain workflows.
 real_root() {
   new_root
-  cp "$real_wf/ci.yml" "$real_wf/app-deploy.yml" "$real_wf/app-deploy-one.yml" "$real_wf/app-rollback.yml" "$root/.github/workflows/"
+  cp "$real_wf/ci.yml" "$real_wf/app-deploy.yml" "$real_wf/app-deploy-one.yml" "$real_wf/app-rollback.yml" "$real_wf/notifs-exchange.yml" "$root/.github/workflows/"
   git -C "$root" add -A
 }
 
@@ -238,7 +238,94 @@ real_root; mut app-deploy-one.yml "s#packages: read#packages: write#"; run_check
 expect_fail "deploy declaring packages: write" "job deploy must declare packages: read"
 
 real_root; printf '  extra:\n    if: github.ref == '"'"'refs/heads/main'"'"'\n    runs-on: ubuntu-latest\n    environment: production\n    steps:\n      - run: true\n' >> "$root/.github/workflows/ci.yml"; git -C "$root" add -A; run_check
-expect_fail "environment outside the deploy workflows" "job extra has environment:, which is allowed only in app-deploy-one.yml and app-rollback.yml"
+expect_fail "environment outside the deploy workflows" "job extra has environment:, which is allowed only in app-deploy-one.yml, app-rollback.yml and notifs-exchange.yml"
+
+# --- notifs-exchange.yml: the one standalone workflow that may hold an environment, dispatch-only ------------------------
+mini_exchange="name: t\non:\n  workflow_dispatch:\npermissions: {}\njobs:\n  d:\n    if: github.ref == 'refs/heads/main'\n    runs-on: ubuntu-latest\n    environment: production\n    permissions:\n      contents: read\n      id-token: write\n    steps:\n      - run: true\n"
+new_root; add_wf notifs-exchange.yml "$mini_exchange"; run_check
+expect_pass "notifs-exchange.yml: dispatch-only environment job with the main guard"
+
+new_root; add_wf other.yml "$mini_exchange"; run_check
+expect_fail "the relaxation does not extend to another file name" "job d has environment:, which is allowed only in app-deploy-one.yml, app-rollback.yml and notifs-exchange.yml"
+
+new_root; add_wf notifs-exchange.yml "name: t\non:\n  workflow_dispatch:\npermissions: {}\njobs:\n  d:\n    runs-on: ubuntu-latest\n    environment: production\n    permissions:\n      contents: read\n    steps:\n      - run: true\n"; run_check
+expect_fail "notifs-exchange.yml environment job without the main guard" "job d has environment: but no if:"
+
+new_root; add_wf notifs-exchange.yml "name: t\non:\n  workflow_dispatch:\n  push:\npermissions: {}\njobs:\n  d:\n    runs-on: ubuntu-latest\n    permissions:\n      contents: read\n    steps:\n      - run: true\n"; run_check
+expect_fail "notifs-exchange.yml with a push trigger" "trigger push is not in the allow-list for notifs-exchange.yml"
+
+new_root; add_wf notifs-exchange.yml "name: t\non:\n  workflow_dispatch:\n  workflow_run:\n    workflows: [x]\n    types: [completed]\npermissions: {}\njobs:\n  d:\n    runs-on: ubuntu-latest\n    permissions:\n      contents: read\n    steps:\n      - run: true\n"; run_check
+expect_fail "notifs-exchange.yml with a workflow_run trigger" "trigger workflow_run is forbidden"
+
+new_root; add_wf other.yml "name: t\non:\n  workflow_dispatch:\npermissions: {}\njobs:\n  d:\n    runs-on: ubuntu-latest\n    permissions:\n      contents: read\n    steps:\n      - run: true\n"; run_check
+expect_pass "a plain dispatch-only workflow under another name is still fine"
+
+real_root; mut notifs-exchange.yml "s#^  workflow_dispatch:#  workflow_dispatch:\n  push:#"; run_check
+expect_fail "the real notifs-exchange.yml with a push trigger added" "trigger push is not in the allow-list for notifs-exchange.yml"
+
+real_root; mut notifs-exchange.yml "/^    if: github.ref == 'refs\\/heads\\/main' && needs/d"; run_check
+expect_fail "the real notifs-exchange.yml exchange job without the main guard" "job exchange has environment: but no if:"
+
+real_root; mut notifs-exchange.yml "s#run: platform/ci/notifs-key-install.sh \"[\$]APP\"#run: platform/ci/notifs-key-install.sh \${{ matrix.app }}#"; run_check
+expect_fail "the real notifs-exchange.yml interpolating the app into a run" "interpolates an inputs, matrix or needs output"
+
+real_root; mut notifs-exchange.yml "s#actions/checkout@[0-9a-f]{40}#actions/checkout@v7#"; run_check
+expect_fail "the real notifs-exchange.yml with an unpinned action" "is not pinned to a 40-hex"
+
+# The key is masked before any step that could echo it: the mask step precedes the install step, and no step between the
+# exchange and the mask touches the key.
+xw="$real_wf/notifs-exchange.yml"
+
+# mask_check <file>: exchange (id: notifs) < mask < install; the key is first read by the mask step itself (within 3 lines
+# before its add-mask line), and the mask step has no if: in the 4 lines before it. Returns 0 when all hold.
+# SC2016: the patterns are literal text, not shell expansions.
+# shellcheck disable=SC2016
+mask_check() {
+  local f="$1" exchange_line mask_line install_line first_key
+  exchange_line="$(grep -n '^        id: notifs$' "$f" | head -n 1 | cut -d: -f1)"
+  mask_line="$(grep -n '::add-mask::\$NOTIFS_KEY' "$f" | head -n 1 | cut -d: -f1)"
+  install_line="$(grep -n 'platform/ci/notifs-key-install.sh' "$f" | head -n 1 | cut -d: -f1)"
+  first_key="$(grep -n 'steps.notifs.outputs.key' "$f" | head -n 1 | cut -d: -f1)"
+  if [ -z "$exchange_line" ] || [ -z "$mask_line" ] || [ -z "$install_line" ] || [ -z "$first_key" ]; then return 1; fi
+  if ! { [ "$exchange_line" -lt "$mask_line" ] && [ "$mask_line" -lt "$install_line" ]; }; then return 1; fi
+  if [ "$first_key" -le "$exchange_line" ] || [ $((mask_line - first_key)) -lt 0 ] || [ $((mask_line - first_key)) -gt 3 ]; then return 1; fi
+  if sed -n "$((mask_line - 4)),$((mask_line - 1))p" "$f" | grep -qE '^ *(- )?if:'; then return 1; fi
+  return 0
+}
+
+# dryrun_check <file>: the dry-run input reaches the install step as DRY_RUN, and the tailnet join (the only path to the
+# host) is skipped for it. Returns 0 when both hold.
+# shellcheck disable=SC2016
+dryrun_check() {
+  local f="$1"
+  grep -qF 'DRY_RUN: ${{ inputs.dry-run }}' "$f" || return 1
+  grep -A1 '^      - name: Join the tailnet$' "$f" | grep -qF '        if: inputs.dry-run == false' || return 1
+  return 0
+}
+
+if mask_check "$xw"; then passed=$((passed + 1)); else failed=$((failed + 1)); echo "FAIL: the key is not add-masked before the install step"; fi
+if dryrun_check "$xw"; then passed=$((passed + 1)); else failed=$((failed + 1)); echo "FAIL: notifs-exchange.yml wires dry-run into DRY_RUN and skips the tailnet join for it"; fi
+
+# check_must_fail <name> <check function>: the check must reject the mutated copy.
+check_must_fail() {
+  if "$2" "$root/.github/workflows/notifs-exchange.yml"; then
+    failed=$((failed + 1)); echo "FAIL: $1 (the check still passed)"
+  else
+    passed=$((passed + 1))
+  fi
+}
+
+real_root; mut notifs-exchange.yml "s#if: inputs.dry-run == false#if: true#"
+check_must_fail "the tailnet join no longer skipped for a dry run is caught" dryrun_check
+
+real_root; mut notifs-exchange.yml "s#DRY_RUN: [$][{][{] inputs.dry-run [}][}]#DRY_RUN: false#"
+check_must_fail "a hardcoded DRY_RUN is caught" dryrun_check
+
+real_root; mut notifs-exchange.yml "/::add-mask::[$]NOTIFS_KEY/d"
+check_must_fail "a deleted mask step line is caught" mask_check
+
+real_root; mut notifs-exchange.yml "s#^(      - name: Mask the key)\$#\1\n        if: always()#"
+check_must_fail "a conditional mask step is caught" mask_check
 
 real_root; printf '  again:\n    permissions:\n      contents: read\n      packages: write\n    uses: ./.github/workflows/app-deploy.yml\n    with:\n      apps: x\n' >> "$root/.github/workflows/app-deploy-one.yml"; git -C "$root" add -A; run_check
 expect_fail "nesting past three levels" "workflow nests [0-9]+ levels deep"

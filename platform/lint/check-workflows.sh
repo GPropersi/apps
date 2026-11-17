@@ -15,9 +15,11 @@
 #   4a. a workflow that reads vars.PLATFORM_DEPLOY_HOST also runs `::add-mask::` (a variable is never masked);
 #   4b. `on:` triggers: workflow_run, issue_comment and the other outside-input events are forbidden everywhere, and the
 #      four deploy-chain files are limited to their exact trigger set (ci.yml pull_request+push; app-deploy.yml
-#      workflow_call+workflow_dispatch; app-rollback.yml workflow_dispatch; app-deploy-one.yml workflow_call).
+#      workflow_call+workflow_dispatch; app-rollback.yml workflow_dispatch; app-deploy-one.yml workflow_call), and the
+#      standalone notifs-exchange.yml to workflow_dispatch alone (it is the one registrar identity 4irl-notifs approves);
 # The deploy chain (ci.yml -> app-deploy.yml -> app-deploy-one.yml, plus app-rollback.yml), checked across files:
-#   5. `environment:` appears only in app-deploy-one.yml and app-rollback.yml;
+#   5. `environment:` appears only in app-deploy-one.yml, app-rollback.yml and notifs-exchange.yml (which is not part of
+#      the chain; its environment job still carries the main guard by rule 3);
 #   6. a job calling app-deploy.yml carries the push+main guard (`event_name == 'push'` and the main guard);
 #   7. in app-deploy.yml, app-deploy-one.yml and app-rollback.yml a job with `secrets.` (other than GITHUB_TOKEN), a
 #      called workflow or `environment:` carries the main guard and never requires `event_name == 'push'`;
@@ -40,7 +42,7 @@ root=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --root) [ $# -ge 2 ] || { echo "missing value for --root" >&2; exit 2; }; root="$2"; shift 2 ;;
-    -h | --help) sed -n '2,36p' "$0"; exit 0 ;;
+    -h | --help) sed -n '2,39p' "$0"; exit 0 ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac
 done
@@ -101,6 +103,7 @@ while IFS= read -r wf; do
       else if (base == "app-deploy.yml") allowed = " workflow_call workflow_dispatch "
       else if (base == "app-rollback.yml") allowed = " workflow_dispatch "
       else if (base == "app-deploy-one.yml") allowed = " workflow_call "
+      else if (base == "notifs-exchange.yml") allowed = " workflow_dispatch "
       n = split(trig, a, " ")
       for (i = 1; i <= n; i++) {
         t = a[i]
@@ -299,8 +302,8 @@ out="$(awk -F'\t' '
       for (i = 1; i <= Nj[f]; i++) {
         j = Jn[f, i]; g = Jguard[f, j]; t = target(Juses[f, j]); callsloc = (t != "" && (t in Nj))
         if (t != "" && !(t in Nj)) print p ": job " j " calls " t ", which is not a tracked workflow"
-        if (Jenv[f, j] && f != "app-deploy-one.yml" && f != "app-rollback.yml")
-          print p ": job " j " has environment:, which is allowed only in app-deploy-one.yml and app-rollback.yml"
+        if (Jenv[f, j] && f != "app-deploy-one.yml" && f != "app-rollback.yml" && f != "notifs-exchange.yml")
+          print p ": job " j " has environment:, which is allowed only in app-deploy-one.yml, app-rollback.yml and notifs-exchange.yml"
         if (t == "app-deploy.yml" && !(mainguard(g) && needspush(g)))
           print p ": job " j " calls app-deploy.yml without the push+main if: (github.event_name == \047push\047 and github.ref == \047refs/heads/main\047)"
         if (chain && (Jenv[f, j] || Jsec[f, j] || Juses[f, j] != "")) {
