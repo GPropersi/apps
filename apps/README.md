@@ -58,6 +58,39 @@ it) and uses `access` absent or `family` only.
 An app adds no `Push gate` row and no CI file: `make test` discovers `apps/<name>/test_*.sh` on disk, and the catch-all
 row of the `Push gate` runs it.
 
+## Notifications (4irl-notifs)
+
+An app that sends phone, Discord or webhook notifications through 4irl-notifs opts in with `notifs: true` in its
+`app.yaml` (see the registry README). Apps without it never get a key. The key reaches the app in four host files under
+`/run/platform/secrets/` (`notifs-key`, `notifs-access-client-id`, `notifs-access-client-secret`, `notifs-base-url`);
+read them on every call, because the key rotates on each exchange (the previous one stays valid for 24 hours).
+
+The key is fetched by a separate, manual-only workflow, `.github/workflows/notifs-exchange.yml`. It never runs on a
+merge or after a deploy, so a failed exchange can never break or roll back a deploy. It is a standalone file because
+4irl-notifs binds this one workflow as a registrar: the binding is exact on the file, and it covers every app in the
+monorepo (an app's notifs id is `apps_<name>`, with `-` written as `_`).
+
+- **Inputs:** `app` (one app name; empty means every app with `notifs: true`) and `dry-run`. An explicit `app` without
+  `notifs: true` fails instead of doing nothing.
+- **What it does, per app:** exchanges this run's GitHub OIDC token for a key, joins the tailnet exactly like the deploy
+  job and pipes the key set to the host's restricted `notifs-key <app>` command, then compares the sha256 the host prints
+  with its own. Only the hash is ever logged. The job runs in the `production` environment (the same one the deploy uses)
+  and only from `main`.
+- **Run it** after the first deploy of an app that sets `notifs: true` (the host refuses an app that has never
+  deployed), and again by hand within 24 hours whenever a run exchanged a key but failed to write it.
+- **One-time operator steps:** set the repository variable `NOTIFS_DELIVERY_URL` and the secrets
+  `NOTIFS_ACCESS_CLIENT_ID` / `NOTIFS_ACCESS_CLIENT_SECRET` (the Access service token for delivery-api); run the
+  workflow once with `dry-run` to print the OIDC claims (`workflow_ref`, `ref`, `environment`); approve that identity as a
+  registrar in the 4irl-notifs admin UI; then run it for real. A dry run still exchanges, which rotates the app's key, so
+  follow it with a real run within 24 hours.
+- **Expected first failure:** the first run after merge fails with 401 or 403 until the registrar identity is approved.
+  A 401 or 403 later means the identity or the Access service token no longer matches what was approved, never a deploy
+  problem; a write failure (the host rejected the key, or the hashes differ) means rerun it within 24 hours.
+- **Host prerequisite:** re-run `make host-deploy-user` and `make host-data` (the same ARGS as the first install) since the
+  `notifs-key` command shipped, or the host answers with an unknown-command error.
+- **The `app` input:** empty means every opted-in app, and `all` also means every app; an explicit app must have
+  `notifs: true`.
+
 ## Rules every app follows
 
 - **Never answer 502, 503 or 504.** The edge replaces those bodies with the platform down page, so a client must not

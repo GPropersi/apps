@@ -15,7 +15,10 @@ Design and phases live in the stronghold: `~/code/plans/stronghold/open/app-host
 - Deploy configuration (names only; values live in GitHub settings and never in this repo): environment `production`
   (deployment branches: `main` only, no required reviewer); its variable `PLATFORM_DEPLOY_HOST`; the repository variable
   `PLATFORM_BUILD_ARCH`; the environment secrets `TS_OAUTH_CLIENT_ID` and `TS_OAUTH_SECRET` (the Tailscale identity
-  `tag:ci`, which reaches the host only as the restricted `deploy` login). Only the `deploy` and `rollback` jobs see them.
+  `tag:ci`, which reaches the host only as the restricted `deploy` login). Only the `deploy` and `rollback` jobs and the notifs-exchange `exchange` job see them.
+- Notifs exchange (names only): `notifs-exchange.yml` is manual-only (`workflow_dispatch`) and the one file besides the
+  deploy chain allowed an `environment:` (it uses `production`); it reads the repository variable `NOTIFS_DELIVERY_URL`
+  and the secrets `NOTIFS_ACCESS_CLIENT_ID` / `NOTIFS_ACCESS_CLIENT_SECRET`. `make lint` enforces the exception.
 - Deploy rules: a merge to `main` tests only the changed app (`make test-app APP=<app>`), builds it, and deploys it with
   health-checked replacement; the full suite runs beside it and never blocks a deploy. GHCR packages stay private: the
   deploy job hands the host its own short-lived `GITHUB_TOKEN` on stdin. A deploy never goes backwards, rollback is the
