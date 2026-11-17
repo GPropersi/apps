@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { App } from "./App";
 import type { Birthday, Settings } from "./api";
 import { groupByLetter, groupByMonth, letterOf } from "./BirthdaysTab";
+import { draftTag } from "./draft";
 import { withDates } from "./format";
 
 type Handler = (init?: RequestInit) => Response | Promise<Response>;
@@ -412,7 +413,7 @@ describe("Add tab", () => {
   it("restores a draft from sessionStorage as touched, and mirrors edits to it", async () => {
     window.sessionStorage.setItem(
       "birthdays:add-draft",
-      JSON.stringify({ email: EMAIL, name: "Kept", month: 4, day: "9", year: "", remind: null }),
+      JSON.stringify({ who: draftTag(EMAIL), name: "Kept", month: 4, day: "9", year: "", remind: null }),
     );
     go("#/add");
     const { user } = mount({ "GET /api/me": ME(settings({ auto_remind: true })) });
@@ -426,7 +427,7 @@ describe("Add tab", () => {
   it("a restored draft's remind counts as touched: auto_remind never overwrites an explicit false", async () => {
     window.sessionStorage.setItem(
       "birthdays:add-draft",
-      JSON.stringify({ email: EMAIL, name: "Kept", month: 4, day: "9", year: "", remind: false }),
+      JSON.stringify({ who: draftTag(EMAIL), name: "Kept", month: 4, day: "9", year: "", remind: false }),
     );
     go("#/add");
     mount({ "GET /api/me": ME(settings({ auto_remind: true })) });
@@ -437,7 +438,7 @@ describe("Add tab", () => {
   it("does not restore a draft saved for a different email", async () => {
     window.sessionStorage.setItem(
       "birthdays:add-draft",
-      JSON.stringify({ email: "other@example.com", name: "Nope", month: 4, day: "9", year: "", remind: null }),
+      JSON.stringify({ who: draftTag("other@example.com"), name: "Nope", month: 4, day: "9", year: "", remind: null }),
     );
     go("#/add");
     mount();
@@ -1053,7 +1054,7 @@ describe("restored draft", () => {
   it("a restored draft whose checkbox was never touched still follows auto_remind", async () => {
     window.sessionStorage.setItem(
       "birthdays:add-draft",
-      JSON.stringify({ email: EMAIL, name: "Kept", month: 4, day: "9", year: "", remind: null }),
+      JSON.stringify({ who: draftTag(EMAIL), name: "Kept", month: 4, day: "9", year: "", remind: null }),
     );
     go("#/add");
     mount({ "GET /api/me": ME(settings({ auto_remind: true })) });
@@ -1064,7 +1065,7 @@ describe("restored draft", () => {
   it("a restored draft keeps an explicit remind choice", async () => {
     window.sessionStorage.setItem(
       "birthdays:add-draft",
-      JSON.stringify({ email: EMAIL, name: "Kept", month: 4, day: "9", year: "", remind: false }),
+      JSON.stringify({ who: draftTag(EMAIL), name: "Kept", month: 4, day: "9", year: "", remind: false }),
     );
     go("#/add");
     mount({ "GET /api/me": ME(settings({ auto_remind: true })) });

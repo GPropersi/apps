@@ -3,6 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { App } from "./App";
 import type { Birthday, Gift, Settings } from "./api";
+import { draftTag } from "./draft";
 
 type Handler = (init?: RequestInit) => Response | Promise<Response>;
 type Routes = Record<string, Handler>;
@@ -444,7 +445,7 @@ describe("owner edit form", () => {
   it("an edit back to the server values, then a new edit, is not shown as restored", async () => {
     window.sessionStorage.setItem(
       "birthdays:edit-draft:1",
-      JSON.stringify({ name: "Sam Riverax", month: 11, day: "16", year: "1990", email: EMAIL }),
+      JSON.stringify({ name: "Sam Riverax", month: 11, day: "16", year: "1990", who: draftTag(EMAIL) }),
     );
     go("#/b/1");
     const { user } = mount(OWNER_DETAIL);
@@ -492,7 +493,7 @@ describe("owner edit form", () => {
   it("restores a draft from sessionStorage after a reload only for the same email", async () => {
     window.sessionStorage.setItem(
       "birthdays:edit-draft:1",
-      JSON.stringify({ name: "Sammy", month: 11, day: "16", year: "1990", email: EMAIL }),
+      JSON.stringify({ name: "Sammy", month: 11, day: "16", year: "1990", who: draftTag(EMAIL) }),
     );
     go("#/b/1");
     mount(OWNER_DETAIL);
@@ -503,7 +504,7 @@ describe("owner edit form", () => {
   it("discards another person's stored draft", async () => {
     window.sessionStorage.setItem(
       "birthdays:edit-draft:1",
-      JSON.stringify({ name: "Sammy", month: 11, day: "16", year: "1990", email: "someone@else.test" }),
+      JSON.stringify({ name: "Sammy", month: 11, day: "16", year: "1990", who: draftTag("someone@else.test") }),
     );
     go("#/b/1");
     mount(OWNER_DETAIL);
@@ -643,7 +644,7 @@ describe("failures", () => {
   it("session expiry keeps the edit draft and the banner promises it", async () => {
     window.sessionStorage.setItem(
       "birthdays:edit-draft:1",
-      JSON.stringify({ name: "Sammy", month: 11, day: "16", year: "1990", email: EMAIL }),
+      JSON.stringify({ name: "Sammy", month: 11, day: "16", year: "1990", who: draftTag(EMAIL) }),
     );
     go("#/b/1");
     const { user } = mount({ ...OWNER_DETAIL, "POST /api/birthdays/1/gifts": () => html(200) });

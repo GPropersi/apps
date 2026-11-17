@@ -26,7 +26,7 @@ export function EditForm({
   b,
   edit,
   setEdit,
-  email,
+  tag,
   disabled,
   onSaved,
   fail,
@@ -34,7 +34,7 @@ export function EditForm({
   b: Birthday;
   edit: EditDraft | undefined;
   setEdit: (id: number, d: EditDraft | null) => void;
-  email: string | null;
+  tag: string | null;
   disabled: boolean;
   onSaved: (b: Birthday) => void;
   fail: (f: Failure) => string | null;
@@ -59,16 +59,16 @@ export function EditForm({
     formRef.current = form;
   });
 
-  // After a reload the draft comes back from sessionStorage, once the signed-in email is known and matches.
+  // After a reload the draft comes back from sessionStorage, once the signed-in person's tag is known and matches.
   useEffect(() => {
-    if (storageChecked.current || email === null) {
+    if (storageChecked.current || tag === null) {
       return;
     }
     storageChecked.current = true;
     if (edit !== undefined) {
       return;
     }
-    const stored = loadEditDraft(email, b.id);
+    const stored = loadEditDraft(tag, b.id);
     if (stored === null) {
       return;
     }
@@ -78,7 +78,7 @@ export function EditForm({
       setEdit(b.id, stored);
       setRestored(true);
     }
-  }, [email, edit, b.id, server, setEdit]);
+  }, [tag, edit, b.id, server, setEdit]);
 
   function change(patch: Partial<EditDraft>, clear: (keyof Errors)[]) {
     const next = { ...form, ...patch };

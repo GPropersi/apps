@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { MouseEvent } from "react";
 import { COLOR_SCHEMES, getBirthdays, getMe } from "./api";
 import type { Birthday, ColorScheme, Failure, ListView, Settings } from "./api";
@@ -7,7 +7,7 @@ import { APP_NAME } from "./appName";
 import { BirthdaysTab } from "./BirthdaysTab";
 import { todayISO } from "./dates";
 import { Detail } from "./Detail";
-import { EMPTY_DRAFT, clearEditDraft, loadDraft, saveDraft, saveEditDraft } from "./draft";
+import { EMPTY_DRAFT, clearEditDraft, draftTag, loadDraft, saveDraft, saveEditDraft } from "./draft";
 import type { Draft, EditDraft } from "./draft";
 import { RELOAD_PLAIN, RELOAD_WITH_DRAFT } from "./messages";
 import { CakeMark, TabIcon } from "./parts";
@@ -55,9 +55,14 @@ function readStoredPalette(): ColorScheme | null {
   }
 }
 
+// Only a name from the fixed COLOR_SCHEMES list is ever written, never the value that came from the server.
 function storePalette(scheme: ColorScheme): void {
+  const known = COLOR_SCHEMES.find((s) => s === scheme);
+  if (known === undefined) {
+    return;
+  }
   try {
-    window.localStorage.setItem(PALETTE_KEY, scheme);
+    window.localStorage.setItem(PALETTE_KEY, known);
   } catch {
     // per-device convenience only
   }
@@ -79,7 +84,7 @@ export function App() {
   const [draft, setDraft] = useState<Draft>(EMPTY_DRAFT);
   // Dirty owner edits, one per birthday id (kept across a detail round trip, mirrored to sessionStorage).
   const [edits, setEdits] = useState<Record<number, EditDraft>>({});
-  const emailRef = useRef<string | null>(null);
+  const tagRef = useRef<string | null>(null);
 
   const mainRef = useRef<HTMLElement>(null);
   const nameRef = useRef<HTMLInputElement>(null);
@@ -202,7 +207,7 @@ export function App() {
         const { email, settings: s } = res.data;
         // A restored draft counts as touched (plan draft rule): its remind value is explicit, never the auto_remind
         // default.
-        const stored = loadDraft(email);
+        const stored = loadDraft(draftTag(email));
         draftReady.current = true;
         if (stored !== null) {
           setDraft({ ...stored, remind: stored.remind ?? s.auto_remind });
@@ -220,15 +225,17 @@ export function App() {
   }, [fetchList, sessionFailure]);
 
   // Mirror the Add draft to sessionStorage (after the restore decision, so the empty draft never overwrites it).
+  // Drafts are stored under this tag (a hash of the email), never under the email itself.
   const email = me.s === "ok" ? me.email : null;
+  const tag = useMemo(() => (email === null ? null : draftTag(email)), [email]);
   useEffect(() => {
-    emailRef.current = email;
-  }, [email]);
+    tagRef.current = tag;
+  }, [tag]);
   useEffect(() => {
-    if (email !== null && draftReady.current) {
-      saveDraft(email, draft);
+    if (tag !== null && draftReady.current) {
+      saveDraft(tag, draft);
     }
-  }, [draft, email]);
+  }, [draft, tag]);
 
   useEffect(() => {
     if (page !== "normal") {
@@ -387,20 +394,20 @@ export function App() {
     });
     if (d === null) {
       clearEditDraft(id);
-    } else if (emailRef.current !== null) {
-      saveEditDraft(emailRef.current, id, d);
+    } else if (tagRef.current !== null) {
+      saveEditDraft(tagRef.current, id, d);
     }
   }, []);
 
-  // A draft typed before /me answered is only in app state; mirror every current edit once the email is known.
+  // A draft typed before /me answered is only in app state; mirror every current edit once the tag is known.
   useEffect(() => {
-    if (email === null) {
+    if (tag === null) {
       return;
     }
     for (const [id, d] of Object.entries(edits)) {
-      saveEditDraft(email, Number(id), d);
+      saveEditDraft(tag, Number(id), d);
     }
-  }, [email, edits]);
+  }, [tag, edits]);
 
   // A birthday that is gone (deleted, removed, or no longer shared): drop it from every loaded list and its draft.
   const onGone = useCallback(
@@ -555,7 +562,7 @@ export function App() {
         id={route.id}
         origin={route.origin}
         today={today}
-        email={email}
+        tag={tag}
         settings={settings}
         disabled={pageDown}
         edit={route.id === null ? undefined : edits[route.id]}

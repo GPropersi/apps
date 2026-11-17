@@ -27,7 +27,7 @@ export function Detail({
   id,
   origin,
   today,
-  email,
+  tag,
   settings,
   disabled,
   edit,
@@ -41,7 +41,7 @@ export function Detail({
   id: number | null;
   origin: Origin;
   today: string;
-  email: string | null;
+  tag: string | null;
   settings: Settings | null;
   disabled: boolean;
   edit: EditDraft | undefined;
@@ -321,7 +321,7 @@ export function Detail({
             b={b}
             edit={edit}
             setEdit={setEdit}
-            email={email}
+            tag={tag}
             disabled={disabled}
             onSaved={(saved) => {
               patch((d) => ({ ...d, birthday: saved }));
