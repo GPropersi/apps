@@ -70,6 +70,30 @@ group 64324 without being able to read any DB or Redis password (those stay in g
 64323 applies: an app mounts only its own `/var/lib/platform/job-secrets/<app>/` directory, never the root or a parent
 of it, and gets group 64324 through `group_add: ["64324"]`.
 
+## Secrets directory layout and the notifs key
+
+Per app, `/var/lib/platform/secrets/<app>/` (`2750`, group 64323, mounted read-only at `/run/platform/secrets`) holds:
+
+| File | Written by | Content |
+|---|---|---|
+| `db-password`, `redis-password` | `platform new-db <app>` | 40 characters `[A-Za-z0-9]`, `0440`, never rotated |
+| `notifs-key` | `platform notifs-key <app>` | the 4irl-notifs `dak_` key, `0440`, rotated by every key exchange |
+| `notifs-access-client-id`, `notifs-access-client-secret` | `platform notifs-key <app>` | the Cloudflare Access service-token pair for the delivery API |
+| `notifs-base-url` | `platform notifs-key <app>` | the delivery API base URL (`https://...`) |
+
+`platform notifs-key <app>` reads 4 lines on stdin (key, access client id, access client secret, base URL) and runs
+`/opt/platform/data/notifs-key.sh` (installed beside `new-db.sh` by `install-data.sh`). It refuses, writing nothing
+and leaving any existing key set untouched, for: an unknown app or one that has never deployed (no registry entry in
+`/var/lib/platform/registry/<app>/`), a registry `app.yaml` without `notifs: true`, a key that is not
+`^dak_[A-Za-z0-9_-]{43}$`, a non-`https://` base URL, an empty client id or secret, a missing or symlinked
+secrets directory, and stdin that is not exactly 4 lines within the timeout. It takes the same per-app lock as
+`new-db`, deploy, restore and rm-db, writes every file to a temp file in the directory (umask 227) and renames them
+into place with the key last, and prints only `sha256(key)`. The write behaviour is duplicated from `new-db.sh`'s
+`write_secret`, not shared. The app-name check is the dispatcher's name pattern plus the registry entry requirement
+(not the reserved-names list, which a registered app already passed). A refusal writes nothing; a failure during the
+final rename phase names the failing file and may leave new credentials beside the old key, and the next successful
+run converges. Logs: start and end with rc and duration per phase, never the key or the credentials.
+
 ## Reserved key namespace
 
 `<app>:jobs:*` is reserved for the jobs runner inside each app prefix (queue, processing, delayed and dead keys). The

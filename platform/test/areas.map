@@ -20,12 +20,15 @@
 #     check-test-classes.sh line), `registry` holds test_validate_app_yaml.sh (greps it for the validate-tracked.sh line).
 #   lib, registry, data, jobs, ingress also list `test`: test_prewarm.sh reads platform/lib/yaml-subset.sh, the data, jobs
 #     and ingress compose files and the jobs Dockerfiles, and test_areas_map.sh mentions ../data/, ../lib/ and ../registry/.
+#   platform/lib/** also lists ci: platform/ci/notifs-exchange-name.sh sources platform/lib/notifs-app-id.sh.
 #   templates (templates/<name>/test_*.sh: unit, web, sqlc and image tests, run by run.sh, not under platform/) is listed
 #     wherever scaffold is, because those tests read the same inputs as the scaffold tests; a templates/** change selects
 #     it beside scaffold and lint, so a template-only PR runs the template tests and not the whole suite.
 #   scaffold (templates/** and platform/scaffold/**) is also listed by the rows its tests read: jobs (go-env.sh, GO_VERSION),
 #     registry, lib, test, lint (check-go.sh), and by data, deploy and Makefile (test_image.sh mirrors new-db.sh, the data
 #     compose file and deploy.sh's run flags; test_app_new.sh runs `make -n app-new`).
+#   templates/** has its own row (before it, platform/scaffold/** keeps scaffold,templates,lint) and also lists registry: registry/test_notifs_app_id.sh reads the shared fixture
+#     templates/go-react/internal/platform/testdata/notifs-app-ids.txt (the Go helper reads the same file).
 #   A push to main still runs everything (CI runs `make test` there), which catches a wrong map.
 README.md **/README.md docs/** .claude/**	none
 CLAUDE.md	host
@@ -33,7 +36,7 @@ platform/test/lib.sh platform/test/prewarm.sh platform/test/run.sh	all
 platform/test/**	test,host,lint,scaffold,templates
 .github/**	lint,ci
 Makefile	test,host,lint,registry,scaffold,templates
-platform/lib/**	registry,data,host,backup,jobs,scaffold,templates,ingress,deploy,apps,test
+platform/lib/**	registry,data,host,backup,jobs,scaffold,templates,ci,ingress,deploy,apps,test
 platform/registry/**	registry,data,host,backup,jobs,scaffold,templates,lint,deploy,apps,test
 platform/data/**	data,host,backup,jobs,scaffold,templates,lint,deploy,apps,test
 platform/jobs/**	jobs,host,lint,scaffold,templates,apps,test
@@ -42,6 +45,7 @@ platform/ingress/**	ingress,host,lint,apps,test
 platform/host/**	host,data,backup,jobs,lint,apps
 platform/deploy/**	deploy,host,lint,data,scaffold,templates
 platform/lint/**	lint,scaffold,templates
-platform/scaffold/** templates/**	scaffold,templates,lint
+platform/scaffold/**	scaffold,templates,lint
+templates/**	scaffold,templates,lint,registry
 platform/ci/**	ci
 **	all

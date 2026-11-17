@@ -4088,7 +4088,7 @@ var (
 	memCapRE   = regexp.MustCompile(`^[1-9][0-9]{0,2}m$`)
 	portRE     = regexp.MustCompile(`^[1-9][0-9]{0,4}$`)
 	healthRE   = regexp.MustCompile(`^/[A-Za-z0-9._~/%-]*$`)
-	topKeys    = []string{"schema_version", "name", "owner", "purpose", "template", "memory_cap", "port", "health_path", "access", "jobs", "volumes"}
+	topKeys    = []string{"schema_version", "name", "owner", "purpose", "template", "memory_cap", "port", "health_path", "access", "notifs", "jobs", "volumes"}
 	topReqd    = []string{"schema_version", "name", "owner", "purpose", "template", "memory_cap", "port"}
 	jobKeys    = []string{"name", "schedule", "timeout", "catch_up"}
 	volKeys    = []string{"name", "path"}
@@ -4352,7 +4352,7 @@ func (v *validator) scalarKey(dir, k string, n *yaml.Node, app *App) {
 	}
 	val := n.Value
 	switch k {
-	case "schema_version", "port":
+	case "schema_version", "port", "notifs":
 		if quoted(n) {
 			v.errf("%s must be an unquoted value, not a string", k)
 			return
@@ -4412,6 +4412,11 @@ func (v *validator) scalarKey(dir, k string, n *yaml.Node, app *App) {
 			v.errf("health_path '%s' may only contain letters, digits and . _ ~ / %% -", val)
 		} else {
 			app.HealthPath = val
+		}
+	case "notifs":
+		// Accepted and ignored by the runner: only the host key writer reads it.
+		if val != "true" && val != "false" {
+			v.errf("notifs '%s' must be true or false", val)
 		}
 	case "access":
 		if !contains(accessVals, val) {

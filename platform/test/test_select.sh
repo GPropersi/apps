@@ -92,7 +92,7 @@ case_sel "another platform/test file selects test, host, lint and scaffold" "pla
   platform/host/test_host.sh platform/lint/test_lint.sh platform/scaffold/test_scaffold.sh
 case_sel "CLAUDE.md selects host" "CLAUDE.md" platform/host/test_host.sh
 case_sel "platform/lib row" "platform/lib/l.sh" platform/registry/test_registry.sh platform/data/test_data.sh platform/host/test_host.sh \
-  platform/backup/test_backup.sh platform/jobs/test_jobs.sh platform/scaffold/test_scaffold.sh platform/ingress/test_ingress.sh platform/deploy/test_deploy.sh platform/test/test_t.sh "${APPS[@]}"
+  platform/backup/test_backup.sh platform/jobs/test_jobs.sh platform/scaffold/test_scaffold.sh platform/ingress/test_ingress.sh platform/deploy/test_deploy.sh platform/test/test_t.sh platform/ci/test_ci.sh "${APPS[@]}"
 case_sel "platform/registry row" "platform/registry/r.txt" platform/registry/test_registry.sh platform/data/test_data.sh \
   platform/host/test_host.sh platform/backup/test_backup.sh platform/jobs/test_jobs.sh platform/scaffold/test_scaffold.sh platform/lint/test_lint.sh \
   platform/deploy/test_deploy.sh platform/test/test_t.sh "${APPS[@]}"
@@ -111,8 +111,8 @@ case_sel "platform/ingress row" "platform/ingress/i.txt" platform/ingress/test_i
 case_sel "platform/host row" "platform/host/h.txt" platform/host/test_host.sh platform/data/test_data.sh \
   platform/backup/test_backup.sh platform/jobs/test_jobs.sh platform/lint/test_lint.sh "${APPS[@]}"
 case_sel "platform/lint row: lint and scaffold" "platform/lint/l.txt" platform/lint/test_lint.sh platform/scaffold/test_scaffold.sh
-case_sel "templates row: scaffold, the template tests and lint, not the full suite" "templates/go-react/main.txt" platform/scaffold/test_scaffold.sh platform/lint/test_lint.sh
-expect_eq "a templates-only change selects the template test explicitly" "$sel" "$(want platform/lint/test_lint.sh platform/scaffold/test_scaffold.sh "$TPL")"
+case_sel "templates row: scaffold, the template tests, lint and registry (the shared notifs fixture test), not the full suite" "templates/go-react/main.txt" platform/scaffold/test_scaffold.sh platform/lint/test_lint.sh platform/registry/test_registry.sh
+expect_eq "a templates-only change selects the template test explicitly" "$sel" "$(want platform/lint/test_lint.sh platform/registry/test_registry.sh platform/scaffold/test_scaffold.sh "$TPL")"
 case " $sel " in *" platform/host/test_host.sh "* | *" apps/foo/test_a.sh "*) _fail "a templates-only change does not select the whole suite" "got: $sel" ;; *) _pass ;; esac
 case_sel "platform/scaffold row: scaffold and lint" "platform/scaffold/s.txt" platform/scaffold/test_scaffold.sh platform/lint/test_lint.sh
 case_sel "the catch-all selects all for an unknown path" "weird/file.txt" "${ALL[@]}"
