@@ -1,3 +1,6 @@
 # Exact `<path> <rule>` pairs the public-hygiene check may ignore. One per line, no wildcards.
 # Every entry needs a reason in the PR that adds it. Rules: github-token github-pat aws-key
 # slack-token private-key tailnet-name ssh-url ipv4 tracked-env tracked-key-file
+# birthdays notify tests: fake Discord-shaped webhook URLs and loopback/private/link-local IP literals that the URL validator must reject.
+apps/birthdays/internal/app/notify_test.go webhook-url
+apps/birthdays/internal/app/notify_test.go ipv4

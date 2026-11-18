@@ -1,0 +1,16 @@
+schema_version: 1
+name: birthdays
+owner: gpropersi
+purpose: Family birthday list with reminders
+template: go-react
+memory_cap: 64m
+port: 8080
+health_path: /healthz
+notifs: true
+jobs:
+  - name: reminder-scan
+    schedule: "0 7 * * *"
+    timeout: 55s
+    catch_up: true
+  - name: send-reminder
+    timeout: 45s
