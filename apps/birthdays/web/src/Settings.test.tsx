@@ -160,6 +160,16 @@ afterEach(() => {
   root().removeAttribute("data-palette");
 });
 
+describe("add-destination form", () => {
+  it("is a group named by its heading, holding the Type, Label and webhook URL fields", async () => {
+    await open();
+    const group = screen.getByRole("group", { name: "Add a destination" });
+    expect(within(group).getByLabelText("Type")).toBeInTheDocument();
+    expect(within(group).getByLabelText(/^Label/)).toBeInTheDocument();
+    expect(within(group).getByLabelText(/webhook URL/i)).toBeInTheDocument();
+  });
+});
+
 describe("app preferences", () => {
   it("picking a scheme applies data-palette at once, stores it and PATCHes once", async () => {
     const { user } = await open({ "PATCH /api/settings": (init) => json(settings(JSON.parse(String(init?.body)) as Partial<Settings>)) });
