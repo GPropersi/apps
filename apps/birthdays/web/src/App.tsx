@@ -210,7 +210,7 @@ export function App() {
         const stored = loadDraft(draftTag(email));
         draftReady.current = true;
         if (stored !== null) {
-          setDraft({ ...stored, remind: stored.remind ?? s.auto_remind, offsets: stored.offsets ?? s.default_offsets });
+          setDraft({ ...stored, remind: stored.remind ?? s.auto_remind });
         }
         setSettings(s);
         setMe({ s: "ok", email });

@@ -1224,6 +1224,26 @@ describe("Add timing picker", () => {
     expect(screen.getByText("Pick at least one reminder time.")).toBeInTheDocument();
   });
 
+  it("a restored draft without offsets stays untouched and follows a later change of the default", async () => {
+    window.sessionStorage.setItem(
+      "birthdays:add-draft",
+      JSON.stringify({ who: draftTag(EMAIL), name: "Kept", month: 4, day: "9", year: "", remind: true }),
+    );
+    go("#/add");
+    const { user } = mount({
+      "GET /api/me": remindOn(),
+      "PATCH /api/settings": () => json(settings({ auto_remind: true, default_offsets: [14, 7] })),
+    });
+    await waitFor(() => expect(nameInput()).toHaveValue("Kept"));
+    expect(inPicker("1 day before")).toBeChecked();
+    await toSettings(user);
+    await user.click(within(settingsPicker()).getByRole("checkbox", { name: "1 day before" }));
+    await waitFor(() => expect(screen.getByTestId("settings-status")).toHaveTextContent("Saved."));
+    await toAdd(user);
+    expect(inPicker("1 day before")).not.toBeChecked();
+    expect(chip("2 weeks")).toBeInTheDocument();
+  });
+
   it("a restored touched value is sent, and the server's differing canonical offsets become the default", async () => {
     window.sessionStorage.setItem(
       "birthdays:add-draft",

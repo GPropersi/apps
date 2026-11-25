@@ -1,7 +1,8 @@
 -- +goose Up
 -- Reminder timings widen from {0,1,7} to on the day, 1 day before, and 1 to 52 whole weeks before. The new default is
--- 2 weeks, 1 week and 1 day before. Compatibility: the previous app version runs safely on this schema (its validator
--- accepts fewer values, and its create path copies {14,7,1}, which the widened CHECK allows).
+-- 2 weeks, 1 week and 1 day before. Rollback past this release is forward-fix only: Down fails once any offset other
+-- than 0, 1 or 7 is stored, and the previous app version's validator rejects stored values such as 14, so a
+-- rolled-back image can fail a settings save with a 400.
 ALTER TABLE users ALTER COLUMN default_offsets SET DEFAULT '{14,7,1}';
 UPDATE users SET default_offsets = '{14,7,1}' WHERE default_offsets = '{7,1}';
 ALTER TABLE reminder_settings DROP CONSTRAINT reminder_settings_offsets_check;

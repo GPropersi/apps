@@ -46,6 +46,8 @@ export function TimingPicker({
 }) {
   const [status, setStatus] = useState("");
   const [emptyErr, setEmptyErr] = useState("");
+  // pickRef mirrors the pick state: two changes in the same tick must read the latest value before a re-render
+  // commits it, which state alone cannot give.
   const [pick, setPick] = useState("");
   const pickRef = useRef("");
   const selectRef = useRef<HTMLSelectElement>(null);

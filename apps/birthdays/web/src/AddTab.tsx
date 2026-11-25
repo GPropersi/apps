@@ -113,6 +113,7 @@ export function AddTab({
   }
 
   function focusPicker() {
+    // "add-0" is the first checkbox id produced by TimingPicker's id scheme; the two must change together.
     document.getElementById("add-0")?.focus();
   }
 
