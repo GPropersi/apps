@@ -79,6 +79,9 @@ h1 svg { width: 1.75rem; height: 1.75rem; color: var(--accent); flex: none; }
 h2 { font-size: 1.25rem; margin: 0 0 0.75rem; overflow-wrap: anywhere; }
 h3 { font-size: 1rem; margin: 0; }
 :focus-visible { outline: 3px solid var(--focus); outline-offset: 2px; }
+/* Headings take focus only programmatically (tab switch, after an action) so screen readers announce them;
+   iOS Safari never focuses a tapped button, so it treats that focus as keyboard focus and drew a ring around them. */
+[tabindex="-1"]:focus { outline: none; }
 header { background: var(--bg); }
 .bar { max-width: 40rem; margin: 0 auto; padding: 0.75rem 1rem 0.25rem; display: flex; flex-wrap: wrap; gap: 0.25rem 1rem; justify-content: space-between; align-items: center; }
 .who { display: flex; flex-wrap: wrap; align-items: center; gap: 0.25rem 0.75rem; font-size: 0.875rem; color: var(--muted); }
@@ -221,7 +224,6 @@ nav.tabs a[aria-current=page] .ico { background: var(--accent-soft); }
 /* ---------- Calendar ---------- */
 .periodnav { display: flex; align-items: center; gap: 0.5rem; }
 .periodnav h3 { flex: 1; min-width: 0; text-align: center; font-family: var(--font-display); font-weight: var(--display-weight); font-size: 1.125rem; overflow-wrap: anywhere; }
-.periodnav h3:focus-visible { outline-offset: 0; border-radius: 0.5rem; }
 .periodnav button { border-radius: 999px; padding: 0 0.75rem; flex: none; }
 .calendar ul.week { margin-top: 0.75rem; }
 table.cal { width: calc(100% + 0.25rem); border-collapse: separate; border-spacing: 0.125rem; table-layout: fixed; margin: 0.5rem -0.125rem 0; }
@@ -328,6 +330,14 @@ fieldset.spaced { margin-bottom: 1rem; }
 .secretval { font-family: ui-monospace, monospace; font-size: 1rem; overflow-wrap: anywhere; }
 section[data-secret] { border-color: var(--accent); }
 ul.items > li > button { flex: none; }
+/* Add-destination form: type and label share a row when there is room, the URL always gets a full row */
+.destform { display: grid; gap: 0.75rem; margin-top: 1.25rem; padding-top: 1rem; border-top: 1px solid var(--border); }
+.destform .fields { display: flex; flex-wrap: wrap; gap: 0.75rem; align-items: flex-start; }
+.destform .field.kind { flex: 1 1 9rem; }
+.destform .field.label { flex: 2 1 12rem; }
+.destform .field.url { flex: 1 1 100%; }
+.destform > button { justify-self: end; }
+@media (max-width: 39.99rem) { .destform > button { justify-self: stretch; } }
 
 /* Reminder timing picker (Settings, Detail, Add) */
 .timing { display: grid; gap: 0.5rem; }
