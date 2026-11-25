@@ -258,7 +258,7 @@ describe("start tab and routes", () => {
 });
 
 describe("Add tab", () => {
-  it("adds a birthday, sends remind explicitly, clears the form and lists it under Added just now", async () => {
+  it("adds a birthday, sends empty offsets when unticked, clears the form and lists it under Added just now", async () => {
     go("#/add");
     const created = bd(9, "Mia Chen", 11, 21, { reminder_offsets: [7, 1] });
     const { user } = mount({ "POST /api/birthdays": () => json(created, 201) });
@@ -267,7 +267,7 @@ describe("Add tab", () => {
     await user.type(dayInput(), "21");
     await user.click(addButton());
     await waitFor(() => expect(count("POST /api/birthdays")).toBe(1));
-    expect(bodyOf("POST /api/birthdays")).toEqual({ name: "Mia Chen", month: 11, day: 21, remind: false });
+    expect(bodyOf("POST /api/birthdays")).toEqual({ name: "Mia Chen", month: 11, day: 21, offsets: [] });
     expect(await screen.findByRole("heading", { name: "Added just now" })).toBeInTheDocument();
     expect(screen.getByRole("link", { name: "Mia Chen" })).toHaveAttribute("href", "#/b/9");
     expect(nameInput()).toHaveValue("");
@@ -275,7 +275,7 @@ describe("Add tab", () => {
     expect(screen.getByTestId("add-status")).toHaveTextContent("Added Mia Chen - Nov 21, in 5 days.");
   });
 
-  it("sends the year and a checked remind", async () => {
+  it("sends the year and the default offsets when remind is ticked", async () => {
     go("#/add");
     const { user } = mount({ "POST /api/birthdays": () => json(bd(9, "Mia", 2, 29, { year: 2000 }), 201) });
     await user.type(await nameField(), "  Mia  ");
@@ -285,7 +285,7 @@ describe("Add tab", () => {
     await user.click(remindBox());
     await user.click(addButton());
     await waitFor(() => expect(count("POST /api/birthdays")).toBe(1));
-    expect(bodyOf("POST /api/birthdays")).toEqual({ name: "Mia", month: 2, day: 29, year: 2000, remind: true });
+    expect(bodyOf("POST /api/birthdays")).toEqual({ name: "Mia", month: 2, day: 29, year: 2000, offsets: [7, 1] });
   });
 
   it("shows a field error and focuses the first invalid field, without calling the API", async () => {
@@ -388,19 +388,6 @@ describe("Add tab", () => {
     expect(input).toHaveFocus();
   });
 
-  it.each([
-    [[7, 1], "Remind me 1 week and 1 day before"],
-    [[7], "Remind me 1 week before"],
-    [[1], "Remind me 1 day before"],
-    [[0], "Remind me on the day"],
-    [[7, 0], "Remind me 1 week before and on the day"],
-    [[1, 0], "Remind me 1 day before and on the day"],
-    [[7, 1, 0], "Remind me 1 week and 1 day before and on the day"],
-  ])("labels the checkbox for offsets %j", async (offsets, label) => {
-    go("#/add");
-    mount({ "GET /api/me": ME(settings({ default_offsets: offsets })) });
-    expect(await screen.findByRole("checkbox", { name: label })).toBeInTheDocument();
-  });
 
   it("defaults the checkbox from auto_remind until the person touches it", async () => {
     go("#/add");
@@ -1071,6 +1058,408 @@ describe("restored draft", () => {
     mount({ "GET /api/me": ME(settings({ auto_remind: true })) });
     await waitFor(() => expect(nameInput()).toHaveValue("Kept"));
     expect(remindBox()).not.toBeChecked();
+  });
+});
+
+type U = ReturnType<typeof userEvent.setup>;
+
+const picker = () => screen.getByRole("group", { name: "When" });
+const settingsPicker = () => screen.getByRole("group", { name: "Default timing" });
+const inPicker = (name: string) => within(picker()).getByRole("checkbox", { name });
+const chip = (text: string) => within(picker()).queryByText(text, { selector: "li" });
+const remindOn = (over: Partial<Settings> = {}) => ME(settings({ auto_remind: true, default_offsets: [14, 7, 1], ...over }));
+
+async function fillAdd(user: U) {
+  await user.type(await nameField(), "Mia");
+  await user.click(month("March"));
+  await user.type(dayInput(), "5");
+}
+async function toTab(user: U, tab: RegExp, heading: string) {
+  await user.click(within(nav()).getByRole("link", { name: tab }));
+  await screen.findByRole("heading", { name: heading });
+}
+const toSettings = (user: U) => toTab(user, /Settings/, "Settings");
+const toAdd = (user: U) => toTab(user, /Add/, "Add a birthday");
+
+describe("Add timing picker", () => {
+  it("prefills the picker from the defaults when Remind me is ticked and hides it when not", async () => {
+    go("#/add");
+    const { user } = mount({ "GET /api/me": remindOn() });
+    await waitFor(() => expect(remindBox()).toBeChecked());
+    expect(inPicker("1 day before")).toBeChecked();
+    expect(inPicker("On the day")).not.toBeChecked();
+    expect(chip("2 weeks")).toBeInTheDocument();
+    expect(chip("1 week")).toBeInTheDocument();
+    await fillAdd(user);
+    await user.click(addButton());
+    await waitFor(() => expect(count("POST /api/birthdays")).toBe(1));
+    expect(bodyOf("POST /api/birthdays")).toEqual({ name: "Mia", month: 3, day: 5, offsets: [14, 7, 1] });
+    await user.click(remindBox());
+    expect(screen.queryByRole("group", { name: "When" })).not.toBeInTheDocument();
+  });
+
+  it("hides the picker and sends empty offsets with auto_remind off", async () => {
+    go("#/add");
+    const { user } = mount({ "POST /api/birthdays": () => json(bd(9, "Mia", 3, 5), 201) });
+    await fillAdd(user);
+    expect(screen.queryByRole("group", { name: "When" })).not.toBeInTheDocument();
+    await user.click(addButton());
+    await waitFor(() => expect(count("POST /api/birthdays")).toBe(1));
+    expect(bodyOf("POST /api/birthdays")).toEqual({ name: "Mia", month: 3, day: 5, offsets: [] });
+  });
+
+  it("a custom timing for one add becomes the default: next prefill and Settings show it, with no PATCH", async () => {
+    go("#/add");
+    const { user } = mount({
+      "GET /api/me": remindOn({ default_offsets: [1] }),
+      "POST /api/birthdays": () => json(bd(9, "Mia", 3, 5, { reminder_offsets: [28, 0] }), 201),
+    });
+    await fillAdd(user);
+    await waitFor(() => expect(remindBox()).toBeChecked());
+    await user.selectOptions(within(picker()).getByLabelText("Add weeks before"), "4");
+    await user.click(within(picker()).getByRole("button", { name: "Add" }));
+    await user.click(inPicker("On the day"));
+    await user.click(inPicker("1 day before"));
+    await user.click(addButton());
+    await waitFor(() => expect(count("POST /api/birthdays")).toBe(1));
+    expect(bodyOf("POST /api/birthdays")).toEqual({ name: "Mia", month: 3, day: 5, offsets: [28, 0] });
+    await waitFor(() => expect(nameInput()).toHaveValue(""));
+    expect(inPicker("On the day")).toBeChecked();
+    expect(inPicker("1 day before")).not.toBeChecked();
+    expect(chip("4 weeks")).toBeInTheDocument();
+    await toSettings(user);
+    expect(within(settingsPicker()).getByText("4 weeks", { selector: "li" })).toBeInTheDocument();
+    expect(within(settingsPicker()).getByRole("checkbox", { name: "On the day" })).toBeChecked();
+    expect(count("PATCH /api/settings")).toBe(0);
+  });
+
+  it("adopts the server's canonical reminder_offsets, not the array the client sent", async () => {
+    go("#/add");
+    const { user } = mount({
+      "GET /api/me": remindOn({ default_offsets: [7, 1] }),
+      "POST /api/birthdays": () => json(bd(9, "Mia", 3, 5, { reminder_offsets: [14, 7, 1] }), 201),
+    });
+    await fillAdd(user);
+    await waitFor(() => expect(remindBox()).toBeChecked());
+    await user.click(addButton());
+    await waitFor(() => expect(count("POST /api/birthdays")).toBe(1));
+    expect(bodyOf("POST /api/birthdays")).toEqual({ name: "Mia", month: 3, day: 5, offsets: [7, 1] });
+    await waitFor(() => expect(chip("2 weeks")).toBeInTheDocument());
+    await toSettings(user);
+    expect(within(settingsPicker()).getByText("2 weeks", { selector: "li" })).toBeInTheDocument();
+  });
+
+  it("an add with reminders off leaves the default alone, even if the picker was changed", async () => {
+    go("#/add");
+    const { user } = mount({
+      "GET /api/me": remindOn(),
+      "POST /api/birthdays": () => json(bd(9, "Mia", 3, 5), 201),
+    });
+    await fillAdd(user);
+    await waitFor(() => expect(remindBox()).toBeChecked());
+    await user.selectOptions(within(picker()).getByLabelText("Add weeks before"), "4");
+    await user.click(within(picker()).getByRole("button", { name: "Add" }));
+    await user.click(remindBox());
+    await user.click(addButton());
+    await waitFor(() => expect(count("POST /api/birthdays")).toBe(1));
+    expect(bodyOf("POST /api/birthdays")).toEqual({ name: "Mia", month: 3, day: 5, offsets: [] });
+    await waitFor(() => expect(nameInput()).toHaveValue(""));
+    expect(chip("4 weeks")).not.toBeInTheDocument();
+    expect(chip("2 weeks")).toBeInTheDocument();
+    expect(inPicker("1 day before")).toBeChecked();
+  });
+
+  it("an untouched picker follows a Settings default change; a touched one does not", async () => {
+    go("#/settings");
+    const { user } = mount({
+      "GET /api/me": remindOn(),
+      "PATCH /api/settings": (init) => json(settings({ auto_remind: true, ...JSON.parse(String(init?.body)) as Partial<Settings> })),
+    });
+    await user.click(within(await screen.findByRole("group", { name: "Default timing" })).getByRole("checkbox", { name: "1 day before" }));
+    await waitFor(() => expect(count("PATCH /api/settings")).toBe(1));
+    await toAdd(user);
+    expect(inPicker("1 day before")).not.toBeChecked();
+    await user.click(inPicker("On the day"));
+    await toSettings(user);
+    await user.click(within(settingsPicker()).getByRole("checkbox", { name: "1 day before" }));
+    await waitFor(() => expect(count("PATCH /api/settings")).toBe(2));
+    await toAdd(user);
+    expect(inPicker("On the day")).toBeChecked();
+    expect(inPicker("1 day before")).not.toBeChecked();
+  });
+
+  it("a restored draft keeps its offsets", async () => {
+    window.sessionStorage.setItem(
+      "birthdays:add-draft",
+      JSON.stringify({ who: draftTag(EMAIL), name: "Kept", month: 4, day: "9", year: "", remind: true, offsets: [28] }),
+    );
+    go("#/add");
+    mount({ "GET /api/me": remindOn() });
+    await waitFor(() => expect(nameInput()).toHaveValue("Kept"));
+    expect(chip("4 weeks")).toBeInTheDocument();
+    expect(chip("2 weeks")).not.toBeInTheDocument();
+    expect(inPicker("1 day before")).not.toBeChecked();
+  });
+
+  it("an old-shape restored draft takes the defaults; a restored empty offsets list shows an empty picker", async () => {
+    window.sessionStorage.setItem(
+      "birthdays:add-draft",
+      JSON.stringify({ who: draftTag(EMAIL), name: "Kept", month: 4, day: "9", year: "", remind: true }),
+    );
+    go("#/add");
+    const first = mount({ "GET /api/me": remindOn() });
+    await waitFor(() => expect(nameInput()).toHaveValue("Kept"));
+    expect(chip("2 weeks")).toBeInTheDocument();
+    expect(inPicker("1 day before")).toBeChecked();
+    first.unmount();
+    window.sessionStorage.setItem(
+      "birthdays:add-draft",
+      JSON.stringify({ who: draftTag(EMAIL), name: "Kept", month: 4, day: "9", year: "", remind: true, offsets: [] }),
+    );
+    const { user } = mount({ "GET /api/me": remindOn() });
+    await waitFor(() => expect(nameInput()).toHaveValue("Kept"));
+    expect(inPicker("1 day before")).not.toBeChecked();
+    expect(chip("2 weeks")).not.toBeInTheDocument();
+    await user.click(addButton());
+    expect(count("POST /api/birthdays")).toBe(0);
+    expect(screen.getByText("Pick at least one reminder time.")).toBeInTheDocument();
+  });
+
+  it("a restored touched value is sent, and the server's differing canonical offsets become the default", async () => {
+    window.sessionStorage.setItem(
+      "birthdays:add-draft",
+      JSON.stringify({ who: draftTag(EMAIL), name: "Kept", month: 4, day: "9", year: "", remind: true, offsets: [28] }),
+    );
+    go("#/add");
+    const { user } = mount({
+      "GET /api/me": remindOn(),
+      "POST /api/birthdays": () => json(bd(9, "Kept", 4, 9, { reminder_offsets: [35, 0] }), 201),
+    });
+    await waitFor(() => expect(nameInput()).toHaveValue("Kept"));
+    await user.click(addButton());
+    await waitFor(() => expect(count("POST /api/birthdays")).toBe(1));
+    expect(bodyOf("POST /api/birthdays")).toEqual({ name: "Kept", month: 4, day: 9, offsets: [28] });
+    await waitFor(() => expect(chip("5 weeks")).toBeInTheDocument());
+    expect(chip("4 weeks")).not.toBeInTheDocument();
+    await toSettings(user);
+    expect(within(settingsPicker()).getByText("5 weeks", { selector: "li" })).toBeInTheDocument();
+  });
+
+  it("a restored draft with non-canonical offsets is discarded, so the picker shows the defaults", async () => {
+    window.sessionStorage.setItem(
+      "birthdays:add-draft",
+      JSON.stringify({ who: draftTag(EMAIL), name: "Kept", month: 4, day: "9", year: "", remind: true, offsets: [1, 14] }),
+    );
+    go("#/add");
+    mount({ "GET /api/me": remindOn() });
+    await waitFor(() => expect(remindBox()).toBeChecked());
+    expect(nameInput()).toHaveValue("");
+    expect(chip("2 weeks")).toBeInTheDocument();
+    expect(inPicker("1 day before")).toBeChecked();
+  });
+
+  it("Enter in the weeks select adds the week and never submits; Enter on a checkbox never submits", async () => {
+    go("#/add");
+    const post = vi.fn(() => json(bd(9, "Mia", 3, 5), 201));
+    const { user } = mount({ "GET /api/me": remindOn(), "POST /api/birthdays": post });
+    await fillAdd(user);
+    await waitFor(() => expect(remindBox()).toBeChecked());
+    const select = within(picker()).getByLabelText("Add weeks before");
+    expect(fireEvent.keyDown(select, { key: "Enter" })).toBe(false);
+    expect(chip("4 weeks")).not.toBeInTheDocument();
+    fireEvent.change(select, { target: { value: "4" } });
+    expect(fireEvent.keyDown(select, { key: "Enter" })).toBe(false);
+    expect(await within(picker()).findByText("4 weeks", { selector: "li" })).toBeInTheDocument();
+    expect(fireEvent.keyDown(inPicker("On the day"), { key: "Enter" })).toBe(false);
+    expect(post).not.toHaveBeenCalled();
+  });
+
+  it("an empty picker blocks the POST and shows its error beside the other field errors", async () => {
+    go("#/add");
+    const { user } = mount({ "GET /api/me": remindOn({ default_offsets: [1] }) });
+    await waitFor(() => expect(remindBox()).toBeChecked());
+    await user.click(inPicker("1 day before"));
+    await user.click(addButton());
+    expect(screen.getByText("Enter a name.")).toBeInTheDocument();
+    expect(screen.getByText("Pick at least one reminder time.")).toBeInTheDocument();
+    expect(nameInput()).toHaveFocus();
+    await user.type(nameInput(), "Mia");
+    await user.click(month("March"));
+    await user.type(dayInput(), "5");
+    await user.click(addButton());
+    expect(count("POST /api/birthdays")).toBe(0);
+    expect(screen.getByText("Pick at least one reminder time.")).toBeInTheDocument();
+    expect(inPicker("On the day")).toHaveFocus();
+    await user.click(inPicker("On the day"));
+    expect(screen.queryByText("Pick at least one reminder time.")).not.toBeInTheDocument();
+    await user.click(addButton());
+    await waitFor(() => expect(count("POST /api/birthdays")).toBe(1));
+    expect(bodyOf("POST /api/birthdays")).toEqual({ name: "Mia", month: 3, day: 5, offsets: [0] });
+  });
+
+  it("the picker error clears on unticking Remind me, and untick then re-tick keeps the chosen offsets", async () => {
+    go("#/add");
+    const { user } = mount({ "GET /api/me": remindOn({ default_offsets: [1] }) });
+    await fillAdd(user);
+    await waitFor(() => expect(remindBox()).toBeChecked());
+    await user.click(inPicker("1 day before"));
+    await user.click(addButton());
+    expect(screen.getByText("Pick at least one reminder time.")).toBeInTheDocument();
+    await user.click(remindBox());
+    expect(screen.queryByText("Pick at least one reminder time.")).not.toBeInTheDocument();
+    await user.click(remindBox());
+    expect(screen.queryByText("Pick at least one reminder time.")).not.toBeInTheDocument();
+    expect(inPicker("1 day before")).not.toBeChecked();
+    await user.click(inPicker("On the day"));
+    await user.click(remindBox());
+    await user.click(remindBox());
+    expect(inPicker("On the day")).toBeChecked();
+  });
+
+  it("a failed add keeps draft.offsets and leaves the default alone", async () => {
+    go("#/add");
+    const { user } = mount({
+      "GET /api/me": remindOn({ default_offsets: [7, 1] }),
+      "POST /api/birthdays": () => json({ error: "internal" }, 500),
+    });
+    await fillAdd(user);
+    await waitFor(() => expect(remindBox()).toBeChecked());
+    await user.selectOptions(within(picker()).getByLabelText("Add weeks before"), "4");
+    await user.click(within(picker()).getByRole("button", { name: "Add" }));
+    await user.click(addButton());
+    await waitFor(() => expect(count("POST /api/birthdays")).toBe(1));
+    expect(chip("4 weeks")).toBeInTheDocument();
+    await toSettings(user);
+    expect(within(settingsPicker()).queryByText("4 weeks", { selector: "li" })).not.toBeInTheDocument();
+    await toAdd(user);
+    expect(chip("4 weeks")).toBeInTheDocument();
+  });
+
+  it("a server invalid_offsets lands in the picker error, focuses the first checkbox and keeps the draft", async () => {
+    go("#/add");
+    const { user } = mount({
+      "GET /api/me": remindOn(),
+      "POST /api/birthdays": () => json({ error: "invalid_offsets" }, 400),
+    });
+    await fillAdd(user);
+    await waitFor(() => expect(remindBox()).toBeChecked());
+    await user.click(addButton());
+    expect(await within(picker()).findByText("Pick at least one reminder time.")).toBeInTheDocument();
+    expect(inPicker("On the day")).toHaveFocus();
+    expect(within(screen.getByTestId("add-alert")).queryByText(/./)).not.toBeInTheDocument();
+    expect(nameInput()).toHaveValue("Mia");
+    expect(chip("2 weeks")).toBeInTheDocument();
+    await toSettings(user);
+    expect(within(settingsPicker()).getByText("2 weeks", { selector: "li" })).toBeInTheDocument();
+  });
+
+  it("states the hint and renders checkbox, picker, hint, then notice, with the described-by wiring", async () => {
+    go("#/add");
+    mount({ "GET /api/me": remindOn({ ntfy: false }) });
+    await waitFor(() => expect(remindBox()).toBeChecked());
+    const hint = screen.getByText(/A time that has already passed this year starts next year\./);
+    expect(hint).toHaveTextContent("Sent at 7am Pacific. Your choice is kept for next time.");
+    const notice = document.getElementById("add-remind-hint") as HTMLElement;
+    const follows = (a: Element, b: Element) => Boolean(a.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING);
+    expect(follows(remindBox(), picker())).toBe(true);
+    expect(follows(picker(), hint)).toBe(true);
+    expect(follows(hint, notice)).toBe(true);
+    expect(picker()).toHaveAttribute("aria-describedby", "add-err add-timing-hint add-remind-hint");
+    expect(remindBox()).toHaveAttribute("aria-describedby", "add-remind-hint");
+  });
+
+  it("describes the picker without the notice when a destination exists", async () => {
+    go("#/add");
+    mount({ "GET /api/me": remindOn() });
+    await waitFor(() => expect(remindBox()).toBeChecked());
+    expect(picker()).toHaveAttribute("aria-describedby", "add-err add-timing-hint");
+    expect(remindBox()).not.toHaveAttribute("aria-describedby");
+  });
+
+  it("an in-flight list_view PATCH carrying the old default never overwrites an adopted default", async () => {
+    go("#/birthdays");
+    const held = deferred();
+    const { user } = mount({
+      "GET /api/me": remindOn({ default_offsets: [7, 1] }),
+      "PATCH /api/settings": () => held.promise,
+      "POST /api/birthdays": () => json(bd(9, "Mia", 3, 5, { reminder_offsets: [28, 0] }), 201),
+    });
+    await user.click(await viewRadio("A–Z"));
+    await waitFor(() => expect(count("PATCH /api/settings")).toBe(1));
+    await toAdd(user);
+    await fillAdd(user);
+    await user.click(addButton());
+    await waitFor(() => expect(count("POST /api/birthdays")).toBe(1));
+    await waitFor(() => expect(chip("4 weeks")).toBeInTheDocument());
+    await act(async () => {
+      held.resolve(json(settings({ auto_remind: true, list_view: "name", default_offsets: [7, 1] })));
+    });
+    await toSettings(user);
+    await waitFor(() => expect(screen.getByTestId("settings-status")).toHaveTextContent("Saved."));
+    expect(within(settingsPicker()).getByText("4 weeks", { selector: "li" })).toBeInTheDocument();
+    expect(within(settingsPicker()).queryByText("1 week", { selector: "li" })).not.toBeInTheDocument();
+    await toAdd(user);
+    expect(chip("4 weeks")).toBeInTheDocument();
+  });
+
+  it("a Settings default PATCH in flight or queued is not overridden by the add's local default update", async () => {
+    go("#/settings");
+    const first = deferred();
+    const second = deferred();
+    let n = 0;
+    const { user } = mount({
+      "GET /api/me": remindOn(),
+      "PATCH /api/settings": () => (++n === 1 ? first.promise : second.promise),
+      "POST /api/birthdays": () => json(bd(9, "Mia", 3, 5, { reminder_offsets: [28] }), 201),
+    });
+    await screen.findByRole("group", { name: "Default timing" });
+    await user.click(within(settingsPicker()).getByRole("checkbox", { name: "1 day before" }));
+    await waitFor(() => expect(count("PATCH /api/settings")).toBe(1));
+    await user.click(within(settingsPicker()).getByRole("checkbox", { name: "On the day" }));
+    await toAdd(user);
+    await fillAdd(user);
+    await user.click(addButton());
+    await waitFor(() => expect(count("POST /api/birthdays")).toBe(1));
+    expect(bodyOf("POST /api/birthdays")).toEqual({ name: "Mia", month: 3, day: 5, offsets: [14, 7, 0] });
+    await waitFor(() => expect(nameInput()).toHaveValue(""));
+    expect(chip("4 weeks")).not.toBeInTheDocument();
+    expect(inPicker("On the day")).toBeChecked();
+    await toSettings(user);
+    expect(within(settingsPicker()).queryByText("4 weeks", { selector: "li" })).not.toBeInTheDocument();
+    expect(within(settingsPicker()).getByRole("checkbox", { name: "On the day" })).toBeChecked();
+    await act(async () => {
+      first.resolve(json(settings({ auto_remind: true, default_offsets: [14, 7] })));
+    });
+    await waitFor(() => expect(count("PATCH /api/settings")).toBe(2));
+    expect(bodyOf("PATCH /api/settings", 0)).toEqual({ default_offsets: [14, 7] });
+    expect(bodyOf("PATCH /api/settings", 1)).toEqual({ default_offsets: [14, 7, 0] });
+    await act(async () => {
+      second.resolve(json(settings({ auto_remind: true, default_offsets: [14, 7, 0] })));
+    });
+    await waitFor(() => expect(screen.getByTestId("settings-status")).toHaveTextContent("Saved."));
+    expect(within(settingsPicker()).getByRole("checkbox", { name: "On the day" })).toBeChecked();
+    expect(within(settingsPicker()).getByRole("checkbox", { name: "1 day before" })).not.toBeChecked();
+  });
+
+  it("after a failed Settings default PATCH, a successful add applies the POST value and clears the failure line", async () => {
+    go("#/settings");
+    const { user } = mount({
+      "GET /api/me": remindOn(),
+      "PATCH /api/settings": () => json({ error: "internal" }, 500),
+      "POST /api/birthdays": () => json(bd(9, "Mia", 3, 5, { reminder_offsets: [28, 0] }), 201),
+    });
+    await screen.findByRole("group", { name: "Default timing" });
+    await user.click(within(settingsPicker()).getByRole("checkbox", { name: "1 day before" }));
+    await waitFor(() => expect(screen.getByTestId("settings-status")).toHaveTextContent("Couldn't save that"));
+    await toAdd(user);
+    await fillAdd(user);
+    await user.click(addButton());
+    await waitFor(() => expect(count("POST /api/birthdays")).toBe(1));
+    await waitFor(() => expect(chip("4 weeks")).toBeInTheDocument());
+    await toSettings(user);
+    expect(within(settingsPicker()).getByText("4 weeks", { selector: "li" })).toBeInTheDocument();
+    expect(within(settingsPicker()).getByRole("checkbox", { name: "On the day" })).toBeChecked();
+    expect(screen.getByTestId("settings-status")).not.toHaveTextContent("Couldn't save that");
   });
 });
 

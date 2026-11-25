@@ -110,7 +110,7 @@ export function EditForm({
     }
     setAlert("");
     setStatus("");
-    const found = validateAdd({ ...form, remind: null });
+    const found = validateAdd({ ...form, remind: null, offsets: null });
     setErrors(found);
     if (found.name !== "") {
       nameRef.current?.focus();

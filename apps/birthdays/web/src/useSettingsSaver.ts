@@ -31,6 +31,9 @@ export function useSettingsSaver(
   // The newest value the person chose per field that the server has not answered for yet (or that failed to save).
   // Handlers that derive a value from the previous one (ticking a box) read it through latest(), never the render.
   const latestRef = useRef<Partial<Prefs>>({});
+  // The keys of the batch run() is awaiting a response for, and the keys adopt() applied during that await.
+  const inFlight = useRef<Set<keyof Prefs>>(new Set());
+  const adoptedRef = useRef<Set<keyof Prefs>>(new Set());
   const [status, setStatus] = useState("");
   const [error, setError] = useState(false);
 
@@ -44,15 +47,19 @@ export function useSettingsSaver(
     while (Object.keys(desired.current).length > 0) {
       const sending = desired.current;
       desired.current = {};
+      inFlight.current = new Set(Object.keys(sending) as (keyof Prefs)[]);
+      adoptedRef.current = new Set();
       setStatus(MSG_SAVING);
       setError(false);
       const res = await patchSettings(sending);
+      inFlight.current = new Set();
       if (res.kind === "ok") {
         failed = false;
         for (const k of Object.keys(sending) as (keyof Prefs)[]) {
           overridden.current.delete(k);
         }
         const skip = new Set(overridden.current);
+        const adopted = new Set(adoptedRef.current);
         const pending = desired.current;
         const server = res.data;
         for (const k of Object.keys(sending) as (keyof Prefs)[]) {
@@ -72,7 +79,7 @@ export function useSettingsSaver(
           };
           const out: Record<string, unknown> = next;
           for (const k of PREF_KEYS) {
-            if (!(k in pending) && !skip.has(k)) {
+            if (!(k in pending) && !skip.has(k) && !adopted.has(k)) {
               out[k] = server[k];
             }
           }
@@ -106,6 +113,33 @@ export function useSettingsSaver(
     [setSettings, run],
   );
 
+  // Applies a value the server already holds (it came back from another request, not from a PATCH): no PATCH is sent.
+  // A key whose PATCH is in flight or queued keeps that PATCH's value. Otherwise the value is applied and the key's
+  // failed state is cleared; a PATCH response already in flight for other keys must not overwrite it.
+  const adopt = useCallback(
+    (patch: Partial<Prefs>) => {
+      const take = (Object.keys(patch) as (keyof Prefs)[]).filter(
+        (k) => !inFlight.current.has(k) && !(k in desired.current),
+      );
+      if (take.length === 0) {
+        return;
+      }
+      const applied: Record<string, unknown> = {};
+      for (const k of take) {
+        applied[k] = patch[k];
+        delete latestRef.current[k];
+        overridden.current.delete(k);
+        adoptedRef.current.add(k);
+      }
+      setSettings((s) => (s === null ? s : { ...s, ...applied }));
+      if (overridden.current.size === 0 && !running.current) {
+        setStatus((st) => (st === MSG_SAVE_FAILED ? "" : st));
+        setError(false);
+      }
+    },
+    [setSettings],
+  );
+
   const latest = useCallback(<K extends keyof Prefs>(key: K): Prefs[K] | undefined => latestRef.current[key], []);
 
   // A notify response updates only the server-derived counters.
@@ -120,7 +154,7 @@ export function useSettingsSaver(
     [setSettings],
   );
 
-  return { save, latest, status, error, applyCounters };
+  return { save, adopt, latest, status, error, applyCounters };
 }
 
 export type SettingsSaver = ReturnType<typeof useSettingsSaver>;

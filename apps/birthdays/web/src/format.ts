@@ -85,22 +85,6 @@ export function addedText(b: Birthday, today: string): string {
   return `Added ${b.name} - ${shortDate(d.occ)}, ${when}.`;
 }
 
-const PART: Record<number, string> = { 7: "1 week", 1: "1 day" };
-
-// The checkbox timing for the person's default offsets: any non-empty subset of {0,1,7}.
-export function timingLabel(offsets: number[]): string {
-  const set = new Set(offsets);
-  const before = [7, 1].filter((o) => set.has(o)).map((o) => PART[o] ?? "");
-  const pieces: string[] = [];
-  if (before.length > 0) {
-    pieces.push(`${before.join(" and ")} before`);
-  }
-  if (set.has(0)) {
-    pieces.push("on the day");
-  }
-  return pieces.length > 0 ? pieces.join(" and ") : "before";
-}
-
 // No usable place to send a reminder: no ntfy and no non-stale destination. "stale" when destinations exist but all
 // are stale, "none" when there are none.
 export function noDestination(s: Settings | null): "none" | "stale" | null {

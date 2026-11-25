@@ -148,7 +148,7 @@ describe("api result mapping", () => {
     [500, "notify_unavailable"],
   ])("maps %i %s to its own kind", async (status, code) => {
     respond(JSON.stringify({ error: code }), status, JSON_CT);
-    expect(await postBirthday({ name: "x", month: 1, day: 1 })).toEqual({ kind: code });
+    expect(await postBirthday({ name: "x", month: 1, day: 1, offsets: [] })).toEqual({ kind: code });
   });
 
   it("maps an unknown JSON error code to generic and never exposes it", async () => {
@@ -181,9 +181,9 @@ describe("api result mapping", () => {
 
   it("keeps a 200 non-JSON body on a write as session_expired, and any other non-JSON 2xx as generic", async () => {
     respond("<html>login</html>", 200, HTML);
-    expect(await postBirthday({ name: "x", month: 1, day: 1 })).toEqual({ kind: "session_expired" });
+    expect(await postBirthday({ name: "x", month: 1, day: 1, offsets: [] })).toEqual({ kind: "session_expired" });
     respond("<html>odd</html>", 201, HTML);
-    expect(await postBirthday({ name: "x", month: 1, day: 1 })).toEqual({ kind: "generic" });
+    expect(await postBirthday({ name: "x", month: 1, day: 1, offsets: [] })).toEqual({ kind: "generic" });
   });
 });
 
@@ -192,7 +192,7 @@ describe("api payloads", () => {
     respond(JSON.stringify({ email: "a@example.com", settings: SETTINGS }), 200, JSON_CT);
     expect(await getMe()).toEqual({ kind: "ok", data: { email: "a@example.com", settings: SETTINGS } });
     respond(JSON.stringify(BIRTHDAY), 201, JSON_CT);
-    expect(await postBirthday({ name: "Sam Rivera", month: 7, day: 4, year: 1990, remind: true })).toEqual({
+    expect(await postBirthday({ name: "Sam Rivera", month: 7, day: 4, year: 1990, offsets: [14, 7, 1] })).toEqual({
       kind: "ok",
       data: BIRTHDAY,
     });
@@ -268,14 +268,14 @@ describe("api payloads", () => {
 describe("api totality", () => {
   it("maps a non-TypeError fetch rejection on a write to unavailable", async () => {
     vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new Error("boom")));
-    expect(await postBirthday({ name: "x", month: 1, day: 1 })).toEqual({ kind: "unavailable" });
+    expect(await postBirthday({ name: "x", month: 1, day: 1, offsets: [] })).toEqual({ kind: "unavailable" });
   });
 
   it("maps a truncated JSON body and a wrong-shape 2xx on a write", async () => {
     respond('{"id":', 201, JSON_CT);
-    expect(await postBirthday({ name: "x", month: 1, day: 1 })).toEqual({ kind: "generic" });
+    expect(await postBirthday({ name: "x", month: 1, day: 1, offsets: [] })).toEqual({ kind: "generic" });
     respond('{"id":"nope"}', 201, JSON_CT);
-    expect(await postBirthday({ name: "x", month: 1, day: 1 })).toEqual({ kind: "generic" });
+    expect(await postBirthday({ name: "x", month: 1, day: 1, offsets: [] })).toEqual({ kind: "generic" });
   });
 
   it.each([
@@ -304,14 +304,14 @@ describe("api requests", () => {
     expect(f.mock.calls[0][1]).toMatchObject({ credentials: "same-origin", redirect: "manual", method: "GET" });
   });
 
-  it("POSTs the birthday JSON with remind", async () => {
+  it("POSTs the birthday JSON with offsets", async () => {
     const f = respond(JSON.stringify(BIRTHDAY), 201, JSON_CT);
-    await postBirthday({ name: "Sam", month: 7, day: 4, remind: true });
+    await postBirthday({ name: "Sam", month: 7, day: 4, offsets: [14, 1] });
     const init = f.mock.calls[0][1] as RequestInit;
     expect(f.mock.calls[0][0]).toBe("/api/birthdays");
     expect(init.method).toBe("POST");
     expect(init.headers).toMatchObject({ "Content-Type": "application/json" });
-    expect(JSON.parse(init.body as string)).toEqual({ name: "Sam", month: 7, day: 4, remind: true });
+    expect(JSON.parse(init.body as string)).toEqual({ name: "Sam", month: 7, day: 4, offsets: [14, 1] });
   });
 
   it("uses the right method, path and JSON body for each write", async () => {

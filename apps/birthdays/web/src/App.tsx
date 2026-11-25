@@ -210,7 +210,7 @@ export function App() {
         const stored = loadDraft(draftTag(email));
         draftReady.current = true;
         if (stored !== null) {
-          setDraft({ ...stored, remind: stored.remind ?? s.auto_remind });
+          setDraft({ ...stored, remind: stored.remind ?? s.auto_remind, offsets: stored.offsets ?? s.default_offsets });
         }
         setSettings(s);
         setMe({ s: "ok", email });
@@ -511,6 +511,7 @@ export function App() {
           recent={recent}
           open={open}
           onAdded={onAdded}
+          onDefaultOffsets={(o) => saver.adopt({ default_offsets: o })}
           onSessionFailure={sessionFailure}
           nameRef={nameRef}
           autofocusPending={autofocusPending}
