@@ -519,9 +519,9 @@ expect_eq "turning reminders off deletes only the viewer's own row" "$(state5)" 
 
 # Settings: a one-column UPDATE leaves the other columns unchanged; the enum CHECKs reject bad values.
 settings_row() { dbq "SELECT auto_remind::text || '|' || default_offsets::text || '|' || start_tab || '|' || list_view || '|' || calendar_zoom || '|' || color_scheme FROM users WHERE id = $o5"; }
-expect_eq "the settings defaults" "$(settings_row)" "false|{7,1}|auto|upcoming|month|confetti"
+expect_eq "the settings defaults" "$(settings_row)" "false|{14,7,1}|auto|upcoming|month|confetti"
 dml "$(gen_query updateSettings NULL NULL NULL "'name'" NULL NULL "$o5")"
-expect_eq "a one-column settings UPDATE leaves the other columns unchanged" "$(settings_row)" "false|{7,1}|auto|name|month|confetti"
+expect_eq "a one-column settings UPDATE leaves the other columns unchanged" "$(settings_row)" "false|{14,7,1}|auto|name|month|confetti"
 dml "$(gen_query updateSettings true "'{0}'" NULL NULL "'week'" "'candle'" "$o5")"
 expect_eq "a multi-column settings UPDATE sets just those columns" "$(settings_row)" "true|{0}|auto|name|week|candle"
 rejects "an unknown start_tab" users_start_tab_check "$(gen_query updateSettings NULL NULL "'bogus'" NULL NULL NULL "$o5")"
@@ -529,7 +529,26 @@ rejects "an unknown list_view" users_list_view_check "$(gen_query updateSettings
 rejects "an unknown calendar_zoom" users_calendar_zoom_check "$(gen_query updateSettings NULL NULL NULL NULL "'bogus'" NULL "$o5")"
 rejects "an unknown color_scheme" users_color_scheme_check "$(gen_query updateSettings NULL NULL NULL NULL NULL "'bogus'" "$o5")"
 expect_eq "rejected settings UPDATEs changed nothing" "$(settings_row)" "true|{0}|auto|name|week|candle"
-rejects "reminder offsets with a value outside {0,1,7}" reminder_settings_offsets_check "$(gen_query upsertViewerReminder "$o5" "'{2}'" 201 "'s5owner@example.test'")"
+rejects "reminder offsets with a value outside the allowed set" reminder_settings_offsets_check "$(gen_query upsertViewerReminder "$o5" "'{2}'" 201 "'s5owner@example.test'")"
+rejects "reminder offsets {8} (not a whole week)" reminder_settings_offsets_check "$(gen_query upsertViewerReminder "$o5" "'{8}'" 201 "'s5owner@example.test'")"
+rejects "reminder offsets {365} (past 52 weeks)" reminder_settings_offsets_check "$(gen_query upsertViewerReminder "$o5" "'{365}'" 201 "'s5owner@example.test'")"
+rejects "empty reminder offsets through the upsert" reminder_settings_offsets_check "$(gen_query upsertViewerReminder "$o5" "'{}'" 201 "'s5owner@example.test'")"
+dml "$(gen_query upsertViewerReminder "$o5" "'{14}'" 201 "'s5owner@example.test'")"
+expect_eq "reminder offsets {14} are accepted" "$(dbq "SELECT offsets FROM reminder_settings WHERE birthday_id = 201 AND user_id = $o5")" "{14}"
+dml "$(gen_query upsertViewerReminder "$o5" "'{364}'" 201 "'s5owner@example.test'")"
+expect_eq "reminder offsets {364} are accepted" "$(dbq "SELECT offsets FROM reminder_settings WHERE birthday_id = 201 AND user_id = $o5")" "{364}"
+dml "$(gen_query upsertViewerReminder "$o5" "'{364,0}'" 201 "'s5owner@example.test'")"
+expect_eq "reminder offsets {364,0} are accepted" "$(dbq "SELECT offsets FROM reminder_settings WHERE birthday_id = 201 AND user_id = $o5")" "{364,0}"
+
+# Migration 00002 moves only users still on the old {7,1} default. This script has no goose binary (the app applies
+# migrations at startup), so it runs the shipped UPDATE statement text, extracted from the migration file, against rows
+# seeded with an explicit default; it does not test goose ordering.
+mig_stmt="$(sed -n 's/^\(UPDATE users SET default_offsets .*\)$/\1/p' "$here/migrations/00002_custom_reminder_offsets.sql")"
+[ -n "$mig_stmt" ] && [ "$(wc -l <<< "$mig_stmt")" -eq 1 ] || { echo "FAIL: cannot extract the UPDATE statement from migrations/00002_custom_reminder_offsets.sql"; exit 1; }
+dml "INSERT INTO users (email, default_offsets) VALUES ('mig-old@example.test', '{7,1}'), ('mig-custom@example.test', '{0}')"
+dml "$mig_stmt"
+expect_eq "the migration moves an untouched {7,1} default to {14,7,1}" "$(dbq "SELECT default_offsets FROM users WHERE email = 'mig-old@example.test'")" "{14,7,1}"
+expect_eq "the migration leaves a custom default alone" "$(dbq "SELECT default_offsets FROM users WHERE email = 'mig-custom@example.test'")" "{0}"
 
 # Identity: the upsert is keyed by the (already lowercase) email, so a repeat returns the same row, and a share matches by that email.
 expect_eq "UpsertUser returns the existing row for a repeated email" "$(db -c "$(gen_query upsertUser "'$fe'") " < /dev/null | head -n 1 | cut -d '|' -f 1)" "$f5"

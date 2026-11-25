@@ -166,7 +166,7 @@ func TestMeReturnsSettings(t *testing.T) {
 	}
 	decode(t, rec.Body.String(), &got)
 	if rec.Code != 200 || got.Email != "sam@example.com" || got.Settings.AutoRemind || got.Settings.StartTab != "auto" ||
-		got.Settings.ColorScheme != "confetti" || !slices.Equal(got.Settings.DefaultOffsets, []int16{7, 1}) {
+		got.Settings.ColorScheme != "confetti" || !slices.Equal(got.Settings.DefaultOffsets, []int16{14, 7, 1}) {
 		t.Fatalf("me = %d %s", rec.Code, rec.Body.String())
 	}
 }
@@ -194,8 +194,8 @@ func TestCreateRemindMatrix(t *testing.T) {
 			body string
 			want []int16
 		}{
-			"omitted": {sam, map[bool][]int16{false: {}, true: {0, 1}}[auto]},
-			"true":    {`{"name":"Sam","month":11,"day":21,"remind":true}`, []int16{0, 1}},
+			"omitted": {sam, map[bool][]int16{false: {}, true: {1, 0}}[auto]},
+			"true":    {`{"name":"Sam","month":11,"day":21,"remind":true}`, []int16{1, 0}},
 			"false":   {`{"name":"Sam","month":11,"day":21,"remind":false}`, []int16{}},
 		} {
 			hn := newHarness(t)
@@ -463,19 +463,24 @@ func TestReminderOffsetsValidatedAndDeduped(t *testing.T) {
 	hn := newHarness(t)
 	b := hn.create(alice, sam)
 	path := fmt.Sprintf("/api/birthdays/%d/reminders", b.ID)
-	for _, body := range []string{`{"offsets":[2]}`, `{"offsets":[-1]}`, `{"offsets":[1,3]}`, `{}`, `{"offsets":null}`, `{"offsets":["a"]}`, `nope`} {
+	for _, body := range []string{`{"offsets":[2]}`, `{"offsets":[-1]}`, `{"offsets":[1,3]}`, `{}`, `{"offsets":null}`, `{"offsets":["a"]}`, `nope`,
+		`{"offsets":[8]}`, `{"offsets":[13]}`, `{"offsets":[365]}`, `{"offsets":[371]}`, `{"offsets":[-7]}`, `{"offsets":[1.5]}`, `{"offsets":"x"}`} {
 		hn.wantStatus(hn.as(alice, "PUT", path, body), 400, "invalid_offsets")
 	}
-	rec := hn.as(alice, "PUT", path, `{"offsets":[1,1,7,1]}`)
+	for body, want := range map[string][]int16{
+		`{"offsets":[14]}`: {14}, `{"offsets":[364]}`: {364}, `{"offsets":[0,1,14]}`: {14, 1, 0},
+		`{"offsets":[1,14,0,7,14]}`: {14, 7, 1, 0}, `{"offsets":[1,1,7,1]}`: {7, 1},
+	} {
+		rec := hn.as(alice, "PUT", path, body)
+		hn.wantStatus(rec, 200, "")
+		var got struct{ Offsets []int16 }
+		decode(t, rec.Body.String(), &got)
+		if !slices.Equal(got.Offsets, want) || !slices.Equal(hn.store.reminders[0].Offsets, want) {
+			t.Fatalf("%s: offsets = %v, stored %v, want the canonical %v", body, got.Offsets, hn.store.reminders[0].Offsets, want)
+		}
+	}
+	rec := hn.as(alice, "PUT", path, `{"offsets":[1]}`)
 	hn.wantStatus(rec, 200, "")
-	var got struct{ Offsets []int16 }
-	decode(t, rec.Body.String(), &got)
-	if !slices.Equal(got.Offsets, []int16{1, 7}) {
-		t.Fatalf("offsets = %v, want the deduped [1 7]", got.Offsets)
-	}
-	if !slices.Equal(hn.store.reminders[0].Offsets, []int16{1, 7}) {
-		t.Fatalf("stored offsets %v", hn.store.reminders[0].Offsets)
-	}
 	rec = hn.as(alice, "PUT", path, `{"offsets":[]}`)
 	hn.wantStatus(rec, 200, "")
 	if !strings.Contains(rec.Body.String(), `"offsets":[]`) || len(hn.store.reminders) != 0 {
@@ -497,13 +502,13 @@ func TestSettingsPatch(t *testing.T) {
 	}
 	decode(t, rec.Body.String(), &s)
 	if s.ListView != "calendar" || s.StartTab != "auto" || s.CalendarZoom != "month" || s.ColorScheme != "confetti" ||
-		s.AutoRemind || !slices.Equal(s.DefaultOffsets, []int16{7, 1}) {
+		s.AutoRemind || !slices.Equal(s.DefaultOffsets, []int16{14, 7, 1}) {
 		t.Fatalf("a one-field patch changed other fields: %s", rec.Body.String())
 	}
 	rec = hn.as(alice, "PATCH", "/api/settings", `{"auto_remind":true,"default_offsets":[0,0,1],"color_scheme":"candle"}`)
 	hn.wantStatus(rec, 200, "")
 	decode(t, rec.Body.String(), &s)
-	if !s.AutoRemind || s.ColorScheme != "candle" || s.ListView != "calendar" || !slices.Equal(s.DefaultOffsets, []int16{0, 1}) {
+	if !s.AutoRemind || s.ColorScheme != "candle" || s.ListView != "calendar" || !slices.Equal(s.DefaultOffsets, []int16{1, 0}) {
 		t.Fatalf("patch = %s", rec.Body.String())
 	}
 	for body, code := range map[string]string{
@@ -511,6 +516,10 @@ func TestSettingsPatch(t *testing.T) {
 		`{"start_tab":"nope"}`: "invalid_setting", `{"list_view":"x"}`: "invalid_setting", `{"calendar_zoom":"day"}`: "invalid_setting",
 		`{"color_scheme":"neon"}`: "invalid_setting", `{"auto_remind":"yes"}`: "invalid_setting", `nope`: "invalid_setting",
 		`{"default_offsets":[]}`: "invalid_offsets", `{"default_offsets":[3]}`: "invalid_offsets",
+		`{"default_offsets":[8]}`: "invalid_offsets", `{"default_offsets":[13]}`: "invalid_offsets",
+		`{"default_offsets":[365]}`: "invalid_offsets", `{"default_offsets":[371]}`: "invalid_offsets",
+		`{"default_offsets":[-7]}`: "invalid_offsets", `{"default_offsets":[1.5]}`: "invalid_setting",
+		`{"default_offsets":["a"]}`: "invalid_setting", `{"default_offsets":"x"}`: "invalid_setting",
 		`{"list_view":"name","default_offsets":[2]}`: "invalid_offsets",
 	} {
 		hn.wantStatus(hn.as(alice, "PATCH", "/api/settings", body), 400, code)
@@ -587,7 +596,7 @@ func TestListBirthdaysLabelsOwnedAndShared(t *testing.T) {
 		seen[b.ID] = true
 		switch b.ID {
 		case own.ID:
-			if !b.IsMine || b.OwnerEmail != bob || !slices.Equal(b.ReminderOffsets, []int16{7, 1}) {
+			if !b.IsMine || b.OwnerEmail != bob || !slices.Equal(b.ReminderOffsets, []int16{14, 7, 1}) {
 				t.Errorf("owned row %+v", b)
 			}
 		case theirs.ID:

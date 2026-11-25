@@ -163,18 +163,24 @@ func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"email": v.email, "settings": set})
 }
 
-// validOffsets checks every value is 0, 1 or 7 and removes duplicates (first occurrence wins). ok is false for any
-// other value.
+// allowedOffset reports whether o is on the day (0), one day before (1) or a whole number of weeks, 1 to 52, before.
+func allowedOffset(o int) bool {
+	return o == 0 || o == 1 || (o >= 7 && o <= 364 && o%7 == 0)
+}
+
+// validOffsets checks every value is allowed, removes duplicates and returns the values farthest-first (descending).
+// ok is false for any other value.
 func validOffsets(in []int) (out []int16, ok bool) {
 	out = []int16{}
 	for _, o := range in {
-		if o != 0 && o != 1 && o != 7 {
+		if !allowedOffset(o) {
 			return nil, false
 		}
 		if !slices.Contains(out, int16(o)) {
 			out = append(out, int16(o))
 		}
 	}
+	slices.SortFunc(out, func(a, b int16) int { return int(b) - int(a) })
 	return out, true
 }
 
@@ -278,6 +284,26 @@ type birthdayBody struct {
 	Day    int    `json:"day"`
 	Year   *int   `json:"year"`
 	Remind *bool  `json:"remind"`
+	// Offsets is the raw value so parseBirthdayBody never fails on its type; only handleCreateBirthday reads it (a
+	// present key, even null, is non-nil).
+	Offsets json.RawMessage `json:"offsets"`
+}
+
+// createOffsets interprets a create body's offsets. present is false when the key is absent. ok is false for an
+// ambiguous (remind also set) or invalid value.
+func createOffsets(b birthdayBody) (offs []int16, present, ok bool) {
+	if b.Offsets == nil {
+		return nil, false, true
+	}
+	if b.Remind != nil || string(b.Offsets) == "null" {
+		return nil, true, false
+	}
+	var in []int
+	if err := json.Unmarshal(b.Offsets, &in); err != nil {
+		return nil, true, false
+	}
+	offs, ok = validOffsets(in)
+	return offs, true, ok
 }
 
 // parseBirthdayBody decodes and validates a create / replace body; on failure it has written the response.
@@ -341,9 +367,17 @@ func (s *Server) handleCreateBirthday(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	custom, hasOffsets, ok := createOffsets(b)
+	if !ok {
+		writeError(w, http.StatusBadRequest, "invalid_offsets")
+		return
+	}
 	remind := v.user.AutoRemind
 	if b.Remind != nil {
 		remind = *b.Remind
+	}
+	if hasOffsets {
+		remind = len(custom) > 0
 	}
 	var out birthdayJSON
 	var tooMany bool
@@ -367,9 +401,18 @@ func (s *Server) handleCreateBirthday(w http.ResponseWriter, r *http.Request) {
 		offsets := []int16{}
 		if remind {
 			offsets = slices.Clone(v.user.DefaultOffsets)
+			if hasOffsets {
+				offsets = custom
+			}
 			if _, err := q.UpsertViewerReminder(r.Context(), db.UpsertViewerReminderParams{
 				ViewerID: v.user.ID, Offsets: offsets, BirthdayID: row.ID, ViewerEmail: v.email}); err != nil {
 				return err
+			}
+			if hasOffsets { // the last selection becomes the default, in the same transaction
+				if _, err := q.UpdateSettings(r.Context(), db.UpdateSettingsParams{
+					UserID: v.user.ID, DefaultOffsets: offsets}); err != nil {
+					return err
+				}
 			}
 		}
 		out = birthdayJSON{ID: row.ID, Name: row.Name, Month: row.Month, Day: row.Day, Year: yearPtr(row.Year),
