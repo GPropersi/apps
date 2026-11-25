@@ -4,8 +4,8 @@ import { announce } from "./util";
 
 const WEEKS = Array.from({ length: 52 }, (_, i) => i + 1);
 
-export function weeksLabel(n: number): string {
-  return n === 1 ? "1 week" : `${n} weeks`;
+function weeksLabel(count: number): string {
+  return count === 1 ? "1 week" : `${count} weeks`;
 }
 
 function canonical(values: number[]): number[] {
@@ -13,9 +13,9 @@ function canonical(values: number[]): number[] {
 }
 
 function same(a: number[], b: number[]): boolean {
-  const x = canonical(a);
-  const y = canonical(b);
-  return x.length === y.length && x.every((v, i) => v === y[i]);
+  const canonicalA = canonical(a);
+  const canonicalB = canonical(b);
+  return canonicalA.length === canonicalB.length && canonicalA.every((v, index) => v === canonicalB[index]);
 }
 
 // The one place reminder timing is chosen: "on the day" and "1 day before" boxes, removable week chips, and a select
@@ -53,20 +53,23 @@ export function TimingPicker({
   const focusAfter = useRef<number | "select" | null>(null);
   const lastEmitted = useRef<number[] | null>(null);
   // The newest value the person chose: a second change made before the parent re-renders builds on it.
-  const cur = useRef<number[]>(value);
+  const latestValue = useRef<number[]>(value);
   const prevValue = useRef<number[]>(value);
   if (!same(prevValue.current, value)) {
-    cur.current = value;
+    latestValue.current = value;
     prevValue.current = value;
   }
 
   const weeks = canonical(value).filter((v) => v >= 7);
 
   // A value that differs in content from what this picker last emitted came from outside (a revert): drop the stale
-  // announcement.
+  // announcement, and the "at least one" message, which no longer describes the shown value.
   useEffect(() => {
     if (lastEmitted.current === null || !same(lastEmitted.current, value)) {
       setStatus("");
+      if (value.length > 0) {
+        setEmptyErr("");
+      }
     }
   }, [value]);
 
@@ -84,15 +87,15 @@ export function TimingPicker({
   }, [value]);
 
   function emit(next: number[]) {
-    const c = canonical(next);
-    cur.current = c;
-    lastEmitted.current = c;
-    onChange(c);
+    const canonicalOffsets = canonical(next);
+    latestValue.current = canonicalOffsets;
+    lastEmitted.current = canonicalOffsets;
+    onChange(canonicalOffsets);
   }
 
   function setDay(v: 0 | 1, on: boolean) {
-    const base = cur.current;
-    const next = base.filter((x) => x !== v);
+    const base = latestValue.current;
+    const next = base.filter((offset) => offset !== v);
     if (on) {
       next.push(v);
     }
@@ -105,15 +108,15 @@ export function TimingPicker({
   }
 
   function removeWeek(offset: number) {
-    const base = cur.current;
-    const next = base.filter((x) => x !== offset);
+    const base = latestValue.current;
+    const next = base.filter((o) => o !== offset);
     if (next.length === 0 && !allowEmpty) {
       setEmptyErr(emptyMessage ?? "");
       return;
     }
-    const w = canonical(base).filter((v) => v >= 7);
-    const i = w.indexOf(offset);
-    const neighbour = w[i + 1] ?? w[i - 1];
+    const weekOffsets = canonical(base).filter((v) => v >= 7);
+    const removedIndex = weekOffsets.indexOf(offset);
+    const neighbour = weekOffsets[removedIndex + 1] ?? weekOffsets[removedIndex - 1];
     focusAfter.current = neighbour ?? "select";
     setEmptyErr("");
     announce(setStatus, `Removed ${weeksLabel(offset / 7)} before`);
@@ -128,10 +131,10 @@ export function TimingPicker({
     pickRef.current = "";
     setPick("");
     const offset = Number(chosen) * 7;
-    if (cur.current.includes(offset)) {
+    if (latestValue.current.includes(offset)) {
       return;
     }
-    const next = [...cur.current, offset];
+    const next = [...latestValue.current, offset];
     focusAfter.current = canonical(next).filter((v) => v >= 7).length === WEEKS.length ? offset : "select";
     setEmptyErr("");
     announce(setStatus, `Added ${weeksLabel(Number(chosen))} before`);
@@ -147,9 +150,9 @@ export function TimingPicker({
   function onSelectKey(e: KeyboardEvent) {
     if (e.key === "Enter") {
       e.preventDefault();
-      const shown = (e.currentTarget as HTMLSelectElement).value;
-      if (shown !== "") {
-        pickRef.current = shown;
+      const selectedValue = (e.currentTarget as HTMLSelectElement).value;
+      if (selectedValue !== "") {
+        pickRef.current = selectedValue;
       }
       addWeek();
     }
@@ -158,8 +161,8 @@ export function TimingPicker({
   const available = WEEKS.filter((k) => !value.includes(k * 7));
   const full = available.length === 0;
   // A pick that became chosen from outside (a revert or adopted server value) is no longer offered: fall back to the placeholder.
-  const sel = available.includes(Number(pick)) ? pick : "";
-  pickRef.current = sel;
+  const selectedWeeks = available.includes(Number(pick)) ? pick : "";
+  pickRef.current = selectedWeeks;
   const errId = `${idPrefix}-err`;
   const shown = error !== undefined && error !== "" ? error : emptyErr;
   const describedIds = describedBy === undefined || describedBy === "" ? errId : `${errId} ${describedBy}`;
@@ -223,7 +226,7 @@ export function TimingPicker({
             id={`${idPrefix}-add`}
             ref={selectRef}
             disabled={full}
-            value={sel}
+            value={selectedWeeks}
             onChange={(e) => {
               pickRef.current = e.target.value;
               setPick(e.target.value);
@@ -238,7 +241,7 @@ export function TimingPicker({
             ))}
           </select>
         </div>
-        <button className="secondary" type="button" disabled={full || sel === ""} onClick={addWeek}>
+        <button className="secondary" type="button" disabled={full || selectedWeeks === ""} onClick={addWeek}>
           Add
         </button>
       </div>

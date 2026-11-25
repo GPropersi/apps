@@ -550,6 +550,21 @@ describe("My reminders", () => {
     expect(screen.getByRole("checkbox", { name: "On the day" })).toBeChecked();
   });
 
+  it("adding 4 weeks from the picker saves the canonical offsets", async () => {
+    go("#/b/1");
+    const { user } = mount({
+      ...OWNER_DETAIL,
+      "PUT /api/birthdays/1/reminders": () => json({ offsets: [28, 7, 1] }),
+    });
+    const group = await screen.findByRole("group", { name: "My reminders" });
+    const select = within(group).getByLabelText("Add weeks before");
+    await waitFor(() => expect(select).toBeEnabled());
+    await user.selectOptions(select, "4");
+    await user.click(within(group).getByRole("button", { name: "Add" }));
+    await waitFor(() => expect(count("PUT /api/birthdays/1/reminders")).toBe(1));
+    expect(bodyOf("PUT /api/birthdays/1/reminders")).toEqual({ offsets: [28, 7, 1] });
+  });
+
   it("a failed save reverts the checkbox and announces an error", async () => {
     go("#/b/1");
     const { user } = mount({

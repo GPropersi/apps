@@ -105,6 +105,34 @@ describe("TimingPicker", () => {
     expect(screen.getByRole("alert")).toHaveTextContent("");
   });
 
+  it("shows the caller's error over the empty message when both are set", async () => {
+    const user = userEvent.setup();
+    render(<Harness initial={[1]} allowEmpty={false} emptyMessage="Pick one." error="Server says no." />);
+    await user.click(screen.getByRole("checkbox", { name: "1 day before" }));
+    expect(screen.getByRole("alert")).toHaveTextContent("Server says no.");
+    expect(screen.getByRole("alert")).not.toHaveTextContent("Pick one.");
+  });
+
+  it("clears the empty message when the value changes from outside", async () => {
+    const user = userEvent.setup();
+    function Outer() {
+      const [v, setV] = useState([1]);
+      return (
+        <>
+          <button type="button" onClick={() => setV([14])}>
+            revert
+          </button>
+          <TimingPicker idPrefix="t" legend="T" allowEmpty={false} emptyMessage="Pick one." value={v} onChange={setV} />
+        </>
+      );
+    }
+    render(<Outer />);
+    await user.click(screen.getByRole("checkbox", { name: "1 day before" }));
+    expect(screen.getByRole("alert")).toHaveTextContent("Pick one.");
+    await user.click(screen.getByRole("button", { name: "revert" }));
+    expect(screen.getByRole("alert")).toHaveTextContent("");
+  });
+
   it("refuses to remove the last week when allowEmpty is false", async () => {
     const onChange = vi.fn();
     const user = userEvent.setup();

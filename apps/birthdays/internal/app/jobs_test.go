@@ -721,6 +721,7 @@ func TestSendWording(t *testing.T) {
 		{"in 6 days with offset 7", 11, 26, "2026-11-26", 7, "Sam Rivera's birthday is in 6 days"},
 		{"in 7 days", 11, 27, "2026-11-27", 7, "Sam Rivera's birthday is in 7 days"},
 		{"in 14 days", 12, 4, "2026-12-04", 14, "Sam Rivera's birthday is in 14 days"},
+		{"in 364 days", 11, 19, "2027-11-19", 364, "Sam Rivera's birthday is in 364 days"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

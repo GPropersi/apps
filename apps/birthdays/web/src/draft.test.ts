@@ -81,6 +81,15 @@ describe("draft storage", () => {
     expect(loadDraft(tag)?.offsets).toEqual(offsets);
   });
 
+  it("stores a draft whose only touched field is offsets, and not an all-null one", () => {
+    const tag = draftTag("a@example.com");
+    saveDraft(tag, { ...EMPTY_DRAFT, offsets: [14] });
+    expect(window.sessionStorage.getItem("birthdays:add-draft")).not.toBeNull();
+    expect(loadDraft(tag)?.offsets).toEqual([14]);
+    saveDraft(tag, EMPTY_DRAFT);
+    expect(window.sessionStorage.getItem("birthdays:add-draft")).toBeNull();
+  });
+
   it("discards another person's draft", () => {
     saveDraft(draftTag("a@example.com"), DRAFT);
     expect(loadDraft(draftTag("b@example.com"))).toBeNull();

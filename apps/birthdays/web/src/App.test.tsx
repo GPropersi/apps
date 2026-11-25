@@ -388,7 +388,6 @@ describe("Add tab", () => {
     expect(input).toHaveFocus();
   });
 
-
   it("defaults the checkbox from auto_remind until the person touches it", async () => {
     go("#/add");
     const { user } = mount({ "GET /api/me": ME(settings({ auto_remind: true })) });
