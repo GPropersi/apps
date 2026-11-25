@@ -511,6 +511,7 @@ export function App() {
           recent={recent}
           open={open}
           onAdded={onAdded}
+          onDefaultOffsets={(o) => saver.adopt({ default_offsets: o })}
           onSessionFailure={sessionFailure}
           nameRef={nameRef}
           autofocusPending={autofocusPending}

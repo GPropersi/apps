@@ -152,6 +152,12 @@ func TestScanDueDates(t *testing.T) {
 		{name: "year rollover", month: 1, day: 2, offsets: []int16{7}, want: []string{"rem-1-1-2027-01-02-7"}, y: 2026, mo: 12, d: 26, h: 7},
 		{name: "Feb 29 in a common year reminds for Feb 28", month: 2, day: 29, offsets: []int16{1}, want: []string{"rem-1-1-2027-02-28-1"}, y: 2027, mo: 2, d: 27, h: 7},
 		{name: "Feb 29 in a leap year", month: 2, day: 29, offsets: []int16{1}, want: []string{"rem-1-1-2028-02-29-1"}, y: 2028, mo: 2, d: 28, h: 7},
+		{name: "offset 14 due on its day", month: 12, day: 4, offsets: []int16{14}, want: []string{"rem-1-1-2026-12-04-14"}},
+		{name: "offset 14 sent 2 days late", month: 12, day: 2, offsets: []int16{14}, want: []string{"rem-1-1-2026-12-02-14"}},
+		{name: "offset 14 not sent 3 days late", month: 12, day: 1, offsets: []int16{14}, want: nil},
+		{name: "offset 364 crosses the year boundary", month: 11, day: 19, offsets: []int16{364}, want: []string{"rem-1-1-2027-11-19-364"}},
+		{name: "offset 14 on a birthday 10 days away was missed this year", month: 11, day: 30, offsets: []int16{14}, want: nil},
+		{name: "Feb 29 with offset 14 in a common year", month: 2, day: 29, offsets: []int16{14}, want: []string{"rem-1-1-2027-02-28-14"}, y: 2027, mo: 2, d: 14, h: 7},
 		{name: "already sent is skipped", month: 11, day: 21, offsets: []int16{1}, want: nil,
 			prepareSentAs: &fSent{BirthdayID: 1, UserID: 1, Occurrence: Date{2026, 11, 21}, OffsetDays: 1, Outcome: "failed"}},
 	}
@@ -714,6 +720,8 @@ func TestSendWording(t *testing.T) {
 		{"tomorrow", 11, 21, "2026-11-21", 1, "Sam Rivera's birthday is tomorrow"},
 		{"in 6 days with offset 7", 11, 26, "2026-11-26", 7, "Sam Rivera's birthday is in 6 days"},
 		{"in 7 days", 11, 27, "2026-11-27", 7, "Sam Rivera's birthday is in 7 days"},
+		{"in 14 days", 12, 4, "2026-12-04", 14, "Sam Rivera's birthday is in 14 days"},
+		{"in 364 days", 11, 19, "2027-11-19", 364, "Sam Rivera's birthday is in 364 days"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

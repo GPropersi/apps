@@ -47,6 +47,49 @@ describe("draft storage", () => {
     expect(loadDraft(draftTag("a@example.com"))?.remind).toBeNull();
   });
 
+  it("restores a draft stored before offsets existed, with offsets null", () => {
+    const tag = draftTag("a@example.com");
+    window.sessionStorage.setItem(
+      "birthdays:add-draft",
+      JSON.stringify({ name: "Old", month: 4, day: "9", year: "", remind: true, who: tag }),
+    );
+    expect(loadDraft(tag)).toEqual({ name: "Old", month: 4, day: "9", year: "", remind: true, offsets: null });
+  });
+
+  it.each([["x"], [[2]], [[400]], [[1, 14]], [[7, 7]], [[1.5]], [["7"]]])(
+    "clears a draft whose offsets are %j",
+    (offsets) => {
+      const tag = draftTag("a@example.com");
+      window.sessionStorage.setItem(
+        "birthdays:add-draft",
+        JSON.stringify({ ...DRAFT, offsets, who: tag }),
+      );
+      expect(loadDraft(tag)).toBeNull();
+      expect(window.sessionStorage.getItem("birthdays:add-draft")).toBeNull();
+    },
+  );
+
+  it("keeps an explicit null offsets as null", () => {
+    const tag = draftTag("a@example.com");
+    saveDraft(tag, { ...DRAFT, remind: true, offsets: null });
+    expect(loadDraft(tag)?.offsets).toBeNull();
+  });
+
+  it.each([[[14]], [[14, 1]], [[]]])("round-trips touched offsets %j", (offsets) => {
+    const tag = draftTag("a@example.com");
+    saveDraft(tag, { ...DRAFT, remind: true, offsets });
+    expect(loadDraft(tag)?.offsets).toEqual(offsets);
+  });
+
+  it("stores a draft whose only touched field is offsets, and not an all-null one", () => {
+    const tag = draftTag("a@example.com");
+    saveDraft(tag, { ...EMPTY_DRAFT, offsets: [14] });
+    expect(window.sessionStorage.getItem("birthdays:add-draft")).not.toBeNull();
+    expect(loadDraft(tag)?.offsets).toEqual([14]);
+    saveDraft(tag, EMPTY_DRAFT);
+    expect(window.sessionStorage.getItem("birthdays:add-draft")).toBeNull();
+  });
+
   it("discards another person's draft", () => {
     saveDraft(draftTag("a@example.com"), DRAFT);
     expect(loadDraft(draftTag("b@example.com"))).toBeNull();

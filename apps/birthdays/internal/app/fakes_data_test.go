@@ -79,6 +79,10 @@ func (s *fakeStore) viewerRow(b fBirthday, viewerID int64) db.GetViewerBirthdayR
 }
 
 func (s *fakeStore) UpdateSettings(_ context.Context, a db.UpdateSettingsParams) (db.User, error) {
+	s.logCall("update-settings")
+	if s.failUpdSettings != nil {
+		return db.User{}, s.failUpdSettings
+	}
 	for email, u := range s.users {
 		if u.ID != a.UserID {
 			continue
@@ -102,6 +106,9 @@ func (s *fakeStore) UpdateSettings(_ context.Context, a db.UpdateSettingsParams)
 			u.ColorScheme = a.ColorScheme.String
 		}
 		s.users[email] = u
+		if s.failAfterUpdSettings != nil { // the update is applied, then the transaction step fails
+			return db.User{}, s.failAfterUpdSettings
+		}
 		return u, nil
 	}
 	return db.User{}, pgx.ErrNoRows
@@ -371,6 +378,10 @@ func (s *fakeStore) DeleteOwnGifts(_ context.Context, a db.DeleteOwnGiftsParams)
 }
 
 func (s *fakeStore) UpsertViewerReminder(_ context.Context, a db.UpsertViewerReminderParams) (int64, error) {
+	s.logCall("upsert-reminder")
+	if s.failUpsertRem != nil {
+		return 0, s.failUpsertRem
+	}
 	b, ok := s.birthdayByID(a.BirthdayID)
 	if !ok || !s.canSee(b, a.ViewerID, a.ViewerEmail) {
 		return 0, nil

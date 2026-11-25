@@ -5,12 +5,15 @@ import type { Birthday, Failure, Settings } from "./api";
 import { EMPTY_DRAFT } from "./draft";
 import type { Draft } from "./draft";
 import { MONTHS, MON, daysInMonth } from "./dates";
-import { addedText, noDestination, timingLabel, withDates } from "./format";
+import { addedText, noDestination, withDates } from "./format";
 import { failureText } from "./messages";
 import { BirthdayRow, DestinationNotice } from "./parts";
 import type { OpenDetail } from "./parts";
 import { pointerIsFine } from "./route";
+import { TimingPicker } from "./TimingPicker";
 import { announce } from "./util";
+
+const NO_OFFSETS_TEXT = failureText("invalid_offsets");
 
 type Errors = { name: string; month: string; day: string; year: string };
 const NO_ERRORS: Errors = { name: "", month: "", day: "", year: "" };
@@ -62,6 +65,7 @@ export function AddTab({
   recent,
   open,
   onAdded,
+  onDefaultOffsets,
   onSessionFailure,
   nameRef,
   autofocusPending,
@@ -74,6 +78,7 @@ export function AddTab({
   recent: Birthday[];
   open: OpenDetail;
   onAdded: (b: Birthday) => void;
+  onDefaultOffsets: (offsets: number[]) => void;
   onSessionFailure: (f: Failure) => boolean;
   nameRef: RefObject<HTMLInputElement | null>;
   autofocusPending: RefObject<boolean>;
@@ -81,6 +86,7 @@ export function AddTab({
   const [errors, setErrors] = useState<Errors>(NO_ERRORS);
   const [status, setStatus] = useState("");
   const [alert, setAlert] = useState("");
+  const [offsetsError, setOffsetsError] = useState("");
   const [adding, setAdding] = useState(false);
   const addingRef = useRef(false);
   const monthsRef = useRef<HTMLDivElement>(null);
@@ -88,6 +94,7 @@ export function AddTab({
   const yearRef = useRef<HTMLInputElement>(null);
 
   const remind = draft.remind ?? settings?.auto_remind ?? false;
+  const pickerValue = draft.offsets ?? settings?.default_offsets ?? [];
 
   // First load only: autofocus the name field on a fine pointer (mouse) device; on a phone the person taps it.
   useEffect(() => {
@@ -103,6 +110,11 @@ export function AddTab({
     const group = monthsRef.current;
     const target = group?.querySelector<HTMLInputElement>("input:checked") ?? group?.querySelector("input");
     target?.focus();
+  }
+
+  function focusPicker() {
+    // "add-0" is the first checkbox id produced by TimingPicker's id scheme; the two must change together.
+    document.getElementById("add-0")?.focus();
   }
 
   function onNameKeyDown(e: KeyboardEvent<HTMLInputElement>) {
@@ -125,6 +137,8 @@ export function AddTab({
     setAlert("");
     const found = validateAdd(draft);
     setErrors(found);
+    const emptyPicker = remind && pickerValue.length === 0;
+    setOffsetsError(emptyPicker ? NO_OFFSETS_TEXT : "");
     if (found.name !== "") {
       nameRef.current?.focus();
       return;
@@ -141,6 +155,10 @@ export function AddTab({
       yearRef.current?.focus();
       return;
     }
+    if (emptyPicker) {
+      focusPicker();
+      return;
+    }
     const year = draft.year.trim();
     addingRef.current = true;
     setAdding(true);
@@ -150,7 +168,7 @@ export function AddTab({
       month: draft.month,
       day: Number(draft.day),
       ...(year === "" ? {} : { year: Number(year) }),
-      remind,
+      offsets: remind ? pickerValue : [],
     });
     addingRef.current = false;
     setAdding(false);
@@ -158,6 +176,11 @@ export function AddTab({
     if (res.kind === "ok") {
       setDraft(() => EMPTY_DRAFT);
       setErrors(NO_ERRORS);
+      setOffsetsError("");
+      // The server saved the timing as the new default (non-empty only); adopt its canonical copy locally.
+      if (res.data.reminder_offsets.length > 0) {
+        onDefaultOffsets(res.data.reminder_offsets);
+      }
       onAdded(res.data);
       announce(setStatus, addedText(res.data, today));
       nameRef.current?.focus();
@@ -176,6 +199,10 @@ export function AddTab({
     } else if (res.kind === "invalid_year") {
       setErrors({ ...found, year: failureText(res.kind) });
       yearRef.current?.focus();
+    } else if (res.kind === "invalid_offsets") {
+      setErrors(found);
+      setOffsetsError(NO_OFFSETS_TEXT);
+      focusPicker();
     } else {
       setAlert(failureText(res.kind));
     }
@@ -193,7 +220,7 @@ export function AddTab({
   }
 
   const dest = noDestination(settings);
-  const offsets = settings?.default_offsets ?? [];
+  const hintIds = dest !== null ? "add-timing-hint add-remind-hint" : "add-timing-hint";
 
   return (
     <>
@@ -299,10 +326,36 @@ export function AddTab({
               checked={remind}
               disabled={disabled}
               aria-describedby={dest !== null ? "add-remind-hint" : undefined}
-              onChange={(e) => setDraft((d) => ({ ...d, remind: e.target.checked }))}
+              onChange={(e) => {
+                setDraft((d) => ({ ...d, remind: e.target.checked }));
+                if (!e.target.checked) {
+                  setOffsetsError("");
+                }
+              }}
             />
-            Remind me {timingLabel(offsets)}
+            Remind me
           </label>
+          {remind && (
+            <>
+              <TimingPicker
+                idPrefix="add"
+                allowEmpty
+                legend="When"
+                disabled={disabled}
+                error={offsetsError}
+                describedBy={hintIds}
+                value={pickerValue}
+                onChange={(next) => {
+                  setDraft((d) => ({ ...d, offsets: next }));
+                  setOffsetsError("");
+                }}
+              />
+              <p className="hint" id="add-timing-hint">
+                Sent at 7am Pacific. Your choice is kept for next time. A time that has already passed this year starts
+                next year.
+              </p>
+            </>
+          )}
           {dest !== null && (
             <div id="add-remind-hint">
               <DestinationNotice kind={dest} />

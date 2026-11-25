@@ -329,7 +329,7 @@ export function getBirthdays(): Promise<ApiResult<Birthday[]>> {
   return get("/api/birthdays", validateBirthdays);
 }
 
-export type NewBirthday = { name: string; month: number; day: number; year?: number; remind?: boolean };
+export type NewBirthday = { name: string; month: number; day: number; year?: number; offsets: number[] };
 
 export function postBirthday(b: NewBirthday): Promise<ApiResult<Birthday>> {
   return send("POST", "/api/birthdays", b, validateBirthday);

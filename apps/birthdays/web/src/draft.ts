@@ -70,14 +70,25 @@ export type Draft = {
   day: string;
   year: string;
   remind: boolean | null; // null = untouched: follows the person's auto_remind
+  offsets: number[] | null; // null = untouched: follows the person's default_offsets
 };
 
-export const EMPTY_DRAFT: Draft = { name: "", month: 0, day: "", year: "", remind: null };
+export const EMPTY_DRAFT: Draft = { name: "", month: 0, day: "", year: "", remind: null, offsets: null };
 
 const KEY = "birthdays:add-draft";
 
 export function isEmptyDraft(d: Draft): boolean {
-  return d.name === "" && d.month === 0 && d.day === "" && d.year === "" && d.remind === null;
+  return d.name === "" && d.month === 0 && d.day === "" && d.year === "" && d.remind === null && d.offsets === null;
+}
+
+// The allowed reminder offsets: 0, 1 and every whole week from 1 to 52 (same set as the server).
+function isAllowedOffset(n: unknown): n is number {
+  return typeof n === "number" && Number.isInteger(n) && (n === 0 || n === 1 || (n >= 7 && n <= 364 && n % 7 === 0));
+}
+
+// Canonical offsets: allowed values only, strictly descending (so unique and in the order the picker emits).
+function isCanonicalOffsets(v: unknown): v is number[] {
+  return Array.isArray(v) && v.every((n, i) => isAllowedOffset(n) && (i === 0 || n < (v[i - 1] as number)));
 }
 
 export function saveDraft(tag: string, d: Draft): void {
@@ -122,12 +133,20 @@ export function loadDraft(tag: string): Draft | null {
       typeof r.month !== "number" ||
       typeof r.day !== "string" ||
       typeof r.year !== "string" ||
-      (r.remind !== null && typeof r.remind !== "boolean")
+      (r.remind !== null && typeof r.remind !== "boolean") ||
+      (r.offsets !== undefined && r.offsets !== null && !isCanonicalOffsets(r.offsets))
     ) {
       clearDraft();
       return null;
     }
-    return { name: r.name, month: r.month, day: r.day, year: r.year, remind: r.remind };
+    return {
+      name: r.name,
+      month: r.month,
+      day: r.day,
+      year: r.year,
+      remind: r.remind,
+      offsets: isCanonicalOffsets(r.offsets) ? r.offsets : null,
+    };
   } catch {
     return null;
   }

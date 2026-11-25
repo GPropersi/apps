@@ -329,6 +329,19 @@ fieldset.spaced { margin-bottom: 1rem; }
 section[data-secret] { border-color: var(--accent); }
 ul.items > li > button { flex: none; }
 
+/* Reminder timing picker (Settings, Detail, Add) */
+.timing { display: grid; gap: 0.5rem; }
+.timing .weeks { list-style: none; margin: 0; padding: 0; display: flex; flex-wrap: wrap; gap: 0.5rem; }
+.timing .week { display: inline-flex; align-items: center; gap: 0.125rem; min-height: 2.75rem; padding: 0 0 0 0.875rem;
+  border-radius: 999px; background: var(--accent-soft); color: var(--text); font-weight: 700; font-size: 0.9375rem; }
+.timing .week-x { min-height: 2.75rem; min-width: 2.75rem; border: 0; background: none; color: var(--text); border-radius: 999px;
+  display: inline-grid; place-items: center; padding: 0; }
+.timing .week-x svg { width: 1rem; height: 1rem; }
+.timing .adder { align-items: flex-end; }
+.timing .adder .field { flex: 1 1 9rem; }
+.timing .adder button { flex: none; }
+fieldset:disabled .week { opacity: 0.7; }
+
 /* Under 22.5rem (320px phones): less padding and tighter segmented labels, so nothing is clipped */
 @media (max-width: 22.49rem) {
   main { padding-left: 0.5rem; padding-right: 0.5rem; }

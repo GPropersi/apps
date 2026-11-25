@@ -32,23 +32,26 @@ const (
 // exercised against a real Postgres by test_image.sh, not here.
 type fakeStore struct {
 	db.Querier
-	mu              sync.Mutex
-	arrived         atomic.Int32       // UpsertUser calls started (before taking mu)
-	users           map[string]db.User // by email
-	jobRuns         map[string]string
-	failJob         error // InsertJobRun returns this when set
-	failSharedGifts error // DeleteSharedPersonGifts and DeleteOwnGifts return this when set (a mid-transaction failure)
-	nextID          int64 // shared id counter for birthdays and gifts
-	birthdays       []fBirthday
-	shares          []fShare
-	reminders       []fReminder
-	gifts           []fGift
-	dests           []fDest
-	remSent         []fSent
-	failRemSent     error     // InsertReminderSent returns this when set (a failed record after a successful send)
-	failSetNtfy     error     // SetNtfyUser returns this when set (a failed store after a successful provision)
-	failInsertDest  error     // InsertDestination returns this when set
-	calls           *[]string // shared call log: "tx-begin", "lock", "provision", "tx-end" (nil = not recording)
+	mu                   sync.Mutex
+	arrived              atomic.Int32       // UpsertUser calls started (before taking mu)
+	users                map[string]db.User // by email
+	jobRuns              map[string]string
+	failJob              error // InsertJobRun returns this when set
+	failSharedGifts      error // DeleteSharedPersonGifts and DeleteOwnGifts return this when set (a mid-transaction failure)
+	nextID               int64 // shared id counter for birthdays and gifts
+	birthdays            []fBirthday
+	shares               []fShare
+	reminders            []fReminder
+	gifts                []fGift
+	dests                []fDest
+	remSent              []fSent
+	failRemSent          error     // InsertReminderSent returns this when set (a failed record after a successful send)
+	failSetNtfy          error     // SetNtfyUser returns this when set (a failed store after a successful provision)
+	failInsertDest       error     // InsertDestination returns this when set
+	failUpsertRem        error     // UpsertViewerReminder returns this when set (after the birthday insert in a create)
+	failUpdSettings      error     // UpdateSettings returns this when set (after the reminder upsert in a create)
+	failAfterUpdSettings error     // UpdateSettings applies the change, then returns this (the default write must still roll back)
+	calls                *[]string // shared call log: "tx-begin", "lock", "provision", "tx-end" (nil = not recording)
 }
 
 func newFakeStore() *fakeStore {
@@ -63,7 +66,7 @@ func (s *fakeStore) UpsertUser(_ context.Context, email string) (db.User, error)
 		return u, nil
 	}
 	u := db.User{
-		ID: int64(len(s.users) + 1), Email: email, DefaultOffsets: []int16{7, 1},
+		ID: int64(len(s.users) + 1), Email: email, DefaultOffsets: []int16{14, 7, 1},
 		StartTab: "auto", ListView: "upcoming", CalendarZoom: "month", ColorScheme: "confetti",
 	}
 	s.users[email] = u
@@ -88,6 +91,7 @@ func (s *fakeStore) InTx(_ context.Context, fn func(db.Querier) error) error {
 	cp := &fakeStore{users: map[string]db.User{}, jobRuns: map[string]string{}, failJob: s.failJob, failSharedGifts: s.failSharedGifts, nextID: s.nextID,
 		birthdays: slices.Clone(s.birthdays), shares: slices.Clone(s.shares), reminders: slices.Clone(s.reminders),
 		gifts: slices.Clone(s.gifts), dests: slices.Clone(s.dests), failSetNtfy: s.failSetNtfy, failInsertDest: s.failInsertDest,
+		failUpsertRem: s.failUpsertRem, failUpdSettings: s.failUpdSettings, failAfterUpdSettings: s.failAfterUpdSettings,
 		calls: s.calls, remSent: slices.Clone(s.remSent), failRemSent: s.failRemSent}
 	s.logCall("tx-begin")
 	defer s.logCall("tx-end")

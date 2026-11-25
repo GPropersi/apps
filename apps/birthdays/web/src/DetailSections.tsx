@@ -5,18 +5,13 @@ import type { Failure, Gift, Settings } from "./api";
 import { noDestination } from "./format";
 import { failureText } from "./messages";
 import { DestinationNotice } from "./parts";
+import { TimingPicker } from "./TimingPicker";
 import { announce } from "./util";
 
 type Fail = (f: Failure) => string | null;
 type Say = (message: string) => void;
 
-const OFFSETS: { value: number; label: string }[] = [
-  { value: 7, label: "1 week before" },
-  { value: 1, label: "1 day before" },
-  { value: 0, label: "On the day" },
-];
-
-// "My reminders": checkboxes for the person's own offsets. Saves are serialized: the latest desired value is kept and
+// "My reminders": the timing picker for the person's own offsets. Saves are serialized: the latest desired value is kept and
 // one PUT runs at a time; a failure reverts to the last value the server confirmed and announces an error. Unticking
 // everything means no reminders for this birthday (unlike Settings' non-empty default).
 export function Reminders({
@@ -61,7 +56,7 @@ export function Reminders({
         if (desired.current === null) {
           ui.current = res.data.offsets;
           setChecked(res.data.offsets);
-          setStatus("Reminders saved.");
+          announce(setStatus, "Reminders saved.");
         }
       } else {
         desired.current = null;
@@ -78,8 +73,7 @@ export function Reminders({
     running.current = false;
   }
 
-  function toggle(value: number, on: boolean) {
-    const next = OFFSETS.map((o) => o.value).filter((v) => (v === value ? on : ui.current.includes(v)));
+  function change(next: number[]) {
     ui.current = next;
     setChecked(next);
     desired.current = next;
@@ -94,19 +88,19 @@ export function Reminders({
         {owner ? "Only you get these. Sent at 7am Pacific to the places in Settings." : "Only you get these."}
       </p>
       {dest !== null && <DestinationNotice kind={dest} />}
-      <fieldset disabled={disabled} aria-labelledby="rm-h" aria-describedby="rm-hint">
-        {OFFSETS.map((o) => (
-          <label key={o.value} className="check">
-            <input
-              type="checkbox"
-              checked={checked.includes(o.value)}
-              onChange={(e) => toggle(o.value, e.target.checked)}
-            />
-            {o.label}
-          </label>
-        ))}
-      </fieldset>
-      <p className="hint">Untick all of them to turn reminders off for this birthday.</p>
+      <TimingPicker
+        idPrefix="rm"
+        labelledBy="rm-h"
+        describedBy="rm-hint"
+        value={checked}
+        disabled={disabled}
+        allowEmpty
+        onChange={change}
+      />
+      <p className="hint">
+        Clear every time to turn reminders off for this birthday. A time that has already passed this year starts next
+        year.
+      </p>
       <p className="status ok" role="status" data-testid="reminders-status">
         {status}
       </p>

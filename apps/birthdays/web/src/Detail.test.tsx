@@ -130,10 +130,10 @@ describe("owner and recipient controls", () => {
     expect(screen.getByRole("heading", { name: "Gift ideas shared by others" })).toBeInTheDocument();
     expect(screen.getByRole("list", { name: "People this birthday is shared with" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Delete" })).toBeInTheDocument();
-    expect(screen.getByRole("checkbox", { name: "1 week before" })).toBeChecked();
+    expect(screen.getByRole("button", { name: "Remove 1 week before" })).toBeInTheDocument();
     expect(screen.getByRole("checkbox", { name: "1 day before" })).toBeChecked();
     expect(screen.getByRole("checkbox", { name: "On the day" })).not.toBeChecked();
-    expect(screen.getByText(/Untick all of them to turn reminders off/)).toBeInTheDocument();
+    expect(screen.getByText(/Clear every time to turn reminders off for this birthday\. A time that has already passed this year starts next year\./)).toBeInTheDocument();
     expect(screen.getByText(/from partner@example.com/)).toBeInTheDocument();
   });
 
@@ -535,7 +535,7 @@ describe("My reminders", () => {
       ...OWNER_DETAIL,
       "PUT /api/birthdays/1/reminders": () => (++n === 1 ? first.promise : json({ offsets: [1, 0] })),
     });
-    const week = await screen.findByRole("checkbox", { name: "1 week before" });
+    const week = await screen.findByRole("button", { name: "Remove 1 week before" });
     await waitFor(() => expect(week).toBeEnabled());
     await user.click(week);
     await user.click(screen.getByRole("checkbox", { name: "On the day" }));
@@ -545,9 +545,24 @@ describe("My reminders", () => {
     await waitFor(() => expect(count("PUT /api/birthdays/1/reminders")).toBe(2));
     expect(bodyOf("PUT /api/birthdays/1/reminders", 1)).toEqual({ offsets: [1, 0] });
     await waitFor(() => expect(screen.getByTestId("reminders-status")).toHaveTextContent("Reminders saved."));
-    expect(week).not.toBeChecked();
+    expect(screen.queryByRole("button", { name: "Remove 1 week before" })).not.toBeInTheDocument();
     expect(screen.getByRole("checkbox", { name: "1 day before" })).toBeChecked();
     expect(screen.getByRole("checkbox", { name: "On the day" })).toBeChecked();
+  });
+
+  it("adding 4 weeks from the picker saves the canonical offsets", async () => {
+    go("#/b/1");
+    const { user } = mount({
+      ...OWNER_DETAIL,
+      "PUT /api/birthdays/1/reminders": () => json({ offsets: [28, 7, 1] }),
+    });
+    const group = await screen.findByRole("group", { name: "My reminders" });
+    const select = within(group).getByLabelText("Add weeks before");
+    await waitFor(() => expect(select).toBeEnabled());
+    await user.selectOptions(select, "4");
+    await user.click(within(group).getByRole("button", { name: "Add" }));
+    await waitFor(() => expect(count("PUT /api/birthdays/1/reminders")).toBe(1));
+    expect(bodyOf("PUT /api/birthdays/1/reminders")).toEqual({ offsets: [28, 7, 1] });
   });
 
   it("a failed save reverts the checkbox and announces an error", async () => {
@@ -568,7 +583,7 @@ describe("My reminders", () => {
       ).toMatch(/Couldn't save your reminders\./),
     );
     expect(day).not.toBeChecked();
-    expect(screen.getByRole("checkbox", { name: "1 week before" })).toBeChecked();
+    expect(screen.getByRole("button", { name: "Remove 1 week before" })).toBeInTheDocument();
   });
 
   it("names the reminders group My reminders, with the hint as its description", async () => {
@@ -593,10 +608,35 @@ describe("My reminders", () => {
     await waitFor(() => expect(screen.getByTestId("reminders-status")).toHaveTextContent("Reminders saved."));
     expect(bodyOf("PUT /api/birthdays/2/reminders")).toEqual({ offsets: [] });
     expect(day).not.toBeChecked();
-    expect(screen.getByText(/Untick all of them to turn reminders off/)).toBeInTheDocument();
+    expect(screen.getByText(/Clear every time to turn reminders off/)).toBeInTheDocument();
     await user.click(within(nav()).getByRole("link", { name: /Birthdays/ }));
     const link = await screen.findByRole("link", { name: "Ada Lovelace" });
     expect(link.closest("li")).not.toHaveTextContent("Reminders on");
+  });
+
+  it("re-announces Reminders saved. on a repeat save", async () => {
+    go("#/b/1");
+    const { user } = mount({
+      ...OWNER_DETAIL,
+      "PUT /api/birthdays/1/reminders": (init) => json({ offsets: (JSON.parse(String(init?.body)) as { offsets: number[] }).offsets }),
+    });
+    const status = await screen.findByTestId("reminders-status");
+    const day = await screen.findByRole("checkbox", { name: "On the day" });
+    await waitFor(() => expect(day).toBeEnabled());
+    await user.click(day);
+    await waitFor(() => expect(status).toHaveTextContent("Reminders saved."));
+    // announce() clears the text in its own commit before setting it again, so a repeat is a removal-only mutation
+    // followed by an addition; a plain setStatus would replace the text in one step.
+    const records: MutationRecord[] = [];
+    const obs = new MutationObserver((rs) => records.push(...rs));
+    obs.observe(status, { childList: true, characterData: true, subtree: true });
+    await user.click(day);
+    await waitFor(() => expect(count("PUT /api/birthdays/1/reminders")).toBe(2));
+    await waitFor(() => expect(status).toHaveTextContent("Reminders saved."));
+    records.push(...obs.takeRecords());
+    obs.disconnect();
+    const cleared = records.some((r) => r.type === "childList" && r.removedNodes.length > 0 && r.addedNodes.length === 0);
+    expect(cleared).toBe(true);
   });
 
   it("the list's bell follows the response", async () => {
