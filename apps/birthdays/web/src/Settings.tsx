@@ -551,53 +551,56 @@ export function SettingsTab({
             onCancel={cancelConfirm}
           />
         )}
-        <form className="row spaced-top" noValidate onSubmit={(e) => void onAdd(e)}>
-          <div className="field">
-            <label htmlFor="dest-kind">Add a destination</label>
-            <select id="dest-kind" disabled={locked} value={kind} onChange={(e) => setKind(e.target.value as "discord" | "webhook")}>
-              {DEST_KINDS.map((k) => (
-                <option key={k.value} value={k.value}>
-                  {k.label}
-                </option>
-              ))}
-            </select>
-          </div>
-          <div className="field name">
-            <label htmlFor="dest-label">
-              Label <span className="meta">(shown in this list)</span>
-            </label>
-            <input
-              id="dest-label"
-              type="text"
-              maxLength={50}
-              autoComplete="off"
-              placeholder="e.g. Family server"
-              disabled={locked}
-              value={label}
-              aria-invalid={labelErr !== "" ? true : undefined}
-              aria-describedby="dest-label-err"
-              onChange={(e) => setLabel(e.target.value)}
-            />
-            <p className="fielderr" id="dest-label-err">
-              {labelErr}
-            </p>
-          </div>
-          <div className="field name">
-            <label htmlFor="dest-url">{kind === "discord" ? "Discord webhook URL" : "Webhook URL"}</label>
-            <input
-              id="dest-url"
-              type="url"
-              autoComplete="off"
-              placeholder="Paste the address here"
-              disabled={locked}
-              value={url}
-              aria-invalid={urlErr !== "" ? true : undefined}
-              aria-describedby="dest-url-err"
-              onChange={(e) => setUrl(e.target.value)}
-            />
-            <p className="fielderr" id="dest-url-err">
-              {urlErr}
-            </p>
+        <form className="destform" noValidate onSubmit={(e) => void onAdd(e)}>
+          <h3 id="dest-add-h">Add a destination</h3>
+          <div className="fields" role="group" aria-labelledby="dest-add-h">
+            <div className="field kind">
+              <label htmlFor="dest-kind">Type</label>
+              <select id="dest-kind" disabled={locked} value={kind} onChange={(e) => setKind(e.target.value as "discord" | "webhook")}>
+                {DEST_KINDS.map((k) => (
+                  <option key={k.value} value={k.value}>
+                    {k.label}
+                  </option>
+                ))}
+              </select>
+            </div>
+            <div className="field label">
+              <label htmlFor="dest-label">
+                Label <span className="meta">(shown in this list)</span>
+              </label>
+              <input
+                id="dest-label"
+                type="text"
+                maxLength={50}
+                autoComplete="off"
+                placeholder="e.g. Family server"
+                disabled={locked}
+                value={label}
+                aria-invalid={labelErr !== "" ? true : undefined}
+                aria-describedby="dest-label-err"
+                onChange={(e) => setLabel(e.target.value)}
+              />
+              <p className="fielderr" id="dest-label-err">
+                {labelErr}
+              </p>
+            </div>
+            <div className="field url">
+              <label htmlFor="dest-url">{kind === "discord" ? "Discord webhook URL" : "Webhook URL"}</label>
+              <input
+                id="dest-url"
+                type="url"
+                autoComplete="off"
+                placeholder="Paste the address here"
+                disabled={locked}
+                value={url}
+                aria-invalid={urlErr !== "" ? true : undefined}
+                aria-describedby="dest-url-err"
+                onChange={(e) => setUrl(e.target.value)}
+              />
+              <p className="fielderr" id="dest-url-err">
+                {urlErr}
+              </p>
+            </div>
           </div>
           <button
             className="secondary"
