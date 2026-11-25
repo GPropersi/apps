@@ -6,6 +6,7 @@ import { noDestination } from "./format";
 import { failureText } from "./messages";
 import { ConfirmPrompt } from "./parts";
 import type { NewSecret } from "./Secrets";
+import { TimingPicker } from "./TimingPicker";
 import type { SettingsSaver } from "./useSettingsSaver";
 import { announce, safeHref } from "./util";
 
@@ -34,11 +35,7 @@ const ZOOMS: { value: CalendarZoom; label: string }[] = [
   { value: "week", label: "Week" },
 ];
 
-const OFFSETS: { value: number; label: string }[] = [
-  { value: 7, label: "1 week before" },
-  { value: 1, label: "1 day before" },
-  { value: 0, label: "On the day" },
-];
+const NO_OFFSETS: number[] = [];
 
 const NTFY_TITLE = "Your phone notification password";
 const DEST_KINDS: { value: "discord" | "webhook"; label: string }[] = [
@@ -83,8 +80,6 @@ export function SettingsTab({
 }) {
   const { applyCounters } = saver;
   const locked = disabled || settings === null;
-
-  const [offsetErr, setOffsetErr] = useState("");
 
   const [dests, setDests] = useState<Destination[] | null>(null);
   const [loadErr, setLoadErr] = useState("");
@@ -156,20 +151,6 @@ export function SettingsTab({
       pendingFocus.current = null;
     }
   }, [dests]);
-
-  function toggleOffset(value: number, on: boolean) {
-    if (settings === null) {
-      return;
-    }
-    const base = saver.latest("default_offsets") ?? settings.default_offsets;
-    const next = OFFSETS.map((o) => o.value).filter((v) => (v === value ? on : base.includes(v)));
-    if (next.length === 0) {
-      setOffsetErr(failureText("invalid_offsets"));
-      return;
-    }
-    setOffsetErr("");
-    saver.save({ default_offsets: next });
-  }
 
   function openConfirm(next: ConfirmRequest) {
     nonce.current += 1;
@@ -483,22 +464,15 @@ export function SettingsTab({
           />
           Turn reminders on when I add a birthday
         </label>
-        <fieldset disabled={locked} aria-describedby="dt-err">
-          <legend className="hint plain">Default timing</legend>
-          {OFFSETS.map((o) => (
-            <label key={o.value} className="check">
-              <input
-                type="checkbox"
-                checked={settings?.default_offsets.includes(o.value) ?? false}
-                onChange={(e) => toggleOffset(o.value, e.target.checked)}
-              />
-              {o.label}
-            </label>
-          ))}
-        </fieldset>
-        <p className="fielderr" id="dt-err" role="alert">
-          {offsetErr}
-        </p>
+        <TimingPicker
+          idPrefix="dt"
+          legend="Default timing"
+          value={saver.latest("default_offsets") ?? settings?.default_offsets ?? NO_OFFSETS}
+          disabled={locked}
+          allowEmpty={false}
+          emptyMessage={failureText("invalid_offsets")}
+          onChange={(next) => saver.save({ default_offsets: next })}
+        />
       </section>
 
       <section aria-labelledby="dst-h">

@@ -118,10 +118,19 @@ async function open(routes: Routes = {}, s: Settings = BASE, list?: Birthday[]) 
   return m;
 }
 
+// The destination form's Add button (the timing picker has its own, inside the "Default timing" group).
+function destAdd(): HTMLElement {
+  const el = document.querySelector<HTMLElement>('[data-trigger="add-destination"]');
+  if (el === null) {
+    throw new Error("destination Add button not found");
+  }
+  return el;
+}
+
 async function fillAdd(user: ReturnType<typeof userEvent.setup>, label: string, url: string) {
   await user.type(screen.getByLabelText(/^Label/), label);
   await user.type(screen.getByLabelText(/webhook URL/i), url);
-  await user.click(screen.getByRole("button", { name: "Add" }));
+  await user.click(destAdd());
 }
 
 const WEBHOOK_CREATED = (id: number, label: string, secret: string | null, over: Partial<Settings> = {}): Handler => () =>
@@ -238,15 +247,28 @@ describe("reminder defaults", () => {
   it("refuses to untick the last timing with an inline message and no PATCH", async () => {
     const { user } = await open({}, settings({ default_offsets: [1] }));
     await user.click(screen.getByRole("checkbox", { name: "1 day before" }));
-    expect(document.getElementById("dt-err")).toHaveTextContent("Pick at least one reminder time.");
+    const group = screen.getByRole("group", { name: "Default timing" });
+    expect(within(group).getByRole("alert")).toHaveTextContent("Pick at least one reminder time.");
     expect(screen.getByRole("checkbox", { name: "1 day before" })).toBeChecked();
     expect(count("PATCH /api/settings")).toBe(0);
+  });
+
+  it("shows stored week values and saves week changes in canonical order", async () => {
+    const { user } = await open(
+      { "PATCH /api/settings": (init) => json(settings(JSON.parse(String(init?.body)) as Partial<Settings>)) },
+      settings({ default_offsets: [14, 1] }),
+    );
+    expect(screen.getByRole("button", { name: "Remove 2 weeks before" })).toBeInTheDocument();
+    await user.selectOptions(screen.getByLabelText("Add weeks before"), "4");
+    await user.click(within(screen.getByRole("group", { name: "Default timing" })).getByRole("button", { name: "Add" }));
+    await waitFor(() => expect(count("PATCH /api/settings")).toBe(1));
+    expect(bodyOf("PATCH /api/settings")).toEqual({ default_offsets: [28, 14, 1] });
   });
 
   it("evaluates the last-box rule against the helper's latest value, not the rendered one", async () => {
     const first = deferred();
     const { user } = await open({ "PATCH /api/settings": () => first.promise });
-    const week = screen.getByRole("checkbox", { name: "1 week before" });
+    const week = screen.getByRole("button", { name: "Remove 1 week before" });
     const day = screen.getByRole("checkbox", { name: "1 day before" });
     // Both clicks land before React re-renders in between.
     act(() => {
@@ -255,7 +277,9 @@ describe("reminder defaults", () => {
     });
     const bodies = calls.filter((c) => c.key === "PATCH /api/settings").map((c) => c.body);
     expect(bodies).toEqual([{ default_offsets: [1] }]);
-    expect(document.getElementById("dt-err")).toHaveTextContent("Pick at least one reminder time.");
+    expect(within(screen.getByRole("group", { name: "Default timing" })).getByRole("alert")).toHaveTextContent(
+      "Pick at least one reminder time.",
+    );
     await act(async () => {
       first.resolve(json(settings({ default_offsets: [1] })));
     });
@@ -270,7 +294,7 @@ describe("reminder defaults", () => {
       "PATCH /api/settings": (init) => (++n === 1 ? first.promise : json(settings(JSON.parse(String(init?.body)) as Partial<Settings>))),
     });
     await user.click(screen.getByRole("checkbox", { name: "On the day" }));
-    await user.click(screen.getByRole("checkbox", { name: "1 week before" }));
+    await user.click(screen.getByRole("button", { name: "Remove 1 week before" }));
     expect(count("PATCH /api/settings")).toBe(1);
     expect(bodyOf("PATCH /api/settings")).toEqual({ default_offsets: [7, 1, 0] });
     await act(async () => {
@@ -279,7 +303,7 @@ describe("reminder defaults", () => {
     await waitFor(() => expect(count("PATCH /api/settings")).toBe(2));
     expect(bodyOf("PATCH /api/settings", 1)).toEqual({ default_offsets: [1, 0] });
     await waitFor(() => expect(screen.getByTestId("settings-status")).toHaveTextContent("Saved."));
-    expect(screen.getByRole("checkbox", { name: "1 week before" })).not.toBeChecked();
+    expect(screen.queryByRole("button", { name: "Remove 1 week before" })).not.toBeInTheDocument();
     expect(screen.getByRole("checkbox", { name: "1 day before" })).toBeChecked();
     expect(screen.getByRole("checkbox", { name: "On the day" })).toBeChecked();
   });
@@ -414,19 +438,19 @@ describe("destinations", () => {
     await waitFor(() => expect(fieldErr("dest-url-err")).toHaveTextContent("That address doesn't look right. Check it and try again."));
     expect(screen.getByLabelText(/webhook URL/i)).toHaveFocus();
     code = "url_not_public";
-    await user.click(screen.getByRole("button", { name: "Add" }));
+    await user.click(destAdd());
     await waitFor(() => expect(fieldErr("dest-url-err")).toHaveTextContent("That address isn't reachable from the internet."));
     code = "rate_limited";
-    await user.click(screen.getByRole("button", { name: "Add" }));
+    await user.click(destAdd());
     await waitFor(() => expect(destStatus()).toHaveTextContent("Too many tries. Wait a minute and try again."));
     code = "notify_unavailable";
-    await user.click(screen.getByRole("button", { name: "Add" }));
+    await user.click(destAdd());
     await waitFor(() => expect(destStatus()).toHaveTextContent("Reminders are unavailable right now. Try again in a minute."));
   });
 
   it("asks for a label and a URL before sending", async () => {
     const { user } = await open();
-    await user.click(screen.getByRole("button", { name: "Add" }));
+    await user.click(destAdd());
     expect(fieldErr("dest-label-err")).toHaveTextContent("Enter a label of up to 50 characters.");
     expect(fieldErr("dest-url-err")).toHaveTextContent("That address doesn't look right. Check it and try again.");
     expect(screen.getByLabelText(/^Label/)).toHaveFocus();
@@ -437,7 +461,7 @@ describe("destinations", () => {
   it("focuses the URL field when only the URL is missing", async () => {
     const { user } = await open();
     await user.type(screen.getByLabelText(/^Label/), "Family");
-    await user.click(screen.getByRole("button", { name: "Add" }));
+    await user.click(destAdd());
     expect(screen.getByLabelText(/webhook URL/i)).toHaveFocus();
     expect(destStatus()).toHaveTextContent("That address doesn't look right. Check it and try again.");
   });
@@ -597,7 +621,7 @@ describe("one-time secrets", () => {
     await fillAdd(user, "old-server", "https://example.com/hook");
     const region = await screen.findByRole("region", { name: "Signing secret for webhook: old-server" });
     await user.click(within(region).getByRole("button", { name: "I've saved it" }));
-    expect(screen.getByRole("button", { name: "Add" })).toHaveFocus();
+    expect(destAdd()).toHaveFocus();
   });
 
   it("acknowledging falls back to the screen heading when the trigger is gone, never another panel", async () => {
