@@ -296,7 +296,7 @@ export function AddTab({
             </div>
             <div className="field">
               <label htmlFor="add-year">
-                Year <span className="meta">(optional)</span>
+                Year<span className="sr-only"> (optional)</span>
               </label>
               <input
                 id="add-year"
@@ -304,6 +304,7 @@ export function AddTab({
                 inputMode="numeric"
                 maxLength={4}
                 autoComplete="off"
+                placeholder="Optional"
                 ref={yearRef}
                 value={draft.year}
                 disabled={disabled}
