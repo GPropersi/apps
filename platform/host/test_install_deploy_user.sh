@@ -325,6 +325,20 @@ rm -f "$(root $STAMP_PATH)"
 inst verify
 expect_rc "stamp: verify fails for a missing stamp" 1
 expect_out_has "stamp: verify names the missing stamp" "stamp $(root $STAMP_PATH) differs from this installer (run install)"
+# byte-exact: an extra trailing blank line, a missing final newline and a symlinked stamp all FAIL
+printf '%s\n\n' "$STAMP_VALUE" > "$(root $STAMP_PATH)"
+chmod 644 "$(root $STAMP_PATH)"
+inst verify
+expect_rc "stamp: verify fails for an extra trailing blank line" 1
+printf '%s' "$STAMP_VALUE" > "$(root $STAMP_PATH)"
+inst verify
+expect_rc "stamp: verify fails for a missing final newline" 1
+rm -f "$(root $STAMP_PATH)"
+printf '%s\n' "$STAMP_VALUE" > "$(root $STAMP_PATH).real"
+ln -s "$(root $STAMP_PATH).real" "$(root $STAMP_PATH)"
+inst verify
+expect_rc "stamp: verify fails for a symlinked stamp" 1
+rm -f "$(root $STAMP_PATH)" "$(root $STAMP_PATH).real"
 # a failed install (sshd -t) leaves the previous stamp untouched
 fresh
 mkdir -p "$(dirname "$(root $STAMP_PATH)")"

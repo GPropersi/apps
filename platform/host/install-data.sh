@@ -69,7 +69,7 @@ export PATH="$PATH:/usr/sbin:/sbin"
 
 # Fixed, chosen without knowledge of the host's group database. ADMIN_GID must equal the numeric group_add of both
 # services in compose.yaml (the stack test compares them); SECRETS_GID is the app-secrets group named in data/README.md.
-readonly INSTALLER_STAMP=b87f5f09bc699680
+readonly INSTALLER_STAMP=b3b38ec518909edc
 readonly ADMIN_GID=64322
 readonly SECRETS_GID=64323
 # JOBS_GID is the job-secrets group (the jobs runner reads <app>/jobs-secret through it, and no DB password).
@@ -1649,7 +1649,8 @@ place_file() {
 }
 
 # ensure_dir <dir> <uid> <gid> <mode>: create root:root 0755 when absent, then correct owner and mode of the directory
-# itself only (never recursive, never touching what is inside). A symlink or non-directory was rejected earlier.
+# itself only (never recursive, never touching what is inside). It does not itself reject a symlink or non-directory:
+# the directories chk_path_kind covers are rejected earlier, but the stamps directory is not (verify reports it).
 ensure_dir() {
   local dir="$1" uid="$2" gid="$3" mode="$4" meta created=0 parent
   if ! priv test -d "$dir"; then

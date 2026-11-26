@@ -188,9 +188,11 @@ add_stamp() { sed -i "2i readonly INSTALLER_STAMP=$1" "$R/platform/host/install-
 alpha() { echo "$R/platform/host/install-alpha.sh"; }
 
 new_root; add_stamp ""
+snap="$(cat "$(alpha)")"
 chk
 expect_rc "an empty stamp is drift" 1
 expect_out_has "empty stamp drift is named" "DRIFT platform/host/install-alpha.sh: stamp"
+expect_eq "--check leaves an empty stamp in place" "$(cat "$(alpha)")" "$snap"
 gen
 expect_rc "regenerate fills an empty stamp" 0
 expect_eq "the filled stamp matches an independent sha256" "$(stamp_of "$(alpha)")" "$(want_stamp "$(alpha)")"
