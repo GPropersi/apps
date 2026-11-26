@@ -677,6 +677,16 @@ expect_rc "a symlinked state dir is refused" 1
 expect_out_has "the symlinked state dir is named" "state directory is a symlink"
 no_docker_calls "a symlinked state dir runs no docker command"
 
+# a symlinked parent of the state dirs is refused before any docker call
+fresh
+mkdir -p "$R/var/real-lib"
+rm -rf "$R/var/lib"
+ln -s real-lib "$R/var/lib"
+ins install
+expect_rc "a symlinked state dir parent is refused" 1
+expect_out_has "the symlinked state dir parent is named" "state directory parent is a symlink"
+no_docker_calls "a symlinked state dir parent runs no docker command"
+
 # an upgrade from the socket-proxy layout: the retired docker-gid.env and ingress-proxy network are removed, the stack
 # is brought up with --remove-orphans (which removes the live socket-proxy container), all logged, idempotent
 fresh
@@ -845,6 +855,10 @@ v_wh_owner() { echo "cloudflared.webhook 0:0" > "$STATE/stat_override"; }
 v_wh_missing() { rm "$R/etc/platform/cloudflared.webhook"; }
 v_sd_missing() { rmdir "$R/var/lib/cloudflared-supervisor-green"; }
 v_sd_owner() { echo "cloudflared-supervisor-blue 0:0" > "$STATE/stat_override"; }
+v_wh_empty() { : > "$R/etc/platform/cloudflared.webhook"; }
+v_sd_symlink() { mv "$R/var/lib/cloudflared-supervisor-blue" "$R/var/lib/real-blue"; ln -s real-blue "$R/var/lib/cloudflared-supervisor-blue"; }
+vcase "the webhook file is empty" v_wh_empty "webhook file: webhook file is empty"
+vcase "a state dir is a symlink" v_sd_symlink "state directory is a symlink: /var/lib/cloudflared-supervisor-blue"
 vcase "the webhook mode drifted" v_wh_mode "webhook file: webhook file uid:gid/mode is '65532:65532 640'"
 vcase "the webhook owner drifted" v_wh_owner "webhook file: webhook file uid:gid/mode is '0:0 600'"
 vcase "the webhook file is missing" v_wh_missing "webhook file: webhook file missing"
@@ -937,6 +951,16 @@ expect_up_names "(c) up names no connector" traefik down-page
 expect_out_has "(c) the idle connectors are reported" "idle: cloudflared cloudflared-green"
 ins status
 expect_out_lacks "(c) status has no FAIL" "FAIL"
+
+# (c2) blue in state created is idle, so install passes and starts no connector
+conn_install "(c2)" "cloudflared-blue|created|" "cloudflared-green|exited|"
+expect_rc "(c2) a created blue is idle: install passes" 0
+expect_up_names "(c2) up names blue only" traefik down-page cloudflared-blue
+
+# (c3) a connector row with an empty state is present and fails closed (not idle, not running)
+conn_install "(c3)" "cloudflared-blue||" "cloudflared-green|exited|"
+expect_rc "(c3) an empty connector state fails closed" 1
+expect_out_has "(c3) the problem is named" "no running connector"
 
 # (d) blue and green both running and healthy
 conn_install "(d)" "cloudflared-blue|running|healthy" "cloudflared-green|running|healthy"

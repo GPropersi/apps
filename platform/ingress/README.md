@@ -201,7 +201,8 @@ serves: each can start, recreate or remove a connector you did not name, and the
 compose, `make embed`, merge and the installer.
 
 Once the stronghold's `make cloudflared-probe` exists, it runs across steps 1 to 3; until then watch
-`make cloudflared-drift` and the status file's `ready` value.
+`make cloudflared-drift` and the status file's `ready` value. Both are stronghold targets (run from the stronghold
+checkout), not targets of this repo; `make cloudflared-probe` does not exist yet.
 
 ### Readiness gate
 
