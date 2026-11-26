@@ -114,7 +114,9 @@ schema revoked from `PUBLIC`); the Redis user is the app name with the key prefi
 `/var/lib/platform/secrets/<app>/db-password` and `redis-password` (40 characters `[A-Za-z0-9]`, `0440`, in a `2750`
 directory; the group comes from the setgid secrets root, so no `chgrp` runs).
 
-- A per-app `flock` serializes concurrent calls. Both containers must be healthy before anything is written.
+- A per-app `flock` serializes concurrent calls (a deploy also takes a host-wide claims lock file named
+  `_hostname-claims` plus the lock suffix, in the same lock directory, pre-created root-owned 0666 by the data installer,
+  so two deploys cannot both commit a clashing name or hostname; its wait is `DEPLOY_CLAIMS_LOCK_WAIT`). Both containers must be healthy before anything is written.
 - A read-only preflight classifies both stores against both secret files. An object that exists while its secret
   file is missing exits 1 before any write (nothing is modified in either store): restore the file from a backup, or
   drop the role and database (or `ACL DELUSER` the Redis user) by hand if the app holds no data.

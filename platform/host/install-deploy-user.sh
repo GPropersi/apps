@@ -9,7 +9,7 @@
 #      accepts only `-c <command>` and hands one unsplit string to the dispatcher. No interactive shell, no fallback.
 # The user is in the docker group (root-equivalent, accepted), not in sudo, with a locked password.
 # It also installs the deploy helper behind `platform deploy` and `platform rollback`, all root:root and read-only to
-# deploy: /opt/platform/deploy/deploy.sh (0755), registry/validate-app-yaml.sh (0755), registry/reserved-names.txt (0644),
+# deploy: /opt/platform/deploy/deploy.sh (0755), registry/validate-app-yaml.sh (0755), registry/check-unique-hosts.sh (0755), registry/reserved-names.txt (0644),
 # lib/yaml-subset.sh (0755); and creates /var/lib/platform/deploy (deploy:deploy 0755), the helper's state directory.
 #
 # The dispatcher and the wrapper are embedded below (BEGIN-PAYLOAD/END-PAYLOAD) because the Pi has no checkout:
@@ -394,7 +394,14 @@ payload_deploy_sh() {
 #   preflight  the shared per-app lock (flock, bounded wait), secrets dirs, network, curl, state root, registry root,
 #              routes dir, connection.env, and the two host files /etc/platform/ingress.env (PLATFORM_DOMAIN) and
 #              /etc/platform/access.env (ACCESS_TEAM_DOMAIN, ACCESS_AUD): each a regular, non-symlink, root-owned file
-#              that is not group or world writable, with well-formed values (the log names the key and file, never a value)
+#              that is not group or world writable, with well-formed values (the log names the key and file, never a value);
+#              the host claims lock file <lock dir>/_hostname-claims.lock (pre-created by install-data.sh, never by deploy); and
+#              an advisory cross-app claim check (the installed check-unique-hosts.sh over this app.yaml plus every other
+#              app's registry entry: a name or hostname claimed twice, or an unreadable foreign entry, refuses; the app's own
+#              previous entry never counts). A rollback runs it against previous/app.yaml
+#   claims     (between inspect and swap, deploy and rollback) takes the host-wide flock <lock dir>/_hostname-claims.lock (after
+#              the per-app lock; bounded by DEPLOY_CLAIMS_LOCK_WAIT) and re-runs the claim check under it, authoritative; held
+#              through commit and released right after it succeeds (before the image prune), never during pull or preflight
 #   pull       docker login (token on stdin, private DOCKER_CONFIG) and docker pull; resolves the immutable reference
 #              (repo digest, or the image ID under DEPLOY_SKIP_REGISTRY) used by every later phase instead of the tag
 #   inspect    architecture, numeric non-zero USER, no traefik.* / platform.* label (traefik.* is inert now, routing is file based; still refused as defence in depth), exactly one exposed <port>/tcp
@@ -424,7 +431,9 @@ payload_deploy_sh() {
 # (/etc/platform/access.env), DEPLOY_ENV_UID (0, the owner those two files must have), DEPLOY_SKIP_REGISTRY (1 skips
 # login and pull and uses the image already in the local daemon), DEPLOY_VALIDATOR
 # (/opt/platform/deploy/registry/validate-app-yaml.sh; its yaml reader is ../lib/yaml-subset.sh beside it),
-# DEPLOY_LOCK_WAIT (30), DEPLOY_EXEC_TIMEOUT (30, per docker call), DEPLOY_PULL_TIMEOUT (300, login and pull each),
+# DEPLOY_HOST_CHECK (/opt/platform/deploy/registry/check-unique-hosts.sh, the cross-app claim checker),
+# DEPLOY_CLAIMS_LOCK_WAIT (DEPLOY_STOP_TIMEOUT + DEPLOY_HEALTH_WAIT + DEPLOY_NOPATH_WAIT + 30, 130 with the defaults:
+# the holder's swap-to-commit span), DEPLOY_LOCK_WAIT (30), DEPLOY_EXEC_TIMEOUT (30, per docker call), DEPLOY_PULL_TIMEOUT (300, login and pull each),
 # DEPLOY_STOP_TIMEOUT (30), DEPLOY_STALE_TMP_MIN (60), DEPLOY_HEALTH_WAIT (60), DEPLOY_NOPATH_WAIT (10), DEPLOY_POLL_INTERVAL (1).
 set -euo pipefail
 
@@ -462,7 +471,9 @@ ACCESS_ENV="${DEPLOY_ACCESS_ENV:-/etc/platform/access.env}"
 ENV_UID="${DEPLOY_ENV_UID:-0}"
 SKIP_REGISTRY="${DEPLOY_SKIP_REGISTRY:-0}"
 VALIDATOR="${DEPLOY_VALIDATOR:-/opt/platform/deploy/registry/validate-app-yaml.sh}"
+HOST_CHECK="${DEPLOY_HOST_CHECK:-/opt/platform/deploy/registry/check-unique-hosts.sh}"
 LOCK_WAIT="${DEPLOY_LOCK_WAIT:-30}"
+CLAIMS_LOCK_WAIT_SET="${DEPLOY_CLAIMS_LOCK_WAIT:-}"
 EXEC_TIMEOUT="${DEPLOY_EXEC_TIMEOUT:-30}"
 PULL_TIMEOUT="${DEPLOY_PULL_TIMEOUT:-300}"
 STOP_TIMEOUT="${DEPLOY_STOP_TIMEOUT:-30}"
@@ -477,6 +488,9 @@ TOKEN=""
 TMPD=""
 ERRF=""
 LOCKFD=""
+CLAIMSFD=""
+CLAIMS_LOCK_WAIT=""
+APP_HOST=""
 YAML=""
 FLAT=""
 MEMCAP=""
@@ -689,6 +703,11 @@ validate() {
   [[ "$MEMCAP" =~ ^[1-9][0-9]{0,2}m$ ]] || fail validate "memory_cap '$MEMCAP' is not usable"
   [[ "$PORT" =~ ^[1-9][0-9]{0,4}$ ]] || fail validate "port '$PORT' is not usable"
   [ "$(ys_get "$FLAT" name)" = "$APP" ] || fail validate "app.yaml name does not match the app '$APP'"
+  # The served host label: the optional hostname, else the app name (never the bash builtin HOSTNAME). Re-checked against
+  # the app-name shape (defence in depth, like PORT).
+  APP_HOST="$(ys_get "$FLAT" hostname)"
+  [ -n "$APP_HOST" ] || APP_HOST="$APP"
+  [[ "$APP_HOST" =~ $APP_RE ]] || fail validate "hostname '$APP_HOST' is not usable"
   # The validator allows 1 to 4 volumes; read them with the same index scan and re-check the shapes (defence in depth).
   VOL_NAMES=()
   VOL_PATHS=()
@@ -727,6 +746,62 @@ take_lock() {
     exit 1
   fi
   log "phase=lock end rc=0"
+}
+
+# claims_lock_ok: 0 when the host claims lock file is a regular, non-symlink file this user can open for append. Never
+# creates it (install-data.sh does).
+claims_lock_ok() {
+  local f="$LOCK_DIR/_hostname-claims.lock"
+  [ ! -L "$f" ] && [ -f "$f" ] || return 1
+  # shellcheck disable=SC2188 # a bare redirection only opens the file for append
+  ( : >>"$f" ) 2>/dev/null
+}
+
+# check_claims <phase>: run the installed claim checker over this app.yaml plus every other app's registry entry (the
+# app's own previous entry is never a clash). Fails closed: a missing checker, a clash, or an unreadable foreign entry.
+check_claims() {
+  local ph="$1" f out
+  local -a files=("$YAML")
+  [ -f "$HOST_CHECK" ] && [ -x "$HOST_CHECK" ] || fail "$ph" "the claim checker $HOST_CHECK is missing or not executable: run \`make host-deploy-user HOST=<alias> ARGS=install\`"
+  for f in "$REGISTRY_ROOT"/*/app.yaml; do
+    [ -e "$f" ] || [ -L "$f" ] || continue
+    [ "$f" != "$REGISTRY_ROOT/$APP/app.yaml" ] || continue
+    files+=("$f")
+  done
+  try_phase "$EXEC_TIMEOUT" "$ph" "" "$HOST_CHECK" "${files[@]}"
+  if [ "$PHASE_RC" -ne 0 ]; then
+    out="$(printf '%s' "$PHASE_OUT" | head -c 2000 | tr '\n' ' ')"
+    case "$out" in
+      *"cannot read name"*) fail "$ph" "host claims refused: ${out:-checker rc $PHASE_RC}; repair or remove that registry entry, then redeploy" ;;
+      *) fail "$ph" "host claims refused: ${out:-checker rc $PHASE_RC}; pick another hostname, or remove the other app first" ;;
+    esac
+  fi
+}
+
+# take_claims_lock: the host-wide claims flock, taken after the pull and right before swap (after the per-app lock, so no
+# deadlock), then the authoritative claim re-check under it. Released by release_claims_lock right after commit succeeds.
+take_claims_lock() {
+  local lock="$LOCK_DIR/_hostname-claims.lock" t0
+  [ -z "$CLAIMSFD" ] || return 0
+  claims_lock_ok || fail lock "the host claims lock $lock is missing, a symlink or not openable: run \`make host-data HOST=<alias> ARGS=install\`"
+  exec {CLAIMSFD}>>"$lock" || fail lock "cannot open the host claims lock $lock: run \`make host-data HOST=<alias> ARGS=install\`"
+  log "phase=lock start wait=${CLAIMS_LOCK_WAIT}s"
+  t0=$SECONDS
+  if ! flock -w "$CLAIMS_LOCK_WAIT" "$CLAIMSFD"; then
+    log "phase=lock end rc=1 FAILED another deploy holds $lock"
+    err "deploy: phase 'lock' failed: another deploy holds the host claims lock after ${CLAIMS_LOCK_WAIT}s. Nothing was changed."
+    exit 1
+  fi
+  log "phase=lock end rc=0 dur=$((SECONDS - t0))s"
+  step_begin claims
+  check_claims claims
+  step_end
+}
+
+# release_claims_lock: close the claims descriptor (releases the flock). The EXIT trap covers failure paths.
+release_claims_lock() {
+  [ -z "$CLAIMSFD" ] || exec {CLAIMSFD}>&-
+  CLAIMSFD=""
 }
 
 # env_value <key> [file]: the value of KEY=VALUE from connection.env (or the file given; last one wins), parsed, never
@@ -783,6 +858,8 @@ preflight() {
   [ -d "$ROUTES_DIR" ] && [ ! -L "$ROUTES_DIR" ] && [ -w "$ROUTES_DIR" ] || fail preflight "the routes dir $ROUTES_DIR is missing or not writable by this user: run \`make host-ingress HOST=<alias> ARGS=install\`"
   [ -f "$CONNECTION_ENV" ] && [ -r "$CONNECTION_ENV" ] || fail preflight "the connection file $CONNECTION_ENV is missing: run \`make host-data HOST=<alias> ARGS=install\`"
   load_host_settings
+  claims_lock_ok || fail preflight "the host claims lock $LOCK_DIR/_hostname-claims.lock is missing, a symlink or not openable: run \`make host-data HOST=<alias> ARGS=install\`"
+  check_claims preflight
   PG_HOST="$(env_value PLATFORM_PG_HOST)"
   PG_PORT="$(env_value PLATFORM_PG_PORT)"
   RD_HOST="$(env_value PLATFORM_REDIS_HOST)"
@@ -972,6 +1049,7 @@ swap() {
     -e "REDIS_PASSWORD_FILE=/run/platform/secrets/redis-password" -e "REDIS_KEY_PREFIX=$APP:"
     -e "JOBS_SECRET_FILE=/run/platform/job-secrets/jobs-secret"
     -e "ACCESS_TEAM_DOMAIN=$ACC_TEAM" -e "ACCESS_AUD=$ACC_AUD"
+    -e "PLATFORM_DOMAIN=$DOMAIN" -e "APP_HOSTNAME=$APP_HOST"
     "$REF")
   NEW_RUN=1
   swap_step "${run[@]}"
@@ -1030,11 +1108,12 @@ route_file() { printf '%s/app-%s.yml' "$ROUTES_DIR" "$APP"; }
 # like a static router from colliding with it). An app with a health_path also gets a Traefik health check on it: with the
 # container stopped Traefik then drops the server and answers 503, which Cloudflare passes through with the friendly body;
 # without it a stopped container is a DNS failure, a 502, and Cloudflare replaces that body with its own error page.
-# install-ingress.sh chk_dynamic_files accepts exactly these lines: change both together.
+# install-ingress.sh chk_dynamic_files accepts exactly these lines: change both together. Only the Host label is the served
+# hostname (APP_HOST, the app name when none is set); router, service and upstream stay on the app name.
 render_route() {
   # shellcheck disable=SC2016 # the backticks are literal Traefik rule quoting
   printf '# Generated by platform deploy for %s. Do not edit; removed by platform rm-db.\nhttp:\n  routers:\n    app-%s:\n      rule: Host(`%s.%s`)\n      entryPoints: [web]\n      service: app-%s\n  services:\n    app-%s:\n      loadBalancer:\n' \
-    "$APP" "$APP" "$APP" "$DOMAIN" "$APP" "$APP"
+    "$APP" "$APP" "$APP_HOST" "$DOMAIN" "$APP" "$APP"
   if [ -n "$HEALTH_PATH" ]; then
     printf '        healthCheck:\n          path: %s\n          interval: 5s\n          timeout: 3s\n' "$HEALTH_PATH"
   fi
@@ -1302,6 +1381,12 @@ main() {
   done
   # timeout 0 would disable the limit, so the two docker call limits need at least 1.
   [[ "$EXEC_TIMEOUT" =~ ^[1-9][0-9]{0,4}$ && "$PULL_TIMEOUT" =~ ^[1-9][0-9]{0,4}$ ]] || { err "deploy: DEPLOY_EXEC_TIMEOUT and DEPLOY_PULL_TIMEOUT must be 1 to 99999 seconds"; exit 2; }
+  # Normalise the three claims-wait inputs (whole numbers, validated above) so a leading zero is never read as octal.
+  STOP_TIMEOUT=$((10#$STOP_TIMEOUT))
+  HEALTH_WAIT=$((10#$HEALTH_WAIT))
+  NOPATH_WAIT=$((10#$NOPATH_WAIT))
+  CLAIMS_LOCK_WAIT="${CLAIMS_LOCK_WAIT_SET:-$((STOP_TIMEOUT + HEALTH_WAIT + NOPATH_WAIT + 30))}"
+  [[ "$CLAIMS_LOCK_WAIT" =~ $NUM_RE ]] || { err "deploy: DEPLOY_CLAIMS_LOCK_WAIT is not a whole number of seconds"; exit 2; }
   if [ "$MODE" = rollback ]; then
     log "start rollback"
     init_tmp
@@ -1318,10 +1403,12 @@ main() {
     pull
   fi
   inspect_image
+  take_claims_lock
   swap
   health
   route
   commit
+  release_claims_lock
   prune_images all
   log "end rc=0"
   if [ "$MODE" = rollback ]; then
@@ -1789,6 +1876,85 @@ PLATFORM_PAYLOAD_EOF
 }
 # END-PAYLOAD platform/registry/validate-app-yaml.sh
 
+# BEGIN-PAYLOAD platform/registry/check-unique-hosts.sh
+payload_check_unique_hosts_sh() {
+  cat <<'PLATFORM_PAYLOAD_EOF'
+#!/usr/bin/env bash
+# check-unique-hosts.sh: cross-app claim checker for the per-app registry files apps/<name>/app.yaml.
+#
+#   platform/registry/check-unique-hosts.sh <app.yaml>...
+#
+# Each file claims the set {name, hostname (when set)}; a value claimed by two different apps is refused. That
+# covers two apps sharing a hostname and a hostname equal to another app's name. One "file: reason" line per
+# problem on stdout. Exit 0: no value is claimed twice. Exit 1: a clash, or a file that cannot be read or has no
+# name (never skipped). Exit 2: usage (no file, or the same path given twice). Shape and reserved rules are the
+# validator's job (validate-app-yaml.sh), not re-checked here.
+#
+# Used by `make lint` (via validate-tracked.sh) and installed beside the validator for deploy.sh's preflight, so
+# lint and host agree by construction. Sources ../lib/yaml-subset.sh relative to itself, as the validator does.
+# shellcheck disable=SC1091
+set -uo pipefail
+
+here="$(cd "$(dirname "$0")" && pwd)"
+# shellcheck source=../lib/yaml-subset.sh
+. "$here/../lib/yaml-subset.sh"
+
+if [ "$#" -lt 1 ]; then
+  echo "usage: $0 <app.yaml>..." >&2
+  exit 2
+fi
+
+declare -A seen_path=()
+for f in "$@"; do
+  if [ -n "${seen_path[$f]:-}" ]; then
+    echo "$0: the same path given twice: $f" >&2
+    exit 2
+  fi
+  seen_path["$f"]=1
+done
+
+problems=0
+flat=""
+trap 'rm -f "$flat"' EXIT
+declare -A owner_file=()
+declare -A owner_app=()
+
+for f in "$@"; do
+  rm -f "$flat"
+  flat="$(mktemp)"
+  if ! ys_flatten < "$f" > "$flat" 2> /dev/null; then
+    printf '%s: cannot read name\n' "$f"
+    problems=$((problems + 1))
+    continue
+  fi
+  name="$(ys_get "$flat" name)"
+  if [ -z "$name" ]; then
+    printf '%s: cannot read name\n' "$f"
+    problems=$((problems + 1))
+    continue
+  fi
+  hostname="$(ys_get "$flat" hostname)"
+  claims=("$name")
+  if [ -n "$hostname" ] && [ "$hostname" != "$name" ]; then
+    claims+=("$hostname")
+  fi
+  for v in "${claims[@]}"; do
+    if [ -n "${owner_file[$v]:-}" ]; then
+      printf "%s: '%s' is also claimed by app '%s' (%s)\n" "$f" "$v" "${owner_app[$v]}" "${owner_file[$v]}"
+      problems=$((problems + 1))
+    else
+      owner_file["$v"]="$f"
+      owner_app["$v"]="$name"
+    fi
+  done
+done
+
+[ "$problems" -eq 0 ] || exit 1
+exit 0
+PLATFORM_PAYLOAD_EOF
+}
+# END-PAYLOAD platform/registry/check-unique-hosts.sh
+
 # BEGIN-PAYLOAD platform/registry/reserved-names.txt
 payload_reserved_names_txt() {
   cat <<'PLATFORM_PAYLOAD_EOF'
@@ -2164,6 +2330,7 @@ do_install() {
   payload_login_shell_sh > "$TMP/platform-login"
   payload_deploy_sh > "$TMP/deploy.sh"
   payload_validate_app_yaml_sh > "$TMP/validate-app-yaml.sh"
+  payload_check_unique_hosts_sh > "$TMP/check-unique-hosts.sh"
   payload_reserved_names_txt > "$TMP/reserved-names.txt"
   payload_yaml_subset_sh > "$TMP/yaml-subset.sh"
   key_line "$KEY" "$FROM" > "$TMP/key"
@@ -2180,6 +2347,7 @@ do_install() {
   place_dir "$ROOT$HELPER_LIB_DIR" 755
   place_file "$TMP/deploy.sh" "$ROOT$HELPER_DIR/deploy.sh" 755
   place_file "$TMP/validate-app-yaml.sh" "$ROOT$HELPER_REGISTRY_DIR/validate-app-yaml.sh" 755
+  place_file "$TMP/check-unique-hosts.sh" "$ROOT$HELPER_REGISTRY_DIR/check-unique-hosts.sh" 755
   place_file "$TMP/reserved-names.txt" "$ROOT$HELPER_REGISTRY_DIR/reserved-names.txt" 644
   place_file "$TMP/yaml-subset.sh" "$ROOT$HELPER_LIB_DIR/yaml-subset.sh" 755
   [ -d "$ROOT/var/lib/platform" ] || priv mkdir -p -- "$ROOT/var/lib/platform"
@@ -2220,6 +2388,8 @@ do_checks() {
   check_payload "deploy helper" "$ROOT$HELPER_DIR/deploy.sh" payload_deploy_sh
   check_owned "app.yaml validator" "$ROOT$HELPER_REGISTRY_DIR/validate-app-yaml.sh" 755 || true
   check_payload "app.yaml validator" "$ROOT$HELPER_REGISTRY_DIR/validate-app-yaml.sh" payload_validate_app_yaml_sh
+  check_owned "claim checker" "$ROOT$HELPER_REGISTRY_DIR/check-unique-hosts.sh" 755 || true
+  check_payload "claim checker" "$ROOT$HELPER_REGISTRY_DIR/check-unique-hosts.sh" payload_check_unique_hosts_sh
   check_owned "reserved names" "$ROOT$HELPER_REGISTRY_DIR/reserved-names.txt" 644 || true
   check_payload "reserved names" "$ROOT$HELPER_REGISTRY_DIR/reserved-names.txt" payload_reserved_names_txt
   check_owned "yaml reader" "$ROOT$HELPER_LIB_DIR/yaml-subset.sh" 755 || true

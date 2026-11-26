@@ -643,6 +643,7 @@ HELPER_ROOT=/opt/platform/deploy
 helper_files=(
   "$HELPER_ROOT/deploy.sh|$here/../deploy/deploy.sh|755|deploy helper"
   "$HELPER_ROOT/registry/validate-app-yaml.sh|$here/../registry/validate-app-yaml.sh|755|app.yaml validator"
+  "$HELPER_ROOT/registry/check-unique-hosts.sh|$here/../registry/check-unique-hosts.sh|755|claim checker"
   "$HELPER_ROOT/registry/reserved-names.txt|$here/../registry/reserved-names.txt|644|reserved names"
   "$HELPER_ROOT/lib/yaml-subset.sh|$here/../lib/yaml-subset.sh|755|yaml reader"
 )
@@ -678,8 +679,8 @@ done
 fresh; inst install --pubkey-file "$T_TMP/key.pub" >/dev/null
 expect_eq "no chown under /opt/platform/deploy hands anything to deploy" "$(grep '^chown ' "$CALL_LOG" | grep "$(root $HELPER_ROOT)" | grep -vc '^chown root:root ')" "0"
 expect_eq "nothing under /opt/platform/deploy is group- or world-writable" "$(find "$(root $HELPER_ROOT)" -perm /022 | wc -l)" "0"
-expect_eq "positive control: the helper tree was chowned root:root (3 dirs, 4 files)" "$(grep '^chown root:root ' "$CALL_LOG" | grep -c "$(root $HELPER_ROOT)")" "7"
-expect_eq "the helper tree holds exactly the four files" "$(find "$(root $HELPER_ROOT)" -type f | wc -l)" "4"
+expect_eq "positive control: the helper tree was chowned root:root (3 dirs, 5 files)" "$(grep '^chown root:root ' "$CALL_LOG" | grep -c "$(root $HELPER_ROOT)")" "8"
+expect_eq "the helper tree holds exactly the five files" "$(find "$(root $HELPER_ROOT)" -type f | wc -l)" "5"
 
 # The state directory is the one thing deploy owns.
 fresh; inst install --pubkey-file "$T_TMP/key.pub" >/dev/null

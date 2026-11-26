@@ -221,7 +221,7 @@ if [[ "$out" =~ ([0-9]+)\ payload\(s\) ]] && [ "${BASH_REMATCH[1]}" -ge 2 ]; the
   # the deploy installer's helper payload sources (deploy.sh, the app.yaml validator and its yaml reader)
   mkdir -p "$real/platform/deploy" "$real/platform/lib"
   cp "$repo_root/platform/deploy/deploy.sh" "$real/platform/deploy/"
-  cp "$repo_root/platform/registry/validate-app-yaml.sh" "$real/platform/registry/"
+  cp "$repo_root/platform/registry/validate-app-yaml.sh" "$repo_root/platform/registry/check-unique-hosts.sh" "$real/platform/registry/"
   cp "$repo_root/platform/lib/yaml-subset.sh" "$real/platform/lib/"
   # the backup installer's payload sources (explicit list: a new payload source must be added here)
   mkdir -p "$real/platform/backup"
@@ -306,7 +306,7 @@ if [[ "$out" =~ ([0-9]+)\ payload\(s\) ]] && [ "${BASH_REMATCH[1]}" -ge 2 ]; the
   expect_rc "regenerating after the altered data copies" 0
 
   # the deploy installer's helper payloads are checked too (one source mutation per payload)
-  for src in deploy/deploy.sh registry/validate-app-yaml.sh lib/yaml-subset.sh registry/reserved-names.txt; do
+  for src in deploy/deploy.sh registry/validate-app-yaml.sh registry/check-unique-hosts.sh lib/yaml-subset.sh registry/reserved-names.txt; do
     run_cmd "$tool" --root "$real"
     expect_rc "regenerating before the deploy $src drift" 0
     echo '# drift' >> "$real/platform/$src"
@@ -320,6 +320,7 @@ if [[ "$out" =~ ([0-9]+)\ payload\(s\) ]] && [ "${BASH_REMATCH[1]}" -ge 2 ]; the
   # an edited embedded deploy-installer copy is drift too (one altered copy per payload, regenerated in between)
   for spec in 's/^readonly TOKEN_MAX=1024$/readonly TOKEN_MAX=1/|deploy/deploy.sh' \
     's/^set -uo pipefail$/set -u/|registry/validate-app-yaml.sh' \
+    's/^declare -A owner_app=()$/declare -A owner_app=( )/|registry/check-unique-hosts.sh' \
     's/^ys_has() { awk/ys_has() { gawk/|lib/yaml-subset.sh' \
     's/^cloudflared$/cloudflaredx/|registry/reserved-names.txt'; do
     run_cmd "$tool" --root "$real"
