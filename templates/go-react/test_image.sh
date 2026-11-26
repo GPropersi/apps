@@ -263,6 +263,7 @@ expect_eq "GET / is 200" "$code" 200
 if grep -qi '^content-security-policy: ' "$hdrs"; then _pass; else _fail "GET / carries the Content-Security-Policy header" "$(cat "$hdrs")"; fi
 if grep -qi '^content-type: text/html' "$hdrs"; then _pass; else _fail "GET / is text/html" "$(cat "$hdrs")"; fi
 if grep -qi '<!doctype html' "$body" && grep -q '/assets/' "$body"; then _pass; else _fail "GET / serves the built index.html (not the placeholder)" "$(head -c 400 "$body")"; fi
+expect_eq "GET /favicon.svg is 200" "$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 "$base/favicon.svg")" 200
 
 expect_eq "GET /api/me without a JWT is 401" "$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 "$base/api/me")" 401
 

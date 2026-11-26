@@ -82,10 +82,15 @@ monorepo (an app's notifs id is `apps_<name>`, with `-` written as `_`).
   `NOTIFS_ACCESS_CLIENT_ID` / `NOTIFS_ACCESS_CLIENT_SECRET` (the Access service token for delivery-api); run the
   workflow once with `dry-run` to print the OIDC claims (`workflow_ref`, `ref`, `environment`); approve that identity as a
   registrar in the 4irl-notifs admin UI; then run it for real. A dry run still exchanges, which rotates the app's key, so
-  follow it with a real run within 24 hours.
+  follow it with a real run within 24 hours. `NOTIFS_DELIVERY_URL` must be a repository *variable*: a secret of that
+  name is invisible to `vars.` and the workflow sees an empty URL.
+- **Run it right after the first deploy:** until the key is written, the app's daily scan fails once a day with one
+  alert each time, and it enqueues nothing.
 - **Expected first failure:** the first run after merge fails with 401 or 403 until the registrar identity is approved.
-  A 401 or 403 later means the identity or the Access service token no longer matches what was approved, never a deploy
-  problem; a write failure (the host rejected the key, or the hashes differ) means rerun it within 24 hours.
+  A 302 from Cloudflare means Access rejected the service token (it is missing from the `notifs-delivery` policy, or
+  the ID and secret do not match). A 401 or 403 later means the identity or the Access service token no longer
+  matches what was approved, never a deploy problem; a write failure (the host rejected the key, or the hashes
+  differ) means rerun it within 24 hours.
 - **Host prerequisite:** re-run `make host-deploy-user` and `make host-data` (the same ARGS as the first install) since the
   `notifs-key` command shipped, or the host answers with an unknown-command error.
 - **The `app` input:** empty means every opted-in app, and `all` also means every app; an explicit app must have
