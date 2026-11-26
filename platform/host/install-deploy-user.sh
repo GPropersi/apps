@@ -42,8 +42,7 @@ export LC_ALL=C
 # sshd, useradd and friends live in /usr/sbin, which a non-root ssh user's PATH lacks
 export PATH="$PATH:/usr/sbin:/sbin"
 
-# shellcheck disable=SC2034  # read by the stamp write in the install path
-readonly INSTALLER_STAMP=c01b480c7da49213
+readonly INSTALLER_STAMP=633857ac2cc38f8b
 readonly DEPLOY_USER="deploy"
 readonly DISPATCHER_PATH="/usr/local/bin/platform"
 readonly WRAPPER_PATH="/usr/local/bin/platform-login"
@@ -57,6 +56,9 @@ readonly HELPER_REGISTRY_DIR="/opt/platform/deploy/registry"
 readonly HELPER_LIB_DIR="/opt/platform/deploy/lib"
 # Per-app deploy state written by the helper running as `deploy`.
 readonly STATE_DIR="/var/lib/platform/deploy"
+# Where this installer records its INSTALLER_STAMP; the dispatcher's `stamps` command reads it back.
+readonly STAMPS_DIR="/opt/platform/stamps"
+readonly STAMP_NAME="deploy-user"
 ROOT="${INSTALL_DEPLOY_ROOT:-}"
 
 # <keytype> <base64> [comment]: no option prefix, no quote, no backslash, no control character.
@@ -112,6 +114,7 @@ payload_platform_sh() {
 # notifs-key; or `current` found an unreadable or malformed tag file), 2 rejected. deploy, rollback, new-db and
 # notifs-key (stdin: 4 key lines) hand over to their
 # helper, whose exit code is the result. `current <app>` is the one read-only arm without a helper.
+# `stamps` (no arguments) prints the four installer stamps as `<name><TAB><value>` lines, exit 0.
 set -euo pipefail
 
 # ASCII-only ranges and a byte-counted length limit, whatever locale the caller has.
@@ -126,10 +129,13 @@ readonly NOTIFS_KEY_HELPER='/opt/platform/data/notifs-key.sh'
 # Installed by install-deploy-user.sh (fixed paths, no override, for the same reason).
 readonly DEPLOY_HELPER='/opt/platform/deploy/deploy.sh'
 readonly DEPLOY_STATE_DIR='/var/lib/platform/deploy'
+# Written by each deploy-path installer as the last act of a successful install (fixed path, no override); `stamps` reads it.
+readonly STAMPS_DIR='/opt/platform/stamps'
+readonly STAMPS_OWNER_UID=0
 
 usage() {
   cat >&2 <<'EOF'
-usage: platform deploy <app> <tag> | rollback <app> | current <app> | new-db <app> | notifs-key <app> | ls
+usage: platform deploy <app> <tag> | rollback <app> | current <app> | new-db <app> | notifs-key <app> | ls | stamps
 EOF
 }
 
@@ -230,6 +236,28 @@ list_apps() {
   done < <(printf '%s\n' "${!app_rank[@]}" | LC_ALL=C sort)
 }
 
+# list_stamps: four TSV rows `name<TAB>value` in fixed order. value is the installer stamp when the file is a regular,
+# non-symlink file owned by STAMPS_OWNER_UID holding exactly one line of 16 lowercase hex, else `missing` (absent) or
+# `invalid` (anything else). Read-only; bad content is never echoed.
+list_stamps() {
+  local name f lines owner
+  for name in deploy-user data ingress jobs; do
+    f="$STAMPS_DIR/$name"
+    if [ ! -e "$f" ] && [ ! -L "$f" ]; then
+      printf '%s\tmissing\n' "$name"
+      continue
+    fi
+    lines=()
+    owner="$(stat -c '%u' -- "$f" 2>/dev/null || true)"
+    if [ -L "$f" ] || [ ! -f "$f" ] || [ "$owner" != "$STAMPS_OWNER_UID" ] || ! mapfile -n 2 -t lines 2>/dev/null <"$f" ||
+      [ "${#lines[@]}" -ne 1 ] || ! [[ "${lines[0]}" =~ ^[0-9a-f]{16}$ ]]; then
+      printf '%s\tinvalid\n' "$name"
+      continue
+    fi
+    printf '%s\t%s\n' "$name" "${lines[0]}"
+  done
+}
+
 if [ "${SSH_ORIGINAL_COMMAND+set}" = "set" ]; then
   cmd="$SSH_ORIGINAL_COMMAND"
 else
@@ -305,6 +333,11 @@ case "$sub" in
   ls)
     need_args 0
     list_apps
+    ;;
+  stamps)
+    need_args 0
+    logger -t platform "stamps" || true
+    list_stamps
     ;;
   *)
     reject unknown-command "$len"
@@ -2180,6 +2213,10 @@ do_install() {
   place_dir "$ROOT$KEYS_DIR" 755
   place_file "$TMP/key" "$ROOT$KEY_FILE" 644
   install_dropin
+  # The stamp is the last action: a failed install leaves the previous stamp (or none), so the deploy gate fails closed.
+  printf '%s\n' "$INSTALLER_STAMP" > "$TMP/stamp"
+  place_dir "$ROOT$STAMPS_DIR" 755
+  place_file "$TMP/stamp" "$ROOT$STAMPS_DIR/$STAMP_NAME" 644
   info "install-deploy-user: done"
 }
 
@@ -2220,6 +2257,14 @@ do_checks() {
   check_owned "deploy state directory" "$ROOT$STATE_DIR" 755 "$DEPLOY_USER:$DEPLOY_USER" || true
   check_owned "keys directory" "$ROOT$KEYS_DIR" 755 || true
   check_owned "key file" "$ROOT$KEY_FILE" 644 || true
+
+  check_owned "stamps directory" "$ROOT$STAMPS_DIR" 755 || true
+  path="$ROOT$STAMPS_DIR/$STAMP_NAME"
+  if check_owned "installer stamp" "$path" 644; then
+    if [ "$(cat -- "$path")" = "$INSTALLER_STAMP" ]; then pass "installer stamp matches this installer"; else fail "stamp $path differs from this installer (run install)"; fi
+  else
+    fail "stamp $path differs from this installer (run install)"
+  fi
 
   path="$ROOT$KEY_FILE"
   if [ -f "$path" ]; then

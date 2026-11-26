@@ -10,6 +10,7 @@
 # notifs-key; or `current` found an unreadable or malformed tag file), 2 rejected. deploy, rollback, new-db and
 # notifs-key (stdin: 4 key lines) hand over to their
 # helper, whose exit code is the result. `current <app>` is the one read-only arm without a helper.
+# `stamps` (no arguments) prints the four installer stamps as `<name><TAB><value>` lines, exit 0.
 set -euo pipefail
 
 # ASCII-only ranges and a byte-counted length limit, whatever locale the caller has.
@@ -24,10 +25,13 @@ readonly NOTIFS_KEY_HELPER='/opt/platform/data/notifs-key.sh'
 # Installed by install-deploy-user.sh (fixed paths, no override, for the same reason).
 readonly DEPLOY_HELPER='/opt/platform/deploy/deploy.sh'
 readonly DEPLOY_STATE_DIR='/var/lib/platform/deploy'
+# Written by each deploy-path installer as the last act of a successful install (fixed path, no override); `stamps` reads it.
+readonly STAMPS_DIR='/opt/platform/stamps'
+readonly STAMPS_OWNER_UID=0
 
 usage() {
   cat >&2 <<'EOF'
-usage: platform deploy <app> <tag> | rollback <app> | current <app> | new-db <app> | notifs-key <app> | ls
+usage: platform deploy <app> <tag> | rollback <app> | current <app> | new-db <app> | notifs-key <app> | ls | stamps
 EOF
 }
 
@@ -128,6 +132,28 @@ list_apps() {
   done < <(printf '%s\n' "${!app_rank[@]}" | LC_ALL=C sort)
 }
 
+# list_stamps: four TSV rows `name<TAB>value` in fixed order. value is the installer stamp when the file is a regular,
+# non-symlink file owned by STAMPS_OWNER_UID holding exactly one line of 16 lowercase hex, else `missing` (absent) or
+# `invalid` (anything else). Read-only; bad content is never echoed.
+list_stamps() {
+  local name f lines owner
+  for name in deploy-user data ingress jobs; do
+    f="$STAMPS_DIR/$name"
+    if [ ! -e "$f" ] && [ ! -L "$f" ]; then
+      printf '%s\tmissing\n' "$name"
+      continue
+    fi
+    lines=()
+    owner="$(stat -c '%u' -- "$f" 2>/dev/null || true)"
+    if [ -L "$f" ] || [ ! -f "$f" ] || [ "$owner" != "$STAMPS_OWNER_UID" ] || ! mapfile -n 2 -t lines 2>/dev/null <"$f" ||
+      [ "${#lines[@]}" -ne 1 ] || ! [[ "${lines[0]}" =~ ^[0-9a-f]{16}$ ]]; then
+      printf '%s\tinvalid\n' "$name"
+      continue
+    fi
+    printf '%s\t%s\n' "$name" "${lines[0]}"
+  done
+}
+
 if [ "${SSH_ORIGINAL_COMMAND+set}" = "set" ]; then
   cmd="$SSH_ORIGINAL_COMMAND"
 else
@@ -203,6 +229,11 @@ case "$sub" in
   ls)
     need_args 0
     list_apps
+    ;;
+  stamps)
+    need_args 0
+    logger -t platform "stamps" || true
+    list_stamps
     ;;
   *)
     reject unknown-command "$len"
