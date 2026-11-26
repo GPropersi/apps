@@ -56,7 +56,7 @@
 # (/var/lib/platform/deploy), DEPLOY_REGISTRY_ROOT (/var/lib/platform/registry), DEPLOY_LOCK_DIR
 # (/var/lib/platform/locks), DEPLOY_CONNECTION_ENV (/opt/platform/data/connection.env), DEPLOY_ROUTES_DIR
 # (/opt/platform/ingress/dynamic), DEPLOY_INGRESS_ENV (/etc/platform/ingress.env), DEPLOY_ACCESS_ENV
-# (/etc/platform/access.env), DEPLOY_ENV_UID (0, the owner those two files must have), DEPLOY_LOCK_UID (0, the owner the claims lock must have),DEPLOY_SKIP_REGISTRY (1 skips
+# (/etc/platform/access.env), DEPLOY_ENV_UID (0, the owner those two files must have), DEPLOY_LOCK_UID (0, the owner the claims lock must have), DEPLOY_SKIP_REGISTRY (1 skips
 # login and pull and uses the image already in the local daemon), DEPLOY_VALIDATOR
 # (/opt/platform/deploy/registry/validate-app-yaml.sh; its yaml reader is ../lib/yaml-subset.sh beside it),
 # DEPLOY_HOST_CHECK (/opt/platform/deploy/registry/check-unique-hosts.sh, the cross-app claim checker),
@@ -377,7 +377,7 @@ take_lock() {
   log "phase=lock end rc=0"
 }
 
-# claims_lock_ok: 0 when the host claims lock file is a regular, non-symlink file owned by $ENV_UID (root) that this user can open for append. Never
+# claims_lock_ok: 0 when the host claims lock file is a regular, non-symlink file owned by $LOCK_UID (root) that this user can open for append. Never
 # creates it (install-data.sh does).
 claims_lock_ok() {
   local f="$LOCK_DIR/_hostname-claims.lock"
