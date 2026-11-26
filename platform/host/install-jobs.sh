@@ -60,7 +60,7 @@ export LC_ALL=C
 # getent and friends live in /usr/sbin, which a non-root ssh user's PATH lacks
 export PATH="$PATH:/usr/sbin:/sbin"
 
-readonly INSTALLER_STAMP=c5d1b44c76fe592b
+readonly INSTALLER_STAMP=3af0fff35ca4c71a
 readonly JOBS_GID=64324
 readonly RUNNER_UID=65532
 readonly PROJECT="platform-jobs"
@@ -6471,6 +6471,8 @@ do_install() {
   # The stamp is the last action, after the runner is healthy and the record is written: a failed or unhealthy install
   # leaves the previous stamp (or none), so the deploy gate fails closed. It is written even when everything else matched.
   printf '%s\n' "$INSTALLER_STAMP" > "$TMP/stamp"
+  # A symlink in place of the stamps directory is removed (the link only, never its target), as install-ingress does.
+  if priv test -L "$STAMPS_DIR"; then priv rm -f -- "$STAMPS_DIR"; fi
   ensure_dir "$STAMPS_DIR" 0 0 755
   place_file "$TMP/stamp" "$STAMPS_DIR/$STAMP_NAME" 644
   if [ "$CHANGED" -eq 1 ]; then info "install-jobs: done (runner healthy)"; fi

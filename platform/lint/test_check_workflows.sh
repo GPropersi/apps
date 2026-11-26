@@ -383,6 +383,11 @@ expect_fail "gate run with || true" "$gate_pat run: must not hold \\|\\| true"
 real_root; mut app-deploy-one.yml "${gate_range}"'s#(check-installer-stamps\.sh "\$rc" "\$out")#\1 || :#'; run_check
 expect_fail "gate run with || :" "$gate_pat run: must not hold \\|\\| true"
 
+for tail in 'exit 0' 'rc=0' 'echo x'; do
+  real_root; mut app-deploy-one.yml "${gate_range}"'s#(check-installer-stamps\.sh "\$rc" "\$out")#\1 || '"$tail"'#'; run_check
+  expect_fail "gate call line with || $tail" "$gate_pat run: the check-installer-stamps\\.sh call line must not hold any \\|\\|"
+done
+
 real_root; mut app-deploy-one.yml "${gate_range}"'s#^( *)rc=0$#\1set +e\n\1rc=0#'; run_check
 expect_fail "gate run with set +e" "$gate_pat run: must not hold \\|\\| true"
 

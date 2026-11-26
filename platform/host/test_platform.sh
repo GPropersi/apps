@@ -501,6 +501,24 @@ sed -e "s#^readonly STAMPS_OWNER_UID=.*#readonly STAMPS_OWNER_UID=$(($(id -u) + 
 run_cmd env LC_ALL=C SSH_ORIGINAL_COMMAND="stamps" bash "$copy_uid"
 expect_rc "stamps with another owner uid exits 0" 0
 expect_eq "a stamp owned by another uid reports invalid" "$out" "$(printf 'deploy-user\tinvalid\ndata\tmissing\ningress\tinvalid\njobs\tinvalid')"
+# More invalid single-file contents (one line, so only the 16-lowercase-hex rule and the regular-file rule can reject).
+rm -rf "$STAMPS_TREE"
+mkdir -p "$STAMPS_TREE"
+want_bad="$(printf 'deploy-user\tinvalid\ndata\tmissing\ningress\tmissing\njobs\tmissing')"
+for bad in 'ABCDEF0123456789' 'abcdef012345678' 'abcdef01234567890' ''; do
+  printf '%s\n' "$bad" > "$STAMPS_TREE/deploy-user"
+  run_copy "stamps"
+  expect_rc "stamps with content '$bad' exits 0" 0
+  expect_eq "stamps reports invalid for content '$bad'" "$out" "$want_bad"
+done
+: > "$STAMPS_TREE/deploy-user"
+run_copy "stamps"
+expect_eq "stamps reports invalid for an empty file" "$out" "$want_bad"
+rm -f "$STAMPS_TREE/deploy-user"
+mkdir "$STAMPS_TREE/deploy-user"
+run_copy "stamps"
+expect_rc "stamps with a directory at the stamp path exits 0" 0
+expect_eq "stamps reports invalid for a directory at the stamp path" "$out" "$want_bad"
 # No arguments allowed.
 : > "$LOGGER_LOG"
 run_copy "stamps x"

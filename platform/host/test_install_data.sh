@@ -665,6 +665,20 @@ rm -f "$STAMP_PATH"
 ins verify
 expect_rc "stamp: verify fails for a missing stamp" 1
 expect_out_has "stamp: verify names the missing stamp" "stamp $STAMP_PATH differs from this installer (run install)"
+# a symlinked stamps directory is replaced (the link only): nothing is chowned, chmodded or written through it
+fresh
+LINK_TARGET="$T_TMP/stamps-link-target"
+mkdir -p "$LINK_TARGET" "$(dirname "$STAMP_PATH")"
+chmod 700 "$LINK_TARGET"
+rmdir "$(dirname "$STAMP_PATH")"
+ln -s "$LINK_TARGET" "$(dirname "$STAMP_PATH")"
+ins install
+expect_rc "stamp: install with a symlinked stamps directory succeeds" 0
+if [ -d "$(dirname "$STAMP_PATH")" ] && [ ! -L "$(dirname "$STAMP_PATH")" ]; then _pass; else _fail "stamp: the symlinked stamps directory is replaced by a real directory"; fi
+expect_eq "stamp: the link target is left empty" "$(ls -A "$LINK_TARGET")" ""
+expect_eq "stamp: the link target mode is untouched" "$(/usr/bin/stat -c '%a' "$LINK_TARGET")" "700"
+if [ ! -e "$STATE/owner/${LINK_TARGET//\//_}" ]; then _pass; else _fail "stamp: the link target is never chowned"; fi
+expect_eq "stamp: the stamp is written in the real directory" "$(cat "$STAMP_PATH")" "$STAMP_VALUE"
 # a failed install (compose up fails) leaves the previous stamp untouched
 fresh
 mkdir -p "$(dirname "$STAMP_PATH")"

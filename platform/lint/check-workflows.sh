@@ -37,7 +37,8 @@
 #  14. in app-deploy-one.yml the `deploy` job has a step whose `run:` calls check-installer-stamps.sh (the host installer
 #      gate) before the steps running `new-db "$APP"` and `deploy "$APP" "$OWN_SHA"`, with exactly
 #      `if: steps.live.outputs.go == 'true'`, no continue-on-error, no `|| true`, `|| :` or `set +e` in its run:, the
-#      literal `check-installer-stamps.sh "$rc" "$out"` call and the `|| rc=$?` capture.
+#      literal `check-installer-stamps.sh "$rc" "$out"` call carrying no `||` after it on its line, and the `|| rc=$?`
+#      capture.
 # Comment lines are ignored. The parse is line-based and assumes the repo's 2-space YAML (jobs at 2 spaces, job keys
 # at 4); a job with `environment:` it cannot pair with a guard fails closed.
 set -uo pipefail
@@ -46,7 +47,7 @@ root=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --root) [ $# -ge 2 ] || { echo "missing value for --root" >&2; exit 2; }; root="$2"; shift 2 ;;
-    -h | --help) sed -n '2,43p' "$0"; exit 0 ;;
+    -h | --help) sed -n '2,44p' "$0"; exit 0 ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac
 done
@@ -286,6 +287,12 @@ if [ -f "$root/.github/workflows/app-deploy-one.yml" ] && grep -qx '.github/work
         print path ": the host installer gate run: must not hold || true, || : or set +e (they swallow the decision script exit code)"
       if (!index(run[gate], "check-installer-stamps.sh \"$rc\" \"$out\""))
         print path ": the host installer gate run: must call check-installer-stamps.sh \"$rc\" \"$out\""
+      nl = split(run[gate], rl, "\n")
+      for (j = 1; j <= nl; j++) {
+        p = index(rl[j], "check-installer-stamps.sh \"$rc\" \"$out\"")
+        if (p && index(substr(rl[j], p), "||"))
+          print path ": the host installer gate run: the check-installer-stamps.sh call line must not hold any || (it would swallow the decision script exit code)"
+      }
       if (!index(run[gate], "|| rc=$?"))
         print path ": the host installer gate run: must capture the ssh status with || rc=$?"
     }

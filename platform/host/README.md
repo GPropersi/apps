@@ -174,7 +174,10 @@ sha256 of the installer file with that line emptied. `make embed` writes it (aft
 final bytes) and `make lint` fails when any byte of a stamped installer changes without it. The stamp attests the
 stamp constant carried by the streamed installer, which `make lint` ties to the committed installer bytes. An
 installer streamed from an uncommitted or edited working tree is not detected, so run installers from a clean
-checkout of main. It is not the full host state: a payload file hand-edited on the host is still caught only by the
+checkout of main. Any merge that changes an installer, or a payload it embeds (for deploy-user: the deploy helper, the
+app.yaml validator, the reserved-names list, the yaml-subset library and the login shell; for jobs: everything under
+`platform/jobs/`), changes that installer's stamp, so the matching `make host-<name>` install must be re-run before the
+next deploy passes the gate. It is not the full host state: a payload file hand-edited on the host is still caught only by the
 installer's `verify`.
 
 ## Egress rules

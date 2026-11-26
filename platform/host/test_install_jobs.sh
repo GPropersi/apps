@@ -586,6 +586,19 @@ ins install
 expect_rc "install with the stamps directory absent" 0
 expect_out_has "the absent stamps directory is recreated" "changed: $STAMP_DIR/"
 expect_eq "the recreated stamps directory is 0755" "$(stat -c '%a' "$STAMP_DIR")" "755"
+# a symlinked stamps directory is replaced (the link only): nothing is chowned, chmodded or written through it
+LINK_TARGET="$T_TMP/stamps-link-target"
+mkdir -p "$LINK_TARGET"
+chmod 700 "$LINK_TARGET"
+rm -rf "$STAMP_DIR"
+ln -s "$LINK_TARGET" "$STAMP_DIR"
+ins install
+expect_rc "install with a symlinked stamps directory" 0
+if [ -d "$STAMP_DIR" ] && [ ! -L "$STAMP_DIR" ]; then _pass; else _fail "the symlinked stamps directory is replaced by a real directory"; fi
+expect_eq "the link target is left empty" "$(ls -A "$LINK_TARGET")" ""
+expect_eq "the link target mode is untouched" "$(stat -c '%a' "$LINK_TARGET")" "700"
+if [ ! -e "$STATE/owner/${LINK_TARGET//\//_}" ]; then _pass; else _fail "the link target is never chowned"; fi
+expect_eq "the stamp is written in the real directory" "$(cat "$STAMP_PATH")" "$STAMP_VALUE"
 
 # ---- 6. password normalisation: with or without a trailing newline ----
 
