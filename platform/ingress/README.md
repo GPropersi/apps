@@ -103,8 +103,8 @@ root's `dynamic.yml`. The guard is `install-ingress.sh verify` (and `status`): i
 (that app's own router and service, no `priority`, `middlewares` or other key). Run it after any deploy-identity change.
 
 The token group is created by you, once, at the fixed gid `64321` (it must equal `group_add` of every connector service,
-`cloudflared`, `cloudflared-blue` and `cloudflared-green`, in `compose.yaml`). It must have **no members**, be **no account's primary group** and **not be the Docker socket's
-group**. The installer only verifies this, fail-closed, and prints the commands when something is missing:
+`cloudflared`, `cloudflared-blue` and `cloudflared-green`, in `compose.yaml`). It must have **no members**, be **no
+account's primary group** and **not be the Docker socket's group**. The installer only verifies this, fail-closed, and prints the commands when something is missing:
 
 ```
 sudo groupadd --gid 64321 cloudflared-token
