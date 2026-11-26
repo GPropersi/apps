@@ -173,7 +173,7 @@ export function EditForm({
 
   return (
     <>
-      <form className="detailform" onSubmit={(e) => void onSubmit(e)} noValidate aria-label="Edit birthday">
+      <form className="detailform editform" onSubmit={(e) => void onSubmit(e)} noValidate aria-label="Edit birthday">
         <div className="field name">
           <label htmlFor="edit-name">Name</label>
           <input
@@ -192,66 +192,69 @@ export function EditForm({
             {errors.name}
           </p>
         </div>
-        <div className="field month">
-          <label htmlFor="edit-month">Month</label>
-          <select
-            id="edit-month"
-            ref={monthRef}
-            value={form.month}
-            disabled={disabled}
-            aria-invalid={errors.month !== "" ? "true" : undefined}
-            aria-describedby="edit-month-err"
-            onChange={(e) => change({ month: Number(e.target.value) }, ["month", "day"])}
-          >
-            {MONTHS.map((full, i) => (
-              <option key={full} value={i + 1}>
-                {full}
-              </option>
-            ))}
-          </select>
-          <p className="fielderr" id="edit-month-err">
-            {errors.month}
-          </p>
-        </div>
-        <div className="field">
-          <label htmlFor="edit-day">Day</label>
-          <input
-            id="edit-day"
-            type="text"
-            inputMode="numeric"
-            maxLength={2}
-            autoComplete="off"
-            ref={dayRef}
-            value={form.day}
-            disabled={disabled}
-            aria-invalid={errors.day !== "" ? "true" : undefined}
-            aria-describedby="edit-day-err"
-            onChange={(e) => change({ day: e.target.value }, ["day"])}
-          />
-          <p className="fielderr" id="edit-day-err">
-            {errors.day}
-          </p>
-        </div>
-        <div className="field">
-          <label htmlFor="edit-year">
-            Year <span className="meta">(optional)</span>
-          </label>
-          <input
-            id="edit-year"
-            type="text"
-            inputMode="numeric"
-            maxLength={4}
-            autoComplete="off"
-            ref={yearRef}
-            value={form.year}
-            disabled={disabled}
-            aria-invalid={errors.year !== "" ? "true" : undefined}
-            aria-describedby="edit-year-err"
-            onChange={(e) => change({ year: e.target.value }, ["year", "day"])}
-          />
-          <p className="fielderr" id="edit-year-err">
-            {errors.year}
-          </p>
+        <div className="daterow three">
+          <div className="field">
+            <label htmlFor="edit-month">Month</label>
+            <select
+              id="edit-month"
+              ref={monthRef}
+              value={form.month}
+              disabled={disabled}
+              aria-invalid={errors.month !== "" ? "true" : undefined}
+              aria-describedby="edit-month-err"
+              onChange={(e) => change({ month: Number(e.target.value) }, ["month", "day"])}
+            >
+              {MONTHS.map((full, i) => (
+                <option key={full} value={i + 1}>
+                  {full}
+                </option>
+              ))}
+            </select>
+            <p className="fielderr" id="edit-month-err">
+              {errors.month}
+            </p>
+          </div>
+          <div className="field">
+            <label htmlFor="edit-day">Day</label>
+            <input
+              id="edit-day"
+              type="text"
+              inputMode="numeric"
+              maxLength={2}
+              autoComplete="off"
+              ref={dayRef}
+              value={form.day}
+              disabled={disabled}
+              aria-invalid={errors.day !== "" ? "true" : undefined}
+              aria-describedby="edit-day-err"
+              onChange={(e) => change({ day: e.target.value }, ["day"])}
+            />
+            <p className="fielderr" id="edit-day-err">
+              {errors.day}
+            </p>
+          </div>
+          <div className="field">
+            <label htmlFor="edit-year">
+              Year<span className="sr-only"> (optional)</span>
+            </label>
+            <input
+              id="edit-year"
+              type="text"
+              inputMode="numeric"
+              maxLength={4}
+              autoComplete="off"
+              placeholder="Optional"
+              ref={yearRef}
+              value={form.year}
+              disabled={disabled}
+              aria-invalid={errors.year !== "" ? "true" : undefined}
+              aria-describedby="edit-year-err"
+              onChange={(e) => change({ year: e.target.value }, ["year", "day"])}
+            />
+            <p className="fielderr" id="edit-year-err">
+              {errors.year}
+            </p>
+          </div>
         </div>
         <button className="primary" type="submit" disabled={disabled} aria-disabled={saving ? "true" : undefined}>
           Save
