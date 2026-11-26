@@ -281,6 +281,8 @@ describe("Add tab", () => {
     await user.type(await nameField(), "  Mia  ");
     await user.click(month("February"));
     await user.type(dayInput(), "29");
+    expect(yearInput()).toHaveAccessibleName(/^Year ?\(optional\)$/);
+    expect(yearInput()).toHaveAttribute("placeholder", "Optional");
     await user.type(yearInput(), "2000");
     await user.click(remindBox());
     await user.click(addButton());

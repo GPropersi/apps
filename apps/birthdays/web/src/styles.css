@@ -294,6 +294,7 @@ li.wperson .avatar { width: 2.25rem; height: 2.25rem; font-size: 0.8125rem; }
 .daterow { display: grid; grid-template-columns: 1fr 1fr; gap: 0.75rem; }
 /* Edit form: month, day and year on one row, labels kept to one line so the boxes line up */
 .daterow.three { grid-template-columns: minmax(0, 2fr) minmax(0, 1fr) minmax(0, 1.25fr); }
+/* Every date row (Add and Edit): labels on one line, input padding trimmed so the "Optional" placeholder fits */
 .daterow label { white-space: nowrap; }
 .daterow input { padding-left: 0.625rem; padding-right: 0.625rem; }
 main > section.narrow { width: 100%; max-width: 34rem; justify-self: center; }

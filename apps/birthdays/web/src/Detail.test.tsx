@@ -403,6 +403,8 @@ describe("owner edit form", () => {
     await user.clear(day);
     await user.type(day, "29");
     const year = screen.getByLabelText(/^Year/);
+    expect(year).toHaveAccessibleName(/^Year ?\(optional\)$/);
+    expect(year).toHaveAttribute("placeholder", "Optional");
     await user.clear(year);
     await user.type(year, "2023");
     await user.click(screen.getByRole("button", { name: "Save" }));

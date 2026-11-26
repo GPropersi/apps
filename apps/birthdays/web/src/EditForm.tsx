@@ -193,7 +193,7 @@ export function EditForm({
           </p>
         </div>
         <div className="daterow three">
-          <div className="field month">
+          <div className="field">
             <label htmlFor="edit-month">Month</label>
             <select
               id="edit-month"
