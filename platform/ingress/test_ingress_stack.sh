@@ -691,7 +691,6 @@ mutate "page loads an external asset" "external assets" page - - after '^<title>
 dc='docker compose -p platform-ingress -f /opt/platform/ingress/compose.yaml --env-file /etc/platform/ingress.env'
 # Each plants a fenced line after the canary command (the "exec <active>" line, inside a fence).
 plant_after_exec() { printf '/exec <active>/s|$|\\n%s|' "$1"; }
-mutate "README fenced bare up -d (sudo form)" "README scan:" readme - - sed "$(plant_after_exec "sudo $dc up -d")"
 mutate "README bare up -d reason" "up without a service name" readme - - sed "$(plant_after_exec "sudo $dc up -d")"
 mutate "README fenced restart of the legacy service (indented)" "restart in a fence" readme - - sed "$(plant_after_exec "  $dc restart cloudflared")"
 mutate "README fenced --force-recreate" "--force-recreate in a fence" readme - - sed "$(plant_after_exec "sudo $dc up -d --force-recreate cloudflared-blue")"
