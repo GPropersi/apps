@@ -59,9 +59,9 @@ export LC_ALL=C
 # groupadd, getent and friends live in /usr/sbin, which a non-root ssh user's PATH lacks
 export PATH="$PATH:/usr/sbin:/sbin"
 
+readonly INSTALLER_STAMP=b53efad152be91db
 # The dedicated token group. Fixed, chosen without knowledge of the host's group database; it must equal the numeric
 # group_add of cloudflared in compose.yaml (the test suite compares the two).
-readonly INSTALLER_STAMP=1bd14a39924dfa34
 readonly TOKEN_GID=64321
 readonly INSTALL_DIR="/opt/platform/ingress"
 # Where this installer records its INSTALLER_STAMP; the dispatcher's `stamps` command reads it back.

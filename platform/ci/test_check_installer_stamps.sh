@@ -207,7 +207,7 @@ run_cmd in_dir "$real_copy" "$script" 0 "$real_out"
 expect_rc "real installer with one byte changed" 2
 expect_out_has "one-byte change is a stale stamp" "install-data.sh stamp is stale or empty: run make embed"
 
-# The embed tool is the source of the normalisation the script mirrors (areas.map reads it via ../lint/).
+# The embed tool is the source of the normalisation the script mirrors, so it must exist at this path.
 expect_file "embed tool present" "$embed_tool"
 
 t_finish

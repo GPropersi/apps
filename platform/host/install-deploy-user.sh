@@ -42,7 +42,7 @@ export LC_ALL=C
 # sshd, useradd and friends live in /usr/sbin, which a non-root ssh user's PATH lacks
 export PATH="$PATH:/usr/sbin:/sbin"
 
-readonly INSTALLER_STAMP=c4b5cee36783c628
+readonly INSTALLER_STAMP=80dbbbec01ecdfb5
 readonly DEPLOY_USER="deploy"
 readonly DISPATCHER_PATH="/usr/local/bin/platform"
 readonly WRAPPER_PATH="/usr/local/bin/platform-login"
@@ -2260,8 +2260,8 @@ do_checks() {
 
   check_owned "stamps directory" "$ROOT$STAMPS_DIR" 755 || true
   path="$ROOT$STAMPS_DIR/$STAMP_NAME"
-  if check_owned "installer stamp" "$path" 644; then
-    if [ -f "$path" ] && [ ! -L "$path" ] && printf '%s\n' "$INSTALLER_STAMP" | cmp -s - "$path"; then pass "installer stamp matches this installer"; else fail "stamp $path differs from this installer (run install)"; fi
+  if check_owned "installer stamp" "$path" 644 && [ -f "$path" ] && [ ! -L "$path" ] && printf '%s\n' "$INSTALLER_STAMP" | cmp -s - "$path"; then
+    pass "installer stamp matches this installer"
   else
     fail "stamp $path differs from this installer (run install)"
   fi
