@@ -138,6 +138,10 @@ payload_compose_yaml() {
 # Host-side inputs (never written here): PLATFORM_DOMAIN (the env file), the tunnel token file mounted into
 # cloudflared.
 #
+# Connectors: `cloudflared` (official image) is the kept rollback definition. `cloudflared-blue` and
+# `cloudflared-green` are the permanent overlap pair (self-updating supervisor image); only one runs outside an
+# overlap. Every command names its service (never a bare `up`); see the ingress README runbook.
+#
 # Rules this file keeps (platform/ingress/test_ingress_stack.sh enforces them):
 # - It stays inside a small YAML subset (block style only) so the tests can read it without a YAML library.
 # - Traefik is configured ONLY through TRAEFIK_* environment variables, and has no `command:`. Traefik ignores
@@ -184,6 +188,78 @@ services:
       timeout: 5s
       retries: 3
       start_period: 20s
+
+  cloudflared-blue:
+    image: ghcr.io/gpropersi/cloudflared-supervisor:45649683873@sha256:dd629863d150e97e8e5af78f5053fe7ea75e5a130aec882d90c2c34860bcc367
+    environment:
+      TUNNEL_TOKEN_FILE: /run/cloudflared/token
+      CF_WEBHOOK_FILE: /run/secrets/cloudflared-webhook
+      CF_METRICS_A: 127.0.0.1:20251
+      CF_METRICS_B: 127.0.0.1:20252
+    volumes:
+      - /etc/platform/cloudflared.token:/run/cloudflared/token:ro
+      - /etc/platform/cloudflared.webhook:/run/secrets/cloudflared-webhook:ro
+      - /var/lib/cloudflared-supervisor-blue:/var/lib/cloudflared-supervisor
+    user: "65532:65532"
+    group_add:
+      - "64321"
+    networks:
+      - platform
+    restart: unless-stopped
+    mem_limit: 192m
+    stop_grace_period: 45s
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    read_only: true
+    tmpfs:
+      - /tmp
+    healthcheck:
+      test:
+        - CMD
+        - /usr/local/bin/cloudflared-supervisor.sh
+        - --health
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 120s
+
+  cloudflared-green:
+    image: ghcr.io/gpropersi/cloudflared-supervisor:45649683873@sha256:dd629863d150e97e8e5af78f5053fe7ea75e5a130aec882d90c2c34860bcc367
+    environment:
+      TUNNEL_TOKEN_FILE: /run/cloudflared/token
+      CF_WEBHOOK_FILE: /run/secrets/cloudflared-webhook
+      CF_METRICS_A: 127.0.0.1:20253
+      CF_METRICS_B: 127.0.0.1:20254
+    volumes:
+      - /etc/platform/cloudflared.token:/run/cloudflared/token:ro
+      - /etc/platform/cloudflared.webhook:/run/secrets/cloudflared-webhook:ro
+      - /var/lib/cloudflared-supervisor-green:/var/lib/cloudflared-supervisor
+    user: "65532:65532"
+    group_add:
+      - "64321"
+    networks:
+      - platform
+    restart: unless-stopped
+    mem_limit: 192m
+    stop_grace_period: 45s
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    read_only: true
+    tmpfs:
+      - /tmp
+    healthcheck:
+      test:
+        - CMD
+        - /usr/local/bin/cloudflared-supervisor.sh
+        - --health
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 120s
 
   traefik:
     image: docker.io/library/traefik:v3.7.15@sha256:0f6150202bc1fed72a7bd2107460eaa510e5b8a905f3fdb5b84f2c8619c33368

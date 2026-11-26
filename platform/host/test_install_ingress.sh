@@ -644,7 +644,7 @@ sed 's/^readonly TOKEN_GID=64321$/readonly TOKEN_GID=64322/' "$script" > "$T_TMP
 expect_out_has_text "$(gid_mismatch "$T_TMP/mut-const.sh")" "MISMATCH: TOKEN_GID=64322 but compose group_add=64321" "mutation: changing the constant fails the gid check"
 sed 's/^      - "64321"$/      - "64399"/' "$script" > "$T_TMP/mut-compose.sh"
 expect_out_has_text "$(gid_mismatch "$T_TMP/mut-compose.sh")" "MISMATCH: TOKEN_GID=64321 but compose group_add=64399" "mutation: changing the embedded compose group_add fails the gid check"
-expect_eq "the tracked compose.yaml also carries the same group_add gid" "$(grep -c '^      - "64321"$' "$REPO_COMPOSE")" "1"
+expect_eq "the tracked compose.yaml also carries the same group_add gid" "$(grep -c '^      - "64321"$' "$REPO_COMPOSE")" "3"
 
 # ---- status / verify ----
 
