@@ -29,6 +29,7 @@ The file is written in the small YAML subset read by `platform/lib/yaml-subset.s
 | `health_path` | no | Starts with `/`; only letters, digits and `. _ ~ / % -` after it. Also gates routing: keep it cheap, unauthenticated and answering 2xx or 3xx within 3s, because Traefik probes it every 5s and a failing or slow response drops the app to the down page until it recovers. |
 | `access` | no | `family` (default when absent), `public` or `restricted`. Records intent only: no email lists belong in the file. |
 | `notifs` | no | `true` or `false` (default `false`), unquoted. `true` opts the app in to 4irl-notifs: only then does `platform notifs-key <app>` accept a key for it (see `../data/README.md`). The jobs runner accepts and ignores it. Anything else (`yes`, `1`, a quoted value) is an error. |
+| `hostname` | no | Public web address label: the app is served at `Host(<hostname>.<domain>)`. Must match `^[a-z][a-z0-9-]{1,30}$`, not be reserved, and not equal the app's own `name` (omit the key to serve at the name). Unique across apps and not another app's name, enforced by `make lint` and deploy. Absent = served at `name`. Internal ids (router, service, container, DB, registry dir) stay on `name`. Rollout order: the host installers are re-run before any app sets it. |
 | `jobs` | no | A non-empty list of maps (below). |
 | `volumes` | no | A non-empty list of 1 to 4 maps (below). |
 

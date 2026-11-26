@@ -95,6 +95,19 @@ for nv in true false; do
   run_cmd "$validator" "$cases/chores/app.yaml"
   expect_rc "notifs: $nv is valid" 0
 done
+rm -rf "${cases:?}/chores"
+mkdir -p "$cases/chores"
+sed -e "s/^access: family/access: family\nhostname: chores-web/" "$example" > "$cases/chores/app.yaml"
+run_cmd "$validator" "$cases/chores/app.yaml"
+expect_rc "hostname: chores-web is valid" 0
+for hv in Dates 1x a; do
+  mutate "hostname $hv bad shape" "hostname '$hv' must match" "s/^access: family/access: family\nhostname: $hv/"
+done
+for hv in www status; do
+  mutate "hostname $hv reserved" "hostname '$hv' is reserved" "s/^access: family/access: family\nhostname: $hv/"
+done
+mutate "hostname equals name" "hostname 'chores' equals name; omit hostname to serve at the name" 's/^access: family/access: family\nhostname: chores/'
+mutate "hostname empty" "hostname must not be empty" 's/^access: family/access: family\nhostname:/'
 mutate "owner as an email" "owner must be a short handle, not an email" "s/^owner: family/owner: bob${at}home/"
 mutate "owner bad shape" "owner 'Bob'" 's/^owner: family/owner: Bob/'
 mutate "duplicate job name" "duplicate job name 'daily-digest'" 's/name: send-reminder/name: daily-digest/'

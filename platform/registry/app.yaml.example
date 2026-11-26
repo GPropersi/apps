@@ -9,6 +9,8 @@ health_path: /healthz
 access: family
 # Optional: true opts the app in to 4irl-notifs (the host then accepts a key for it via `platform notifs-key`):
 # notifs: true
+# Optional: serve at a different public address label than the name (must differ from the name, unique across apps):
+# hostname: chores-web
 # Optional persistent folders (1 to 4), kept across restarts and redeploys. Each path must be a
 # directory in the image under /data, owned by the image's numeric USER:
 # volumes:
