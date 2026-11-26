@@ -53,7 +53,9 @@
 #
 # Test overrides (env, test-only): INSTALL_INGRESS_ROOT (path prefix for every host file), INSTALL_INGRESS_SUDO (the
 # privilege prefix; "sudo -n" by default, none when already root), INSTALL_INGRESS_SOCKET (the Docker socket path),
-# INSTALL_INGRESS_HEALTH_TIMEOUT / INSTALL_INGRESS_POLL (seconds), INSTALL_INGRESS_LIVE_LOCAL (run the live docker
+# INSTALL_INGRESS_HEALTH_TIMEOUT (seconds, default 120: the health wait when this run started no connector),
+# INSTALL_INGRESS_CONNECTOR_HEALTH_TIMEOUT (seconds, default 240: the wait when this run's `up` started a connector,
+# because a fresh supervisor has a 120 s healthcheck start_period), INSTALL_INGRESS_POLL (seconds), INSTALL_INGRESS_LIVE_LOCAL (run the live docker
 # commands locally instead of over ssh), INSTALL_INGRESS_LIVE_SLEEP, INSTALL_INGRESS_HOLD_TTY,
 # INSTALL_INGRESS_HOLD_TIMEOUT, INSTALL_INGRESS_AS_DEPLOY (the prefix that runs a command as the deploy user). The docker, stat and getent commands are the ones on PATH, so a test puts stubs there.
 set -euo pipefail
@@ -80,12 +82,15 @@ readonly TEAM_RE='^[a-z0-9-]+\.cloudflareaccess\.com$'
 readonly AUD_RE='^[0-9a-f]{64}$'
 readonly PROJECT="platform-ingress"
 readonly NETWORK="platform"
-readonly SERVICES=(cloudflared traefik down-page)
+readonly BASE_SERVICES=(traefik down-page)
+readonly CONNECTORS=(cloudflared cloudflared-blue cloudflared-green)
+readonly DEFAULT_CONNECTOR="cloudflared-blue"
 readonly EDGE_NAME="region1.v2.argotunnel.com"
 readonly DOMAIN_RE='^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]([a-z0-9-]{0,61}[a-z0-9])?$'
 ROOT="${INSTALL_INGRESS_ROOT:-}"
 SOCKET="${INSTALL_INGRESS_SOCKET:-/var/run/docker.sock}"
 HEALTH_TIMEOUT="${INSTALL_INGRESS_HEALTH_TIMEOUT:-120}"
+CONNECTOR_HEALTH_TIMEOUT="${INSTALL_INGRESS_CONNECTOR_HEALTH_TIMEOUT:-240}"
 POLL="${INSTALL_INGRESS_POLL:-2}"
 
 if [ -n "${INSTALL_INGRESS_SUDO+set}" ]; then
@@ -818,10 +823,34 @@ retire_old_network() {
 # stack_ps: one "<name>|<service>|<state>|<health>" line per container of the project.
 stack_ps() { compose ps --all --format '{{.Name}}|{{.Service}}|{{.State}}|{{.Health}}'; }
 
-# stack_problems <ps text> [run]: one line per service that is absent, not running or (without "run") not healthy.
+# in_list <word> <list words...>: exact membership.
+in_list() {
+  local w="$1" x
+  shift
+  for x in "$@"; do [ "$x" = "$w" ] && return 0; done
+  return 1
+}
+
+# connector_idle <state>: fail closed. Idle is exactly exited or created (a missing container is idle by absence);
+# every other state, including empty or unknown, counts as present.
+connector_idle() { [ "$1" = "exited" ] || [ "$1" = "created" ]; }
+
+# present_connectors <ps text>: the service name of every connector container that is not idle, one per line.
+present_connectors() {
+  local ps="$1" name service state health
+  while IFS='|' read -r name service state health; do
+    [ -n "$service" ] || continue
+    in_list "$service" "${CONNECTORS[@]}" || continue
+    connector_idle "$state" || echo "$service"
+  done <<<"$ps"
+}
+
+# stack_problems <ps text> [run]: one line per problem. Base services (traefik, down-page) must exist, run and (without
+# "run") be healthy. At least one present connector must be running (and healthy without "run"); a present connector
+# in any other state or unhealthy is a problem; idle connectors are not; an unlisted service is a problem.
 stack_problems() {
-  local ps="$1" only_run="${2:-}" svc found name service state health
-  for svc in "${SERVICES[@]}"; do
+  local ps="$1" only_run="${2:-}" svc found name service state health ok=0
+  for svc in "${BASE_SERVICES[@]}"; do
     found=0
     while IFS='|' read -r name service state health; do
       [ "$service" = "$svc" ] || continue
@@ -834,6 +863,54 @@ stack_problems() {
     done <<<"$ps"
     [ "$found" -eq 1 ] || echo "service $svc has no container"
   done
+  while IFS='|' read -r name service state health; do
+    [ -n "$name" ] || continue
+    if in_list "$service" "${BASE_SERVICES[@]}"; then
+      continue
+    elif in_list "$service" "${CONNECTORS[@]}"; then
+      connector_idle "$state" && continue
+      if [ "$state" != "running" ]; then
+        echo "$name is $state"
+      elif [ -z "$only_run" ] && [ "$health" != "healthy" ]; then
+        echo "$name is ${health:-without a health status}"
+      else
+        ok=$((ok + 1))
+      fi
+    else
+      echo "unexpected service $service ($name)"
+    fi
+  done <<<"$ps"
+  [ "$ok" -ge 1 ] || echo "no running connector (want one of ${CONNECTORS[*]})"
+}
+
+# connector_notes <ps text>: the idle: and overlap: info lines (never failures).
+connector_notes() {
+  local ps="$1" name service state health idle="" running=""
+  while IFS='|' read -r name service state health; do
+    [ -n "$service" ] || continue
+    in_list "$service" "${CONNECTORS[@]}" || continue
+    if connector_idle "$state"; then idle="$idle $service"; elif [ "$state" = "running" ]; then running="$running $service"; fi
+  done <<<"$ps"
+  local c n=0 absent=""
+  for c in "${CONNECTORS[@]}"; do
+    # shellcheck disable=SC2086 # the lists are space-separated service names
+    in_list "$c" $idle $running || absent="$absent $c"
+  done
+  idle="$idle$absent"
+  [ -z "$idle" ] || info "idle:$idle"
+  for c in $running; do n=$((n + 1)); done
+  [ "$n" -lt 2 ] || info "overlap:$running (a pin bump is in progress)"
+}
+
+# running_connectors <ps text>: space-separated names of running connectors.
+running_connectors() {
+  local ps="$1" name service state health out=""
+  while IFS='|' read -r name service state health; do
+    [ -n "$service" ] || continue
+    in_list "$service" "${CONNECTORS[@]}" || continue
+    [ "$state" != "running" ] || out="$out $service"
+  done <<<"$ps"
+  echo "${out# }"
 }
 
 ensure_network() {
@@ -850,19 +927,23 @@ ensure_network() {
   fi
 }
 
+# wait_healthy [connector]: with "connector" (this run's up named a connector) the deadline is
+# CONNECTOR_HEALTH_TIMEOUT, else HEALTH_TIMEOUT; one deadline for the whole wait.
 wait_healthy() {
-  local deadline ps problems
-  deadline=$((SECONDS + HEALTH_TIMEOUT))
+  local deadline ps problems limit="$HEALTH_TIMEOUT" which="INSTALL_INGRESS_HEALTH_TIMEOUT"
+  if [ "${1:-}" = "connector" ]; then limit="$CONNECTOR_HEALTH_TIMEOUT"; which="INSTALL_INGRESS_CONNECTOR_HEALTH_TIMEOUT"; fi
+  deadline=$((SECONDS + limit))
   while :; do
     ps="$(stack_ps 2>/dev/null)" || ps=""
     problems="$(stack_problems "$ps")"
     if [ -z "$problems" ]; then
-      info "healthy: all ${#SERVICES[@]} containers"
+      info "healthy: ${BASE_SERVICES[*]} and connector $(running_connectors "$ps")"
+      connector_notes "$ps"
       return 0
     fi
     if [ "$SECONDS" -ge "$deadline" ]; then
       err "$problems"
-      die "the stack is not healthy after ${HEALTH_TIMEOUT}s (unhealthy: $(tr '\n' ';' <<<"$problems"))"
+      die "the stack is not healthy after ${limit}s ($which) (unhealthy: $(tr '\n' ';' <<<"$problems"))"
     fi
     sleep "$POLL"
   done
@@ -871,7 +952,7 @@ wait_healthy() {
 # ---- install ----
 
 do_install() {
-  local problems line ps dgid legacy
+  local problems line ps dgid legacy present wait_mode="" up_names=()
   require_privilege
   TMP="$(mktemp -d)"
 
@@ -898,18 +979,26 @@ do_install() {
   retire_gid_file
   ensure_network
 
-  ps="$(stack_ps 2>/dev/null)" || ps=""
+  # An unreadable ps would look like "no connector present" and start blue: fail closed. A fresh project is rc 0, empty.
+  ps="$(stack_ps)" || die "cannot read the state of the compose project $PROJECT (docker compose ps failed); nothing was started"
+  present="$(present_connectors "$ps")"
   legacy="$(legacy_containers)" || die "cannot list docker containers to look for a retired socket-proxy container"
   if [ "$CHANGED" -eq 1 ] || [ -n "$legacy" ] || [ -n "$(stack_problems "$ps" run)" ]; then
-    compose up -d --remove-orphans || die "docker compose up failed"
-    info "changed: stack started"
+    if [ -z "$present" ]; then
+      up_names=(traefik down-page "$DEFAULT_CONNECTOR")
+      wait_mode=connector
+    else
+      up_names=(traefik down-page)
+    fi
+    compose up -d --remove-orphans "${up_names[@]}" || die "docker compose up failed"
+    info "changed: stack started (up: ${up_names[*]})"
   else
     info "already: stack running"
   fi
   legacy="$(legacy_containers)" || die "cannot list docker containers to look for a retired socket-proxy container"
   [ -z "$legacy" ] || die "a socket-proxy container still exists after compose up --remove-orphans: remove it by hand (docker rm -f $legacy)"
   retire_old_network
-  wait_healthy
+  wait_healthy "$wait_mode"
   info "install-ingress: done"
 }
 
@@ -996,8 +1085,8 @@ container_checks() {
         elif grep -q '^TRAEFIK_PROVIDERS_DOCKER' <<<"$envcmd"; then fail "$name has a TRAEFIK_PROVIDERS_DOCKER_* variable"
         else pass "$name has no Docker provider variable"; fi
         ;;
-      cloudflared)
-        # The token is compared inside this shell only: never printed, never passed in an argv.
+      cloudflared | cloudflared-blue | cloudflared-green)
+        # Runs for stopped containers too (inspect works on them). The token is compared inside this shell only: never printed, never passed in an argv.
         tok="$(priv cat -- "$ROOT$TOKEN_FILE" 2>/dev/null || true)"
         tok="${tok//[$' \t\r\n']/}"
         envcmd="$(dk inspect --format '{{json .Config.Env}} {{json .Config.Cmd}}' "$name" 2>/dev/null || true)"
@@ -1053,7 +1142,8 @@ do_checks() {
   if ps="$(stack_ps 2>/dev/null)"; then
     problems="$(stack_problems "$ps")"
     if [ -z "$problems" ]; then
-      pass "the ${#SERVICES[@]} containers are running and healthy"
+      pass "${BASE_SERVICES[*]} and connector $(running_connectors "$ps") are running and healthy"
+      connector_notes "$ps"
     else
       while IFS= read -r line; do fail "$line"; done <<<"$problems"
     fi
@@ -1452,6 +1542,7 @@ main() {
   if [ "$live" -eq 1 ] && [ "$cmd" != "verify" ]; then die "--live is only valid with verify" 2; fi
   if [ "$HOLD" -eq 1 ] && [ "$live" -ne 1 ]; then die "--hold is only valid with verify --live" 2; fi
   [[ "$HEALTH_TIMEOUT" =~ ^[0-9]+$ ]] || die "INSTALL_INGRESS_HEALTH_TIMEOUT must be a whole number of seconds" 2
+  [[ "$CONNECTOR_HEALTH_TIMEOUT" =~ ^[0-9]+$ ]] || die "INSTALL_INGRESS_CONNECTOR_HEALTH_TIMEOUT must be a whole number of seconds" 2
 
   if [ "$live" -eq 1 ]; then
     HOST="$host"

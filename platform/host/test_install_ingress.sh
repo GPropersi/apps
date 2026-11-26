@@ -155,7 +155,24 @@ case "$sub" in
           [ ! -f "$S/up_fail" ] || exit 1
           # --remove-orphans removes a leftover socket-proxy container (unless the test says it stays)
           case "$*" in *--remove-orphans*) [ -f "$S/orphan_stays" ] || rm -f "$S/legacy_container" ;; esac
-          touch "$S/stack_up"; exit 0 ;;
+          touch "$S/stack_up"
+          # a named connector in the up argv becomes running|healthy in the ps fixture (the only thing that changes ps
+          # state on up); the no_up_flip switch disables it
+          if [ ! -f "$S/no_up_flip" ]; then
+            after=0
+            for w in "$@"; do
+              if [ "$after" = 1 ]; then
+                case "$w" in
+                  cloudflared*)
+                    grep -v "|$w|" "$S/ps" > "$S/ps.new" || true
+                    echo "platform-ingress-$w-1|$w|running|healthy" >> "$S/ps.new"
+                    mv "$S/ps.new" "$S/ps" ;;
+                esac
+              fi
+              [ "$w" != up ] || after=1
+            done
+          fi
+          exit 0 ;;
         ps) [ ! -f "$S/ps_fail" ] || exit 1; [ -f "$S/stack_up" ] || exit 0; cat "$S/ps"; exit 0 ;;
       esac
     done
@@ -318,8 +335,10 @@ EOF
 
 TOKEN='FIXTURE-TUNNEL-TOKEN-NOT-A-REAL-SECRET-0123456789'
 WEBHOOK='FIXTURE-WEBHOOK-NOT-A-REAL-URL-0123456789'
-NAMES=(platform-ingress-cloudflared-1 platform-ingress-traefik-1 platform-ingress-down-page-1)
-CF=platform-ingress-cloudflared-1
+NAMES=(platform-ingress-cloudflared-1 platform-ingress-cloudflared-blue-1 platform-ingress-cloudflared-green-1 platform-ingress-traefik-1 platform-ingress-down-page-1)
+CF=platform-ingress-cloudflared-blue-1
+LG=platform-ingress-cloudflared-1
+GR=platform-ingress-cloudflared-green-1
 TR=platform-ingress-traefik-1
 DP=platform-ingress-down-page-1
 PROBE_IP="$(t_ip4 203 0 113 7)"
@@ -341,25 +360,70 @@ fresh() {
   : >"$T_TMP/dsock"
   echo 998 > "$STATE/docker_gid"
   printf '%s\n' 'root:x:0:0:root:/root:/bin/bash' 'admin:x:1000:1000::/home/admin:/bin/bash' 'claude:x:1002:1002::/home/claude:/usr/local/bin/claude-access' > "$STATE/passwd"
-  printf '%s|cloudflared|running|healthy\n%s|traefik|running|healthy\n%s|down-page|running|healthy\n' "$CF" "$TR" "$DP" > "$STATE/ps"
+  printf '%s|cloudflared-blue|running|healthy\n%s|traefik|running|healthy\n%s|down-page|running|healthy\n' "$CF" "$TR" "$DP" > "$STATE/ps"
   local n
   for n in "${NAMES[@]}"; do
     printf 'com.docker.compose.project\ncom.docker.compose.service\n' > "$STATE/labels_$n"
     printf '/opt/platform/ingress/dynamic\n' > "$STATE/mounts_$n"
     printf 'platform\n' > "$STATE/networks_$n"
   done
-  printf '["TUNNEL_TOKEN_FILE=/run/cloudflared/token"] ["tunnel","--no-autoupdate","run"]\n' > "$STATE/envcmd_$CF"
+  for n in "$LG" "$CF" "$GR"; do
+    printf '["TUNNEL_TOKEN_FILE=/run/cloudflared/token"] ["tunnel","--no-autoupdate","run"]\n' > "$STATE/envcmd_$n"
+  done
   export INSTALL_INGRESS_ROOT="$R"
   export INSTALL_INGRESS_SUDO=fakesudo
   export INSTALL_INGRESS_AS_DEPLOY=fakeasdeploy
   export INSTALL_INGRESS_SOCKET="$T_TMP/dsock"
   export INSTALL_INGRESS_HEALTH_TIMEOUT=2
+  export INSTALL_INGRESS_CONNECTOR_HEALTH_TIMEOUT=2
   export INSTALL_INGRESS_POLL=0.1
   export INSTALL_INGRESS_LIVE_SLEEP=0
   unset INSTALL_INGRESS_LIVE_LOCAL INSTALL_INGRESS_HOLD_TTY INSTALL_INGRESS_HOLD_TIMEOUT
 }
 
 ins() { run_cmd "$script" "$@"; }
+
+# up_words: the service words of every logged `compose up -d --remove-orphans` call, one call per line.
+up_words() { sed -n 's/^docker .* up -d --remove-orphans\(.*\)$/\1/p' "$CALL_LOG" | sed 's/^ *//'; }
+
+# expect_up_names <label> <name>...: exactly one up call, whose service words (whole words, so cloudflared never matches
+# inside cloudflared-blue) are exactly <name>... in order. A bare up (no service words) fails.
+expect_up_names() {
+  local label="$1" want got n
+  shift
+  want="$*"
+  got="$(up_words)"
+  n="$(grep -c . <<<"$got" || true)"
+  if [ "$n" != "1" ]; then _fail "$label" "want one up call, got $n"
+  elif [ -z "$got" ]; then _fail "$label" "bare up: no service names"
+  elif [ "$got" = "$want" ]; then _pass
+  else _fail "$label" "up named '$got', want '$want'"; fi
+}
+
+# expect_up_not <label> <name>: some up call exists and none names <name> as a whole word (and none is bare).
+expect_up_not() {
+  local label="$1" got line w
+  got="$(up_words)"
+  [ -n "$got" ] || { _fail "$label" "no up call with service names"; return 0; }
+  while IFS= read -r line; do
+    for w in $line; do
+      [ "$w" != "$2" ] || { _fail "$label" "up names $2: $line"; return 0; }
+    done
+  done <<<"$got"
+  _pass
+}
+
+# expect_no_up <label>: no compose up call at all.
+expect_no_up() {
+  if grep -qE ' up -d' "$CALL_LOG"; then _fail "$1" "an up call ran: $(grep -E ' up -d' "$CALL_LOG" | head -n1)"; else _pass; fi
+}
+
+# expect_no_forbidden_compose: no restart, --force-recreate or down (whole-word, so down-page does not match).
+expect_no_forbidden_compose() {
+  expect_calls_lacks "no compose restart" " restart"
+  expect_calls_lacks "no --force-recreate" "--force-recreate"
+  if grep -qE ' down( |$)' "$CALL_LOG"; then _fail "no compose down" "a down call ran"; else _pass; fi
+}
 
 no_docker_calls() { # label: no docker command ran, with or without privilege
   if grep -qE '^(fakesudo )?docker ' "$CALL_LOG"; then _fail "$1" "a docker command ran: $(grep -E '^(fakesudo )?docker ' "$CALL_LOG" | head -n1)"; else _pass; fi
@@ -546,7 +610,10 @@ expect_eq "no docker-gid.env is written" "$([ -e "$R$INST/docker-gid.env" ] && e
 expect_eq "compose.yaml mode" "$(stat -c %a "$R$INST/compose.yaml")" "644"
 expect_calls_has "files are chowned to root" "chown root:root $R$INST/compose.yaml.new"
 expect_calls_has "exact network create argv (bridge, IPv6 off)" "docker network create --driver bridge --ipv6=false platform"
-expect_calls_has "exact compose up argv" "docker compose -p platform-ingress -f $R$INST/compose.yaml --env-file $R/etc/platform/ingress.env up -d --remove-orphans"
+expect_calls_has "exact compose up argv (named services)" "docker compose -p platform-ingress -f $R$INST/compose.yaml --env-file $R/etc/platform/ingress.env up -d --remove-orphans traefik down-page cloudflared-blue"
+expect_out_has "install logs which services up named" "changed: stack started (up: traefik down-page cloudflared-blue)"
+expect_up_names "a clean host starts traefik, down-page and blue only" traefik down-page cloudflared-blue
+expect_no_forbidden_compose
 expect_calls_has "container health is polled through compose ps" "ps --all --format"
 for bad in iptables ip6tables nft ufw docker-user.rules firewall; do
   expect_calls_lacks "install never touches the firewall ($bad)" "$bad"
@@ -593,6 +660,8 @@ touch "$R/var/lib/cloudflared-supervisor-blue/keep"
 t_reset_calls
 ins install
 expect_rc "install repairs drifted state dirs" 0
+expect_out_has "a repair on a host with a running connector logs the connector-free up" "changed: stack started (up: traefik down-page)"
+expect_up_names "a repair on a host with a running connector names no connector" traefik down-page
 expect_out_has "the drifted blue state dir is repaired" "changed: $R/var/lib/cloudflared-supervisor-blue/"
 expect_out_has "the wrongly owned green state dir is repaired" "changed: $R/var/lib/cloudflared-supervisor-green/"
 expect_eq "the repaired blue state dir is mode 755" "$(stat -c %a "$R/var/lib/cloudflared-supervisor-blue")" "755"
@@ -624,6 +693,7 @@ expect_eq "the retired gid file is gone" "$([ -e "$R$INST/docker-gid.env" ] && e
 expect_eq "the retired network is gone" "$([ -e "$STATE/legacy_network" ] && echo present || echo absent)" "absent"
 expect_eq "the socket-proxy container is gone" "$([ -e "$STATE/legacy_container" ] && echo present || echo absent)" "absent"
 expect_calls_has "the upgrade brings the stack up with --remove-orphans" " up -d --remove-orphans"
+expect_up_names "the upgrade names no connector (one is running)" traefik down-page
 expect_calls_has "the retired network is removed with docker network rm" "docker network rm platform-ingress_ingress-proxy"
 t_reset_calls
 ins install
@@ -650,6 +720,7 @@ rm "$STATE/stack_up"
 t_reset_calls
 ins install
 expect_calls_has "a stopped stack is started again" " up -d"
+expect_up_names "a stopped stack (no connector present) starts blue only" traefik down-page cloudflared-blue
 
 # network exists but wrong
 wrong_net() {
@@ -683,7 +754,7 @@ expect_out_has "compose up failure is named" "docker compose up failed"
 
 # bounded health wait
 fresh
-printf '%s|cloudflared|running|healthy\n%s|traefik|running|unhealthy\n%s|down-page|running|healthy\n' "$CF" "$TR" "$DP" > "$STATE/ps"
+printf '%s|cloudflared-blue|running|healthy\n%s|traefik|running|unhealthy\n%s|down-page|running|healthy\n' "$CF" "$TR" "$DP" > "$STATE/ps"
 start=$SECONDS
 INSTALL_INGRESS_HEALTH_TIMEOUT=1 ins install
 elapsed=$((SECONDS - start))
@@ -692,7 +763,7 @@ expect_out_has "unhealthy container is named" "$TR is unhealthy"
 expect_out_lacks "healthy containers are not named" "$CF is"
 if [ "$elapsed" -le 8 ]; then _pass; else _fail "the health wait is bounded" "took ${elapsed}s with a 1s timeout"; fi
 fresh
-printf '%s|cloudflared|running|healthy\n%s|traefik|running|starting\n' "$CF" "$TR" > "$STATE/ps"
+printf '%s|cloudflared-blue|running|healthy\n%s|traefik|running|starting\n' "$CF" "$TR" > "$STATE/ps"
 INSTALL_INGRESS_HEALTH_TIMEOUT=1 ins install
 expect_rc "a missing container is not healthy" 1
 expect_out_has "a missing container is named" "service down-page has no container"
@@ -701,17 +772,24 @@ expect_out_has "a starting container is named" "$TR is starting"
 # ---- token gid constant equals the compose group_add ----
 
 gid_mismatch() { # script path: prints MISMATCH lines when the two numbers differ
-  local file="$1" const compose_gid
+  local file="$1" const gids g count=0
   const="$(sed -n 's/^readonly TOKEN_GID=\([0-9][0-9]*\)$/\1/p' "$file")"
-  compose_gid="$(awk '/^payload_compose_yaml\(\)/ { on = 1 } on && /^  cloudflared:/ { cf = 1 } on && cf && /group_add:/ { ga = 1; next } on && cf && ga && /^ *- "[0-9]+"$/ { gsub(/[^0-9]/, ""); print; exit }' "$file")"
-  if [ -z "$const" ] || [ -z "$compose_gid" ]; then echo "MISMATCH: cannot read the gid constant ($const) or the compose group_add ($compose_gid)"; return 0; fi
-  [ "$const" = "$compose_gid" ] || echo "MISMATCH: TOKEN_GID=$const but compose group_add=$compose_gid"
+  # one gid per connector service (cloudflared, -blue, -green): a mismatch in any one fails
+  gids="$(awk '/^payload_compose_yaml\(\)/ { on = 1 } on && /^  [a-z-]+:$/ { cf = ($0 ~ /^  cloudflared(-blue|-green)?:$/); ga = 0 } on && cf && /group_add:/ { ga = 1; next } on && cf && ga && /^ *- "[0-9]+"$/ { gsub(/[^0-9]/, ""); print; ga = 0 }' "$file")"
+  for g in $gids; do
+    count=$((count + 1))
+    [ "$const" = "$g" ] || echo "MISMATCH: TOKEN_GID=$const but compose group_add=$g"
+  done
+  if [ -z "$const" ] || [ "$count" -ne 3 ]; then echo "MISMATCH: cannot read the gid constant ($const) or all three connector group_add gids ($count read)"; fi
 }
 expect_eq "the token gid constant equals the compose group_add gid" "$(gid_mismatch "$script")" ""
 sed 's/^readonly TOKEN_GID=64321$/readonly TOKEN_GID=64322/' "$script" > "$T_TMP/mut-const.sh"
 expect_out_has_text "$(gid_mismatch "$T_TMP/mut-const.sh")" "MISMATCH: TOKEN_GID=64322 but compose group_add=64321" "mutation: changing the constant fails the gid check"
 sed 's/^      - "64321"$/      - "64399"/' "$script" > "$T_TMP/mut-compose.sh"
 expect_out_has_text "$(gid_mismatch "$T_TMP/mut-compose.sh")" "MISMATCH: TOKEN_GID=64321 but compose group_add=64399" "mutation: changing the embedded compose group_add fails the gid check"
+sed '/^  cloudflared-green:$/,/^      - "64321"$/ s/^      - "64321"$/      - "64399"/' "$script" > "$T_TMP/mut-green.sh"
+expect_out_has_text "$(gid_mismatch "$T_TMP/mut-green.sh")" "MISMATCH: TOKEN_GID=64321 but compose group_add=64399" "mutation: a group_add mismatch in cloudflared-green alone fails the gid check"
+expect_eq "mutation: the green-only mutation leaves exactly one mismatch" "$(gid_mismatch "$T_TMP/mut-green.sh" | grep -c MISMATCH)" "1"
 expect_eq "the tracked compose.yaml also carries the same group_add gid" "$(grep -c '^      - "64321"$' "$REPO_COMPOSE")" "3"
 
 # ---- status / verify ----
@@ -748,8 +826,8 @@ v_legacy_container() { touch "$STATE/legacy_container"; }
 v_legacy_network() { touch "$STATE/legacy_network"; }
 v_legacy_gid_file() { echo "DOCKER_GID=998" > "$R$INST/docker-gid.env"; }
 v_label() { printf 'platform.app\n' > "$STATE/labels_$DP"; }
-v_unhealthy() { printf '%s|cloudflared|running|healthy\n%s|traefik|running|unhealthy\n%s|down-page|running|healthy\n' "$CF" "$TR" "$DP" > "$STATE/ps"; }
-v_exited() { printf '%s|cloudflared|exited|\n%s|traefik|running|healthy\n%s|down-page|running|healthy\n' "$CF" "$TR" "$DP" > "$STATE/ps"; }
+v_unhealthy() { printf '%s|cloudflared-blue|running|healthy\n%s|traefik|running|unhealthy\n%s|down-page|running|healthy\n' "$CF" "$TR" "$DP" > "$STATE/ps"; }
+v_exited() { printf '%s|cloudflared-blue|exited|\n%s|traefik|running|healthy\n%s|down-page|running|healthy\n' "$CF" "$TR" "$DP" > "$STATE/ps"; }
 v_no_net() { rm "$STATE/network_exists"; }
 v_net_v6() { echo "bridge true" > "$STATE/network_desc"; }
 v_token_env() { printf '["TUNNEL_TOKEN=%s"] ["tunnel"]\n' "$TOKEN" > "$STATE/envcmd_$CF"; }
@@ -781,7 +859,7 @@ vcase "the retired ingress-proxy network still exists" v_legacy_network "no reti
 vcase "the retired docker-gid.env still exists" v_legacy_gid_file "no retired socket-proxy pieces: retired file still present"
 vcase "an ingress container carries platform.app" v_label "FAIL: $DP carries the platform.app label"
 vcase "an unhealthy container" v_unhealthy "FAIL: $TR is unhealthy"
-vcase "an exited container" v_exited "FAIL: $CF is exited"
+vcase "the only connector is exited" v_exited "FAIL: no running connector"
 vcase "the platform network is missing" v_no_net "network platform is missing"
 vcase "the platform network has IPv6 on" v_net_v6 "network platform is 'bridge true'"
 vcase "the token appears in Env" v_token_env "the tunnel token appears in the Env or Cmd of $CF"
@@ -794,6 +872,157 @@ vcase "dynamic.yml has the wrong mode" v_mode "dynamic.yml uid:gid/mode is '0:0 
 vcase "a payload file is missing" v_missing_file "down-page index.html missing"
 vcase "the compose project cannot be read" v_ps_fail "cannot read the state of the compose project"
 vcase "the token file mode drifted" v_token_perm "token file: token file uid:gid/mode is '0:64321 600'"
+
+# ---- the connector model: active, idle, legacy, overlap ----
+
+# mkps <svc|state|health>...: the ps fixture is the two healthy base services plus these connector rows, and the stack
+# counts as already created (the stub's ps returns nothing until stack_up exists).
+mkps() {
+  printf '%s|traefik|running|healthy\n%s|down-page|running|healthy\n' "$TR" "$DP" > "$STATE/ps"
+  local e
+  for e in "$@"; do echo "platform-ingress-${e%%|*}-1|$e" >> "$STATE/ps"; done
+  touch "$STATE/stack_up"
+}
+v_blue_unhealthy() { mkps "cloudflared-blue|running|unhealthy"; }
+v_unknown_service() { mkps "cloudflared-blue|running|healthy" "cloudflared-purple|running|healthy"; }
+v_token_green() { mkps "cloudflared-blue|running|healthy" "cloudflared-green|exited|"; printf '["TUNNEL_TOKEN=%s"] ["tunnel"]\n' "$TOKEN" > "$STATE/envcmd_$GR"; }
+v_token_exited_blue() { mkps "cloudflared|running|healthy" "cloudflared-blue|exited|"; printf '["TUNNEL_TOKEN=%s"] ["tunnel"]\n' "$TOKEN" > "$STATE/envcmd_$CF"; }
+v_overlap_status() { mkps "cloudflared-blue|running|healthy" "cloudflared-green|running|healthy"; }
+vcase "(f) blue is running but unhealthy" v_blue_unhealthy "FAIL: $CF is unhealthy"
+vcase "(f) an unhealthy only connector leaves no healthy one" v_blue_unhealthy "FAIL: no running connector"
+vcase "(h) an unknown cloudflared-purple row" v_unknown_service "FAIL: unexpected service cloudflared-purple"
+vcase "(i) the token in the Env of green" v_token_green "the tunnel token appears in the Env or Cmd of $GR"
+vcase "(o) an exited blue with the token in its Env" v_token_exited_blue "the tunnel token appears in the Env or Cmd of $CF"
+installed
+v_overlap_status
+ins status
+expect_rc "(d) status with two running connectors" 0
+expect_out_has "(d) the overlap line" "overlap: cloudflared-blue cloudflared-green"
+expect_out_lacks "(d) overlap is not a failure" "FAIL"
+
+# conn_install <label> <ps rows...>: a fresh host whose ps fixture holds these connector rows, then install.
+conn_install() {
+  fresh
+  mkps "${@:2}"
+  ins install
+}
+
+# (a) fresh host, no connector container: up names blue only
+fresh
+printf '%s|traefik|running|healthy\n%s|down-page|running|healthy\n' "$TR" "$DP" > "$STATE/ps"
+ins install
+expect_rc "(a) fresh host starts and passes" 0
+expect_up_names "(a) up names traefik, down-page and blue" traefik down-page cloudflared-blue
+expect_up_not "(a) up does not name the legacy cloudflared" cloudflared
+expect_up_not "(a) up does not name green" cloudflared-green
+expect_out_has "(a) the up service list is logged" "changed: stack started (up: traefik down-page cloudflared-blue)"
+expect_no_forbidden_compose
+
+# (b) legacy cloudflared running (the Pi today): no connector started, blue and green idle
+conn_install "(b)" "cloudflared|running|healthy"
+expect_rc "(b) legacy running: install passes" 0
+expect_up_names "(b) up names no connector" traefik down-page
+expect_out_has "(b) the connector-free up is logged" "changed: stack started (up: traefik down-page)"
+expect_out_has "(b) the healthy line names the legacy connector" "connector cloudflared"
+expect_out_has "(b) blue and green are idle" "idle: cloudflared-blue cloudflared-green"
+expect_no_forbidden_compose
+ins status
+expect_rc "(b) status" 0
+expect_out_lacks "(b) status has no FAIL" "FAIL"
+
+# (c) blue running, legacy and green exited
+conn_install "(c)" "cloudflared|exited|" "cloudflared-blue|running|healthy" "cloudflared-green|exited|"
+expect_rc "(c) blue running: install passes" 0
+expect_up_names "(c) up names no connector" traefik down-page
+expect_out_has "(c) the idle connectors are reported" "idle: cloudflared cloudflared-green"
+ins status
+expect_out_lacks "(c) status has no FAIL" "FAIL"
+
+# (d) blue and green both running and healthy
+conn_install "(d)" "cloudflared-blue|running|healthy" "cloudflared-green|running|healthy"
+expect_rc "(d) overlap: install passes" 0
+expect_out_has "(d) the overlap line" "overlap: cloudflared-blue cloudflared-green"
+expect_up_names "(d) up names no connector" traefik down-page
+
+# (e) no connector running after install: a named problem, and the connector deadline is the one reported
+fresh
+touch "$STATE/no_up_flip"
+printf '%s|traefik|running|healthy\n%s|down-page|running|healthy\n' "$TR" "$DP" > "$STATE/ps"
+INSTALL_INGRESS_HEALTH_TIMEOUT=1 INSTALL_INGRESS_CONNECTOR_HEALTH_TIMEOUT=3 ins install
+expect_rc "(e) no connector appears: install fails" 1
+expect_up_names "(e) blue was started" traefik down-page cloudflared-blue
+expect_out_has "(e) the problem is named" "no running connector"
+expect_out_has "(e) the timeout message carries the connector knob's number" "after 3s (INSTALL_INGRESS_CONNECTOR_HEALTH_TIMEOUT)"
+ins status
+expect_rc "(e) status stays rc 0" 0
+expect_out_has "(e) status FAILs" "FAIL: no running connector"
+ins verify
+expect_rc "(e) verify fails" 1
+
+# base deadline: no connector started (one present), a base service never healthy
+fresh
+mkps "cloudflared-blue|running|healthy"
+printf '%s|traefik|running|unhealthy\n' "$TR" >> "$STATE/ps"
+grep -v '|traefik|running|healthy' "$STATE/ps" > "$STATE/ps.new"
+mv "$STATE/ps.new" "$STATE/ps"
+INSTALL_INGRESS_HEALTH_TIMEOUT=1 INSTALL_INGRESS_CONNECTOR_HEALTH_TIMEOUT=3 ins install
+expect_rc "(base deadline) a base service never healthy: install fails" 1
+expect_up_names "(base deadline) no connector was started" traefik down-page
+expect_out_has "(base deadline) the timeout message carries the base knob's number" "after 1s (INSTALL_INGRESS_HEALTH_TIMEOUT)"
+INSTALL_INGRESS_CONNECTOR_HEALTH_TIMEOUT=abc ins install
+expect_rc "a non-numeric connector health timeout is a usage error" 2
+expect_out_has "the connector timeout message names the variable" "INSTALL_INGRESS_CONNECTOR_HEALTH_TIMEOUT must be a whole number"
+
+# (g) green restarting: FAIL, blue is not started
+fresh
+mkps "cloudflared-green|restarting|"
+INSTALL_INGRESS_HEALTH_TIMEOUT=1 INSTALL_INGRESS_CONNECTOR_HEALTH_TIMEOUT=1 ins install
+expect_rc "(g) a restarting green fails the install" 1
+expect_out_has "(g) green is named" "$GR is restarting"
+expect_up_names "(g) install does not start blue" traefik down-page
+
+# (n) a connector in each odd state is present and fails; install never starts blue
+for st in paused dead removing weird-state; do
+  fresh
+  mkps "cloudflared-green|$st|"
+  INSTALL_INGRESS_HEALTH_TIMEOUT=1 INSTALL_INGRESS_CONNECTOR_HEALTH_TIMEOUT=1 ins install
+  expect_rc "(n) state $st fails the install" 1
+  expect_out_has "(n) state $st is named" "$GR is $st"
+  expect_up_not "(n) state $st: install does not start blue" cloudflared-blue
+  expect_up_not "(n) state $st: install does not start green" cloudflared-green
+done
+
+# (j) legacy and blue both running (the first-cutover state)
+conn_install "(j)" "cloudflared|running|healthy" "cloudflared-blue|running|healthy"
+expect_rc "(j) install passes" 0
+expect_out_has "(j) the overlap line" "overlap: cloudflared cloudflared-blue"
+expect_up_names "(j) up names no connector" traefik down-page
+ins status
+expect_out_lacks "(j) status has no FAIL" "FAIL"
+
+# (k) compose ps itself fails: die before any up. A fresh project (rc 0, empty output) is (a).
+fresh
+touch "$STATE/ps_fail"
+ins install
+expect_rc "(k) an unreadable ps stops the install" 1
+expect_out_has "(k) the ps failure is named" "docker compose ps failed"
+expect_no_up "(k) nothing is started"
+
+# (l) repeat install on an unchanged host with a running healthy connector: no up at all
+installed
+ins install
+expect_rc "(l) repeat install" 0
+expect_no_up "(l) no up on an unchanged host with a running connector"
+expect_out_lacks "(l) no stack started line" "stack started"
+expect_out_has "(l) already running" "already: stack running"
+
+# (m) unchanged host, every connector exited: up runs and names blue only
+installed
+mkps "cloudflared|exited|" "cloudflared-blue|exited|" "cloudflared-green|exited|"
+ins install
+expect_rc "(m) install" 0
+expect_up_names "(m) up names blue only" traefik down-page cloudflared-blue
+expect_out_has "(m) the up service list is logged" "changed: stack started (up: traefik down-page cloudflared-blue)"
 
 # the dynamic directory is root:deploy 1775, and the deploy user's rights on it are probed as the deploy user
 v_dyn_mode() { chmod 755 "$R$INST/dynamic"; }
