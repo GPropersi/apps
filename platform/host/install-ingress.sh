@@ -55,9 +55,11 @@
 # privilege prefix; "sudo -n" by default, none when already root), INSTALL_INGRESS_SOCKET (the Docker socket path),
 # INSTALL_INGRESS_HEALTH_TIMEOUT (seconds, default 120: the health wait when this run started no connector),
 # INSTALL_INGRESS_CONNECTOR_HEALTH_TIMEOUT (seconds, default 240: the wait when this run's `up` started a connector,
-# because a fresh supervisor has a 120 s healthcheck start_period), INSTALL_INGRESS_POLL (seconds), INSTALL_INGRESS_LIVE_LOCAL (run the live docker
-# commands locally instead of over ssh), INSTALL_INGRESS_LIVE_SLEEP, INSTALL_INGRESS_HOLD_TTY,
-# INSTALL_INGRESS_HOLD_TIMEOUT, INSTALL_INGRESS_AS_DEPLOY (the prefix that runs a command as the deploy user). The docker, stat and getent commands are the ones on PATH, so a test puts stubs there.
+# because a fresh supervisor has a 120 s healthcheck start_period), INSTALL_INGRESS_POLL (seconds),
+# INSTALL_INGRESS_LIVE_LOCAL (run the live docker commands locally instead of over ssh),
+# INSTALL_INGRESS_LIVE_SLEEP, INSTALL_INGRESS_HOLD_TTY, INSTALL_INGRESS_HOLD_TIMEOUT, INSTALL_INGRESS_AS_DEPLOY (the
+# prefix that runs a command as the deploy user). The docker, stat and getent commands are the ones on PATH, so a test
+# puts stubs there.
 set -euo pipefail
 
 export LC_ALL=C
@@ -952,7 +954,7 @@ wait_healthy() {
 # ---- install ----
 
 do_install() {
-  local problems line ps dgid legacy present wait_mode="" up_names=()
+  local problems line ps dgid legacy present sd wait_mode="" up_names=()
   require_privilege
   TMP="$(mktemp -d)"
 
@@ -974,7 +976,6 @@ do_install() {
   place_file "$TMP/compose.yaml" "$ROOT$INSTALL_DIR/compose.yaml" 644
   place_file "$TMP/dynamic.yml" "$ROOT$INSTALL_DIR/dynamic/dynamic.yml" 644
   place_file "$TMP/index.html" "$ROOT$INSTALL_DIR/down-page/index.html" 644
-  local sd
   for sd in "${STATE_DIRS[@]}"; do place_state_dir "$ROOT$sd"; done
   retire_gid_file
   ensure_network
