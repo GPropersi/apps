@@ -109,8 +109,8 @@ case_sel "platform/backup row" "platform/backup/b.txt" platform/backup/test_back
 case_sel "platform/ingress row" "platform/ingress/i.txt" platform/ingress/test_ingress.sh platform/host/test_host.sh \
   platform/lint/test_lint.sh platform/test/test_t.sh "${APPS[@]}"
 case_sel "platform/host row" "platform/host/h.txt" platform/host/test_host.sh platform/data/test_data.sh \
-  platform/backup/test_backup.sh platform/jobs/test_jobs.sh platform/lint/test_lint.sh "${APPS[@]}"
-case_sel "platform/lint row: lint and scaffold" "platform/lint/l.txt" platform/lint/test_lint.sh platform/scaffold/test_scaffold.sh
+  platform/backup/test_backup.sh platform/jobs/test_jobs.sh platform/lint/test_lint.sh platform/ci/test_ci.sh "${APPS[@]}"
+case_sel "platform/lint row: lint, ci and scaffold" "platform/lint/l.txt" platform/lint/test_lint.sh platform/ci/test_ci.sh platform/scaffold/test_scaffold.sh
 case_sel "templates row: scaffold, the template tests, lint and registry (the shared notifs fixture test), not the full suite" "templates/go-react/main.txt" platform/scaffold/test_scaffold.sh platform/lint/test_lint.sh platform/registry/test_registry.sh
 expect_eq "a templates-only change selects the template test explicitly" "$sel" "$(want platform/lint/test_lint.sh platform/registry/test_registry.sh platform/scaffold/test_scaffold.sh "$TPL")"
 case " $sel " in *" platform/host/test_host.sh "* | *" apps/foo/test_a.sh "*) _fail "a templates-only change does not select the whole suite" "got: $sel" ;; *) _pass ;; esac
@@ -120,7 +120,7 @@ case_sel "the catch-all selects all for an unknown path" "weird/file.txt" "${ALL
 # Apps.
 case_sel "an app-only change selects only that app" "apps/foo/main.txt" apps/foo/test_a.sh
 case_sel "apps/foo-bar never selects apps/foo" "apps/foo-bar/main.txt" apps/foo-bar/test_b.sh
-case_sel "an app plus a platform change" "apps/foo/main.txt platform/lint/l.txt" apps/foo/test_a.sh platform/lint/test_lint.sh platform/scaffold/test_scaffold.sh
+case_sel "an app plus a platform change" "apps/foo/main.txt platform/lint/l.txt" apps/foo/test_a.sh platform/lint/test_lint.sh platform/ci/test_ci.sh platform/scaffold/test_scaffold.sh
 case_sel "an app README selects nothing" "apps/foo/README.md"
 case_sel "a new app without tests selects nothing" "apps/newapp/main.txt"
 
@@ -138,10 +138,10 @@ mkdir -p "$S/docs"
 g mv platform/lint/m.txt docs/m.txt
 g commit -q -m "rename m"
 run_select work
-expect_eq "a rename out of an area selects the old area" "$sel" "$(want platform/lint/test_lint.sh platform/scaffold/test_scaffold.sh)"
+expect_eq "a rename out of an area selects the old area" "$sel" "$(want platform/lint/test_lint.sh platform/ci/test_ci.sh platform/scaffold/test_scaffold.sh)"
 expect_eq "a rename: exit 0 and no warning" "$srcrc:$err" "0:"
 
-# A rename between two test-bearing areas selects both: lint (lint only) to ingress (ingress, host, lint, apps).
+# A rename between two test-bearing areas selects both: lint (lint, ci, scaffold, templates) to ingress (ingress, host, lint, apps).
 g checkout -q -B work main
 printf 'second moved content that is long enough for rename detection to pair\n' > "$S/platform/lint/m2.txt"
 g add -A
@@ -150,7 +150,7 @@ g checkout -q -B base3 work
 g mv platform/lint/m2.txt platform/ingress/m2.txt
 g commit -q -m "rename m2"
 run_select work
-expect_eq "a rename between areas selects both areas" "$sel" "$(want platform/lint/test_lint.sh platform/scaffold/test_scaffold.sh platform/ingress/test_ingress.sh platform/host/test_host.sh platform/test/test_t.sh "${APPS[@]}")"
+expect_eq "a rename between areas selects both areas" "$sel" "$(want platform/lint/test_lint.sh platform/ci/test_ci.sh platform/scaffold/test_scaffold.sh platform/ingress/test_ingress.sh platform/host/test_host.sh platform/test/test_t.sh "${APPS[@]}")"
 
 # Fail toward more tests: a bad ref, an unreadable map, a malformed row, an unknown area, a path no row matches.
 branch_with README.md
