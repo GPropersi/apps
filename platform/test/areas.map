@@ -14,7 +14,7 @@
 #   platform/test/** -> test,host,lint: the other test-directory files. `host` holds test_make_targets.sh; `lint` holds
 #     test_check_test_classes.sh, which guards the marker grammar that run.sh reads; `test` holds test_select.sh,
 #     test_areas_map.sh and test_prewarm.sh.
-#   .github/** -> lint,ci: `lint` holds test_check_workflows.sh, which reads the real workflows; `ci` holds the ci tests.
+#   .github/** -> lint,ci: `lint` holds test_check_workflows.sh, which reads the real workflows; `ci` holds the ci tests (incl. test_gate_run.sh, which runs the deploy gate step from app-deploy-one.yml).
 #   Makefile -> test,host,lint,registry: `test` holds test_select.sh (runs make test-changed on a copy of it), `host`
 #     holds test_make_targets.sh, `lint` holds test_check_test_classes.sh (greps the real `lint:` recipe for the
 #     check-test-classes.sh line), `registry` holds test_validate_app_yaml.sh (greps it for the validate-tracked.sh line).

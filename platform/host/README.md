@@ -121,6 +121,22 @@ The helper pulls the image (packages are private), checks its `USER`, labels and
 container with a health check, and keeps the previous deploy for `rollback`. `current <app>` is the read-only arm the
 workflow uses to skip a deploy that would go backwards.
 
+Before any host change, the `deploy` job runs the `Check host installers` step (after `Compare with the live tag`,
+only when that step decided to deploy). It runs `tailscale ssh deploy@<host> stamps` and hands the exit status and
+output to `platform/ci/check-installer-stamps.sh`, which compares the four installer stamps on the host with the
+`INSTALLER_STAMP` lines of this commit's installers. Any difference, a missing or invalid host stamp, a host
+dispatcher without the `stamps` command (exit 2), or any other ssh failure fails the job before `new-db` and `deploy`,
+and the log names each `make host-<installer> HOST=<alias> ARGS="install"` to re-run (`deploy-user` takes
+`--pubkey-file PATH`). Every refusal ends with: "if the host installer is already from a newer main, re-run the latest
+deploy instead" (an inequality refuses even when the host is the newer side). The fix is to re-run the named installer
+from a clean checkout of main, then re-run the failed deploy job. A stale or empty stamp committed to `main` fails the
+step too (run `make embed`). The stamp attests the stamp constant carried by the streamed installer, which `make lint`
+ties to the committed installer bytes; an installer streamed from an uncommitted or edited working tree is not detected,
+and it is not the full host state (a hand-edited host file is still caught only by `verify`). `app-rollback.yml` is not
+gated. `make lint` (`platform/lint/check-workflows.sh`, rule 14) fails if the step is removed, moved after `new-db` or
+`deploy`, weakened, or made to swallow the script's exit code; `platform/ci/test_gate_run.sh` runs the step's real
+`run:` text with a stubbed `tailscale`.
+
 A host that already has the platform installed must re-run `host-deploy-user install` (new `current`, `deploy` and
 `rollback` dispatcher arms), `host-data install` (`rm-db.sh`) and `host-jobs install` (registry root) after this change
 is merged and before the first app deploys.

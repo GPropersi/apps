@@ -34,6 +34,10 @@
 #      `queue: max` and `cancel-in-progress: false`.
 #  13. no step uses the combined `actions/cache` action, and every `actions/cache/save` step carries exactly
 #      `if: github.event_name == 'push' && github.ref == 'refs/heads/main'` (only main writes the cache, never a PR).
+#  14. in app-deploy-one.yml the `deploy` job has a step whose `run:` calls check-installer-stamps.sh (the host installer
+#      gate) before the steps running `new-db "$APP"` and `deploy "$APP" "$OWN_SHA"`, with exactly
+#      `if: steps.live.outputs.go == 'true'`, no continue-on-error, no `|| true`, `|| :` or `set +e` in its run:, the
+#      literal `check-installer-stamps.sh "$rc" "$out"` call and the `|| rc=$?` capture.
 # Comment lines are ignored. The parse is line-based and assumes the repo's 2-space YAML (jobs at 2 spaces, job keys
 # at 4); a job with `environment:` it cannot pair with a guard fails closed.
 set -uo pipefail
@@ -42,7 +46,7 @@ root=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --root) [ $# -ge 2 ] || { echo "missing value for --root" >&2; exit 2; }; root="$2"; shift 2 ;;
-    -h | --help) sed -n '2,39p' "$0"; exit 0 ;;
+    -h | --help) sed -n '2,43p' "$0"; exit 0 ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac
 done
@@ -226,6 +230,71 @@ while IFS= read -r wf; do
     problems=$((problems + $(printf '%s\n' "$out" | wc -l)))
   fi
 done <<< "$files"
+
+# Rule 14, app-deploy-one.yml only: the host-installer stamp gate in the deploy job. Steps are identified by their run:
+# text. Comment lines are dropped first (so a commented `# || true` is ignored), a run: block is every line indented past
+# its key, and only a step's own keys (the `- ` line and 8-space keys) are read.
+if [ -f "$root/.github/workflows/app-deploy-one.yml" ] && grep -qx '.github/workflows/app-deploy-one.yml' <<< "$files"; then
+  out="$(awk -v path=".github/workflows/app-deploy-one.yml" '
+    function indent(s,   t) { t = s; sub(/[^ ].*$/, "", t); return length(t) }
+    function trim(s) { sub(/^[ \t]+/, "", s); sub(/[ \t]+$/, "", s); return s }
+    function setkey(k,   v) {
+      if (k ~ /^if:/) { v = k; sub(/^if:[ ]*/, "", v); sub(/[ \t]+#.*$/, "", v); ifv[n] = trim(v) }
+      else if (k ~ /^continue-on-error:/) coe[n] = 1
+      else if (k ~ /^run:/) {
+        v = k; sub(/^run:[ ]*/, "", v)
+        if (v ~ /^[|>]/ || v == "") runcol = 8
+        else run[n] = run[n] "\n" v
+      }
+    }
+    /^[ ]*#/ { next }
+    {
+      line = $0; sub(/\r$/, "", line)
+      if (line ~ /^[ ]*$/) next
+      ind = indent(line)
+      if (ind == 0) { injob = 0 }
+      if (ind == 2) { injob = (line ~ /^  deploy:/); runcol = -1; next }
+      if (!injob) next
+      if (runcol >= 0) {
+        if (ind > runcol) { run[n] = run[n] "\n" line; next }
+        runcol = -1
+      }
+      if (ind == 6 && line ~ /^      -[ ]/) {
+        n++; ifv[n] = ""; coe[n] = 0; run[n] = ""
+        k = line; sub(/^[ ]*-[ ]+/, "", k); setkey(k)
+      } else if (ind == 8 && n > 0) {
+        k = line; sub(/^[ ]*/, "", k); setkey(k)
+      }
+    }
+    END {
+      gate = 0; db = 0; dp = 0; ng = 0
+      for (i = 1; i <= n; i++) {
+        if (index(run[i], "check-installer-stamps.sh")) ng++
+        if (!gate && index(run[i], "check-installer-stamps.sh")) gate = i
+        if (!db && index(run[i], "new-db \"$APP\"")) db = i
+        if (!dp && index(run[i], "deploy \"$APP\" \"$OWN_SHA\"")) dp = i
+      }
+      if (!gate) { print path ": the deploy job has no step whose run: calls check-installer-stamps.sh (the host installer gate)"; exit }
+      if (ng > 1) print path ": more than one deploy step mentions check-installer-stamps.sh (the host installer gate must be the only one)"
+      if (!db) print path ": the deploy job has no step whose run: contains new-db \"$APP\" (the gate cannot be ordered against it)"
+      else if (gate >= db) print path ": the host installer gate must come before the step running new-db \"$APP\""
+      if (!dp) print path ": the deploy job has no step whose run: contains deploy \"$APP\" \"$OWN_SHA\" (the gate cannot be ordered against it)"
+      else if (gate >= dp) print path ": the host installer gate must come before the step running deploy \"$APP\" \"$OWN_SHA\""
+      if (ifv[gate] != "steps.live.outputs.go == \047true\047") print path ": the host installer gate step needs exactly if: steps.live.outputs.go == \047true\047"
+      if (coe[gate]) print path ": the host installer gate step must not set continue-on-error"
+      if (run[gate] ~ /\|\|[ ]*(true|:)([^A-Za-z0-9_]|$)/ || run[gate] ~ /set[ ]+\+e/)
+        print path ": the host installer gate run: must not hold || true, || : or set +e (they swallow the decision script exit code)"
+      if (!index(run[gate], "check-installer-stamps.sh \"$rc\" \"$out\""))
+        print path ": the host installer gate run: must call check-installer-stamps.sh \"$rc\" \"$out\""
+      if (!index(run[gate], "|| rc=$?"))
+        print path ": the host installer gate run: must capture the ssh status with || rc=$?"
+    }
+  ' "$root/.github/workflows/app-deploy-one.yml")" || exit 2
+  if [ -n "$out" ]; then
+    echo "$out"
+    problems=$((problems + $(printf '%s\n' "$out" | wc -l)))
+  fi
+fi
 
 # Pass 2: the cross-file rules over the collected facts.
 out="$(awk -F'\t' '

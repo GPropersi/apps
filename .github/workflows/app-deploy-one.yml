@@ -143,6 +143,16 @@ jobs:
             deploy) echo "go=true" >> "$GITHUB_OUTPUT" ;;
             *) echo "go=false" >> "$GITHUB_OUTPUT" ;;
           esac
+      # Refuse to touch the host while an installed platform piece differs from this commit's installers. The decision
+      # script's exit code fails the step (default bash -e); nothing here may swallow it.
+      - name: Check host installers
+        if: steps.live.outputs.go == 'true'
+        env:
+          DEPLOY_HOST: ${{ vars.PLATFORM_DEPLOY_HOST }}
+        run: |
+          rc=0
+          out="$(tailscale ssh "deploy@${DEPLOY_HOST}" stamps < /dev/null)" || rc=$?
+          platform/ci/check-installer-stamps.sh "$rc" "$out"
       - name: Provision the database
         if: steps.live.outputs.go == 'true'
         env:
