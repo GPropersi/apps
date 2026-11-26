@@ -42,6 +42,7 @@ stub_tailscale() {
 
 # run_gate: the step under bash -e from the repo root, DEPLOY_HOST set.
 run_gate() {
+  # shellcheck disable=SC2016  # $1/$2 expand in the inner bash
   run_cmd env DEPLOY_HOST=host.invalid bash -e -c 'cd "$1" && bash -e "$2"' _ "$repo" "$script"
 }
 
