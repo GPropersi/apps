@@ -89,7 +89,8 @@ monorepo (an app's notifs id is `apps_<name>`, with `-` written as `_`).
 - **Expected first failure:** the first run after merge fails with 401 or 403 until the registrar identity is approved.
   A 302 from Cloudflare means Access rejected the service token (it is missing from the `notifs-delivery` policy, or
   the ID and secret do not match). A 401 or 403 later means the identity or the Access service token no longer
-  matches what was approved, never a deploy problem; a write failure (the host rejected the key, or the hashes differ) means rerun it within 24 hours.
+  matches what was approved, never a deploy problem; a write failure (the host rejected the key, or the hashes
+  differ) means rerun it within 24 hours.
 - **Host prerequisite:** re-run `make host-deploy-user` and `make host-data` (the same ARGS as the first install) since the
   `notifs-key` command shipped, or the host answers with an unknown-command error.
 - **The `app` input:** empty means every opted-in app, and `all` also means every app; an explicit app must have
