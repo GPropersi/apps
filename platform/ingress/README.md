@@ -8,7 +8,7 @@ here is **run by you**; Claude never touches the live host or the Cloudflare acc
 
 | File | Role |
 |---|---|
-| `compose.yaml` | The Compose project `platform-ingress`: `cloudflared` (token from a host file), `traefik` (routes from files only, no Docker access) and `down-page`. No published ports. Traefik is configured by `TRAEFIK_*` environment variables only; its healthcheck is `traefik healthcheck`. |
+| `compose.yaml` | The Compose project `platform-ingress`: three connector services (`cloudflared`, the official-image connector kept as the rollback path and stopped after the first cutover; `cloudflared-blue` and `cloudflared-green`, the self-updating supervisor image, one running at a time and the other idle), `traefik` (routes from files only, no Docker access) and `down-page`. Every connector reads its token from a host file. No published ports. Traefik is configured by `TRAEFIK_*` environment variables only; its healthcheck is `traefik healthcheck`. |
 | `dynamic.yml` | Traefik file-provider config: the `/_jobs` deny router, the lowest-priority catch-all and the `errors` middleware. |
 | `down-page/index.html` | The static "this app is down or does not exist" page. |
 | `jobs-paths.table` | The `/_jobs` path variants the tests probe. |
@@ -50,6 +50,8 @@ hostname Access app overrides the wildcard, test it live before relying on it.
 |---|---|---|
 | `/etc/platform/cloudflared.token` | `root:64321`, `0640` | the tunnel token (one line) |
 | `/etc/platform/ingress.env` | `root`, not group or world writable (`0644`) | `PLATFORM_DOMAIN=<your domain>` (lowercase DNS name) |
+| `/etc/platform/cloudflared.webhook` | `65532:65532`, `0600` | the alert webhook the supervisor connectors use; provisioned by you, only verified by the installer (never written or printed) |
+| `/var/lib/cloudflared-supervisor-{blue,green}` | `65532:65532`, `0755` | one state directory per colour, created by the installer; its `status` file is `0644`, readable without sudo |
 
 #### Host files you create by hand
 
@@ -100,9 +102,9 @@ root's `dynamic.yml`. The guard is `install-ingress.sh verify` (and `status`): i
 `dynamic.yml` that is not named `app-<valid-name>.yml` or whose lines are not exactly what `platform deploy` renders
 (that app's own router and service, no `priority`, `middlewares` or other key). Run it after any deploy-identity change.
 
-The token group is created by you, once, at the fixed gid `64321` (it must equal `group_add` of `cloudflared` in
-`compose.yaml`). It must have **no members**, be **no account's primary group** and **not be the Docker socket's
-group**. The installer only verifies this, fail-closed, and prints the commands when something is missing:
+The token group is created by you, once, at the fixed gid `64321` (it must equal `group_add` of every connector service,
+`cloudflared`, `cloudflared-blue` and `cloudflared-green`, in `compose.yaml`). It must have **no members**, be **no
+account's primary group** and **not be the Docker socket's group**. The installer only verifies this, fail-closed, and prints the commands when something is missing:
 
 ```
 sudo groupadd --gid 64321 cloudflared-token
@@ -180,24 +182,132 @@ Access gate is verified from outside by `make host-verify-ingress`; routing and 
 **Environment exposure.** Traefik has no Docker API access of any kind, so it cannot read any container's
 environment variables.
 
+## Connector runbook (blue, green and the old connector)
+
+The stack defines three tunnel connectors. `cloudflared` is the official-image connector, kept defined and unchanged as
+the rollback path until the Pi's first real upgrade succeeds. `cloudflared-blue` and `cloudflared-green` run the
+self-updating supervisor image, each with its own state directory and metrics pair; exactly one runs at a time and the
+other is the idle colour. The installer (`install-ingress.sh`) creates both state directories and verifies the webhook
+file, but it never restarts or recreates a running connector: it starts `cloudflared-blue` only on a host where no
+connector runs. Every cutover below is a manual command that names one service.
+
+Placeholders: `<idle>` is the colour about to start, `<active>` the supervisor colour now serving, `<old>` the
+connector being retired (the legacy one at the first cutover, otherwise the previous colour), and `<colour>` is `blue`
+or `green` inside a status path. In every command below the compose prefix is the installer's full project flags.
+
+**Never use** a bare `up`, a `restart` of a stopped service, `--force-recreate`, `rm` or `down` while a connector
+serves: each can start, recreate or remove a connector you did not name, and the tunnel drops. Never edit
+`/opt/platform/ingress/compose.yaml` by hand either (`status` fails on payload drift): pin changes go through the repo
+compose, `make embed`, merge and the installer.
+
+Once the stronghold's `make cloudflared-probe` exists, it runs across steps 1 to 3; until then watch
+`make cloudflared-drift` and the status file's `ready` value. Both are stronghold targets (run from the stronghold
+checkout), not targets of this repo; `make cloudflared-probe` does not exist yet.
+
+### Readiness gate
+
+The new colour is ready only when its status file `/var/lib/cloudflared-supervisor-<colour>/status` shows `ready` of 4 or
+more AND its `timestamp=` is younger than 3 x 60 s (a stale file left by an earlier run must not pass). The
+`timestamp=` field is epoch seconds with a 3-digit fraction (for example `1764172800.123`), so strip the fraction and
+compare against 180 with the host clock:
+
+```
+f=/var/lib/cloudflared-supervisor-<colour>/status
+ts=$(sed -n 's/^timestamp=//p' "$f")
+echo "ready=$(sed -n 's/^ready=//p' "$f") age=$(( $(date +%s) - ${ts%.*} ))"
+```
+
+Pass means `ready` is 4 or more and `age` is below 180. Repeat the command until it passes.
+
+### First cutover (legacy connector to the first supervisor colour)
+
+Start blue, wait for the readiness gate, then stop (never remove) the official-image connector, so its container stays
+as the rollback:
+
+```
+sudo docker compose -p platform-ingress -f /opt/platform/ingress/compose.yaml --env-file /etc/platform/ingress.env up -d cloudflared-blue
+```
+
+Wait for the readiness gate on `blue`, then:
+
+```
+sudo docker compose -p platform-ingress -f /opt/platform/ingress/compose.yaml --env-file /etc/platform/ingress.env stop cloudflared
+```
+
+### Pin bump (every later image bump)
+
+Change the idle colour's image pin in `platform/ingress/compose.yaml` in the repo, run `make embed`, merge, then run the
+installer with `make host-ingress HOST=<alias> ARGS="install"` (it starts no connector while one runs). Then start the
+idle colour, wait for the readiness gate on it, then stop the old one. The next bump targets the other colour.
+
+```
+sudo docker compose -p platform-ingress -f /opt/platform/ingress/compose.yaml --env-file /etc/platform/ingress.env up -d <idle>
+```
+
+Wait for the readiness gate on `<idle>`, then:
+
+```
+sudo docker compose -p platform-ingress -f /opt/platform/ingress/compose.yaml --env-file /etc/platform/ingress.env stop <old>
+```
+
+### Connector rollback before the first real upgrade
+
+The stopped official-image container is still there, so no recreate is needed. Start it, wait for it to be healthy,
+then stop the supervisor colour that runs (`cloudflared-blue` here, or `cloudflared-green` when that is the active one):
+
+```
+sudo docker compose -p platform-ingress -f /opt/platform/ingress/compose.yaml --env-file /etc/platform/ingress.env up -d cloudflared
+```
+
+```
+sudo docker compose -p platform-ingress -f /opt/platform/ingress/compose.yaml --env-file /etc/platform/ingress.env ps cloudflared
+```
+
+Wait until `ps` reports it healthy, then:
+
+```
+sudo docker compose -p platform-ingress -f /opt/platform/ingress/compose.yaml --env-file /etc/platform/ingress.env stop cloudflared-blue
+```
+
+### Canary
+
+Send a test alert through the running supervisor to prove the webhook path:
+
+```
+sudo docker compose -p platform-ingress -f /opt/platform/ingress/compose.yaml --env-file /etc/platform/ingress.env exec <active> /usr/local/bin/cloudflared-supervisor.sh --test-alert
+```
+
 ## Rotating the tunnel token
 
 Get the new token from the tunnel's page in the Cloudflare dashboard, then on the Pi overwrite
 `/etc/platform/cloudflared.token` in place (keep owner `root:64321` and mode `0640`; `sudo tee` on the existing
-file keeps both), and restart only cloudflared:
+file keeps both). A rotation never touches the legacy connector and never restarts the active one: it runs the overlap
+onto the idle service. A connector reads the token file when it starts, so a plain start of the stopped idle container
+picks up the new token with no recreate. On a host running the supervisor, start `<idle>`, wait for the readiness gate,
+then stop `<old>`:
 
 ```
-sudo docker compose -p platform-ingress -f /opt/platform/ingress/compose.yaml --env-file /etc/platform/ingress.env restart cloudflared
+sudo docker compose -p platform-ingress -f /opt/platform/ingress/compose.yaml --env-file /etc/platform/ingress.env up -d <idle>
 ```
 
-Then run `make host-ingress HOST=<alias> ARGS="verify"`. Revoke the old token in the dashboard.
+Wait for the readiness gate on `<idle>`, then:
+
+```
+sudo docker compose -p platform-ingress -f /opt/platform/ingress/compose.yaml --env-file /etc/platform/ingress.env stop <old>
+```
+
+A legacy-only host (before the first cutover) runs the first cutover above the same way. Then run
+`make host-ingress HOST=<alias> ARGS="verify"`. Revoke the old token in the dashboard.
 
 ## Rollback
 
-1. Stop the stack on the Pi (removes the ingress containers; the `platform` network stays (it is external to the stack, IPv6 off,
-   and apps join it later); no firewall rule is touched):
+1. Stop the stack on the Pi, one named service at a time (the containers are stopped, not removed; the `platform`
+   network stays (it is external to the stack, IPv6 off, and apps join it later); no firewall rule is touched). Stop the
+   connector that serves (`<active>`, one of the three connector services) first, then Traefik and the down page:
    ```
-   sudo docker compose -p platform-ingress -f /opt/platform/ingress/compose.yaml --env-file /etc/platform/ingress.env down
+   sudo docker compose -p platform-ingress -f /opt/platform/ingress/compose.yaml --env-file /etc/platform/ingress.env stop <active>
+   sudo docker compose -p platform-ingress -f /opt/platform/ingress/compose.yaml --env-file /etc/platform/ingress.env stop traefik
+   sudo docker compose -p platform-ingress -f /opt/platform/ingress/compose.yaml --env-file /etc/platform/ingress.env stop down-page
    ```
 2. In the Cloudflare dashboard remove the wildcard route and the `*` DNS record (and the Access app if you are
    retiring the domain). These two dashboard steps are documented only; they are not exercised by the acceptance
