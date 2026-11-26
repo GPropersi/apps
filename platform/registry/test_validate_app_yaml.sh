@@ -404,6 +404,33 @@ expect_rc "two tracked apps sharing a hostname fail" 1
 expect_out_has "hostname clash: reason" "is also claimed by app 'p1' (apps/p1/app.yaml)"
 expect_out_has "hostname clash: names the file" "apps/p2/app.yaml: 'shared'"
 
+# A tracked app directory name containing a space is still validated (and fails: the name cannot match it).
+git -C "$repo" rm -q --cached apps/p1/app.yaml apps/p2/app.yaml
+rm -rf "${repo:?}/apps/p1" "${repo:?}/apps/p2"
+mkdir -p "$repo/apps/sp ace"
+sed -e "s/^name: .*/name: sp/" "$example" > "$repo/apps/sp ace/app.yaml"
+git -C "$repo" add "apps/sp ace/app.yaml"
+run_cmd bash -c "cd '$repo' && '$tracked'"
+expect_rc "a tracked app dir with a space is scanned and fails" 1
+expect_out_has "space dir: names the file" "apps/sp ace/app.yaml: "
+git -C "$repo" rm -q --cached "apps/sp ace/app.yaml"
+rm -rf "${repo:?}/apps/sp ace"
+
+# One invalid file plus a hostname clash elsewhere: rc 1 and both messages.
+for n in q1 q2; do
+  mkdir -p "$repo/apps/$n"
+  sed -e "s/^name: .*/name: $n/" "$example" > "$repo/apps/$n/app.yaml"
+  printf 'hostname: dup\n' >> "$repo/apps/$n/app.yaml"
+  git -C "$repo" add "apps/$n/app.yaml"
+done
+mkdir -p "$repo/apps/bad"
+printf 'schema_version: 1\nname: bad\ncolour: red\n' > "$repo/apps/bad/app.yaml"
+git -C "$repo" add apps/bad/app.yaml
+run_cmd bash -c "cd '$repo' && '$tracked'"
+expect_rc "an invalid file and a hostname clash together fail" 1
+expect_out_has "both failing: the invalid reason" "unknown key 'colour'"
+expect_out_has "both failing: the clash" "'dup' is also claimed by app 'q1'"
+
 mkdir -p "$T_TMP/notgit"
 run_cmd bash -c "cd '$T_TMP/notgit' && GIT_CEILING_DIRECTORIES='$T_TMP' '$tracked'"
 expect_rc "outside a git repo fails closed" 1

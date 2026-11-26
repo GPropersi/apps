@@ -87,6 +87,11 @@ range. A step is at least 1 and at most the field's maximum minus its minimum (5
 
 ## Host registry
 
+Rollout order: `deploy.sh` hard-requires the host claims lock (`make host-data ... install`) and
+`/opt/platform/deploy/registry/check-unique-hosts.sh` (`make host-deploy-user ... install`). This gates every app's
+deploy and rollback, not only apps that set `hostname:`. On a host that already runs the platform, re-run
+`host-data`, then `host-deploy-user`, then `host-ingress` (in that order) before the next app deploy.
+
 The runner reads `/var/lib/platform/registry/<app>/app.yaml` and reloads when it changes. Step 10's deploy writes
 that file atomically (temp file, then rename) and removes the directory when an app is removed. The file must pass
 `validate-app-yaml.sh`, and `name` must equal the directory name. The name `jobs` is reserved and cannot be an app.

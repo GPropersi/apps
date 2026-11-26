@@ -428,7 +428,7 @@ payload_deploy_sh() {
 # (/var/lib/platform/deploy), DEPLOY_REGISTRY_ROOT (/var/lib/platform/registry), DEPLOY_LOCK_DIR
 # (/var/lib/platform/locks), DEPLOY_CONNECTION_ENV (/opt/platform/data/connection.env), DEPLOY_ROUTES_DIR
 # (/opt/platform/ingress/dynamic), DEPLOY_INGRESS_ENV (/etc/platform/ingress.env), DEPLOY_ACCESS_ENV
-# (/etc/platform/access.env), DEPLOY_ENV_UID (0, the owner those two files must have), DEPLOY_SKIP_REGISTRY (1 skips
+# (/etc/platform/access.env), DEPLOY_ENV_UID (0, the owner those two files must have), DEPLOY_LOCK_UID (0, the owner the claims lock must have),DEPLOY_SKIP_REGISTRY (1 skips
 # login and pull and uses the image already in the local daemon), DEPLOY_VALIDATOR
 # (/opt/platform/deploy/registry/validate-app-yaml.sh; its yaml reader is ../lib/yaml-subset.sh beside it),
 # DEPLOY_HOST_CHECK (/opt/platform/deploy/registry/check-unique-hosts.sh, the cross-app claim checker),
@@ -469,6 +469,7 @@ ROUTES_DIR="${DEPLOY_ROUTES_DIR:-/opt/platform/ingress/dynamic}"
 INGRESS_ENV="${DEPLOY_INGRESS_ENV:-/etc/platform/ingress.env}"
 ACCESS_ENV="${DEPLOY_ACCESS_ENV:-/etc/platform/access.env}"
 ENV_UID="${DEPLOY_ENV_UID:-0}"
+LOCK_UID="${DEPLOY_LOCK_UID:-0}"
 SKIP_REGISTRY="${DEPLOY_SKIP_REGISTRY:-0}"
 VALIDATOR="${DEPLOY_VALIDATOR:-/opt/platform/deploy/registry/validate-app-yaml.sh}"
 HOST_CHECK="${DEPLOY_HOST_CHECK:-/opt/platform/deploy/registry/check-unique-hosts.sh}"
@@ -748,11 +749,12 @@ take_lock() {
   log "phase=lock end rc=0"
 }
 
-# claims_lock_ok: 0 when the host claims lock file is a regular, non-symlink file this user can open for append. Never
+# claims_lock_ok: 0 when the host claims lock file is a regular, non-symlink file owned by $ENV_UID (root) that this user can open for append. Never
 # creates it (install-data.sh does).
 claims_lock_ok() {
   local f="$LOCK_DIR/_hostname-claims.lock"
   [ ! -L "$f" ] && [ -f "$f" ] || return 1
+  [ "$(stat -c %u -- "$f" 2>/dev/null)" = "$LOCK_UID" ] || return 1
   # shellcheck disable=SC2188 # a bare redirection only opens the file for append
   ( : >>"$f" ) 2>/dev/null
 }
@@ -783,7 +785,7 @@ check_claims() {
 take_claims_lock() {
   local lock="$LOCK_DIR/_hostname-claims.lock" t0
   [ -z "$CLAIMSFD" ] || return 0
-  claims_lock_ok || fail lock "the host claims lock $lock is missing, a symlink or not openable: run \`make host-data HOST=<alias> ARGS=install\`"
+  claims_lock_ok || fail lock "the host claims lock $lock is missing, a symlink, not root-owned or not openable: run \`make host-data HOST=<alias> ARGS=install\`"
   exec {CLAIMSFD}>>"$lock" || fail lock "cannot open the host claims lock $lock: run \`make host-data HOST=<alias> ARGS=install\`"
   log "phase=lock start wait=${CLAIMS_LOCK_WAIT}s"
   t0=$SECONDS
@@ -858,7 +860,7 @@ preflight() {
   [ -d "$ROUTES_DIR" ] && [ ! -L "$ROUTES_DIR" ] && [ -w "$ROUTES_DIR" ] || fail preflight "the routes dir $ROUTES_DIR is missing or not writable by this user: run \`make host-ingress HOST=<alias> ARGS=install\`"
   [ -f "$CONNECTION_ENV" ] && [ -r "$CONNECTION_ENV" ] || fail preflight "the connection file $CONNECTION_ENV is missing: run \`make host-data HOST=<alias> ARGS=install\`"
   load_host_settings
-  claims_lock_ok || fail preflight "the host claims lock $LOCK_DIR/_hostname-claims.lock is missing, a symlink or not openable: run \`make host-data HOST=<alias> ARGS=install\`"
+  claims_lock_ok || fail preflight "the host claims lock $LOCK_DIR/_hostname-claims.lock is missing, a symlink, not root-owned or not openable: run \`make host-data HOST=<alias> ARGS=install\`"
   check_claims preflight
   PG_HOST="$(env_value PLATFORM_PG_HOST)"
   PG_PORT="$(env_value PLATFORM_PG_PORT)"

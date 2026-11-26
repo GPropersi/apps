@@ -27,6 +27,8 @@ directory).
 
 Access settings are account-specific and never committed. Create `/etc/platform/access.env` on the host once
 (`ACCESS_TEAM_DOMAIN` and `ACCESS_AUD`); deploy passes them to every app, and an app without them refuses to start.
+Deploy also injects `PLATFORM_DOMAIN` (the host's domain, from `/etc/platform/ingress.env`) and `APP_HOSTNAME` (the
+label the app is served at: its `hostname:` from `app.yaml`, defaulting to the app name).
 
 ## Local development
 

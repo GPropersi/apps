@@ -104,8 +104,9 @@ live_aud="$(printf 'cd%.0s' {1..32})"
 printf 'PLATFORM_DOMAIN=apps.example.test\n' >"$W/ingress.env"
 printf 'ACCESS_TEAM_DOMAIN=liveteam.cloudflareaccess.com\nACCESS_AUD=%s\n' "$live_aud" >"$W/access.env"
 chmod 644 "$W/ingress.env" "$W/access.env"
-export DEPLOY_ROUTES_DIR="$W/routes" DEPLOY_INGRESS_ENV="$W/ingress.env" DEPLOY_ACCESS_ENV="$W/access.env" DEPLOY_ENV_UID
+export DEPLOY_ROUTES_DIR="$W/routes" DEPLOY_INGRESS_ENV="$W/ingress.env" DEPLOY_ACCESS_ENV="$W/access.env" DEPLOY_ENV_UID DEPLOY_LOCK_UID
 DEPLOY_ENV_UID="$(id -u)"
+DEPLOY_LOCK_UID="$DEPLOY_ENV_UID"
 
 # build_image <tag> <healthy 1|0>: a busybox httpd on port 8080 as uid 1000; unhealthy serves no /healthz (a 404).
 build_image() {

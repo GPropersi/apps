@@ -39,8 +39,9 @@ AUD="$(printf 'ab%.0s' {1..32})"
 DOMAIN='apps.example.test'
 # The host files the deploy reads (ingress.env, access.env) and the Traefik routes dir are real temp paths reached through
 # the DEPLOY_* hooks; DEPLOY_ENV_UID is the test user's own uid because the files cannot be chowned to root here.
-export DEPLOY_ROUTES_DIR="$W/routes" DEPLOY_INGRESS_ENV="$W/ingress.env" DEPLOY_ACCESS_ENV="$W/access.env" DEPLOY_ENV_UID
+export DEPLOY_ROUTES_DIR="$W/routes" DEPLOY_INGRESS_ENV="$W/ingress.env" DEPLOY_ACCESS_ENV="$W/access.env" DEPLOY_ENV_UID DEPLOY_LOCK_UID
 DEPLOY_ENV_UID="$(id -u)"
+DEPLOY_LOCK_UID="$DEPLOY_ENV_UID"
 export STATE LOGGER_LOG IPADDR
 XENV=()
 
@@ -399,7 +400,7 @@ for d in 'DEPLOY_NETWORK:-platform' 'DEPLOY_SECRETS_ROOT:-/var/lib/platform/secr
   'DEPLOY_STATE_ROOT:-/var/lib/platform/deploy' 'DEPLOY_REGISTRY_ROOT:-/var/lib/platform/registry' \
   'DEPLOY_LOCK_DIR:-/var/lib/platform/locks' 'DEPLOY_CONNECTION_ENV:-/opt/platform/data/connection.env' \
   'DEPLOY_ROUTES_DIR:-/opt/platform/ingress/dynamic' 'DEPLOY_INGRESS_ENV:-/etc/platform/ingress.env' \
-  'DEPLOY_ACCESS_ENV:-/etc/platform/access.env' 'DEPLOY_ENV_UID:-0' \
+  'DEPLOY_ACCESS_ENV:-/etc/platform/access.env' 'DEPLOY_ENV_UID:-0' 'DEPLOY_LOCK_UID:-0' \
   'DEPLOY_SKIP_REGISTRY:-0' 'DEPLOY_VALIDATOR:-/opt/platform/deploy/registry/validate-app-yaml.sh' \
   'DEPLOY_HOST_CHECK:-/opt/platform/deploy/registry/check-unique-hosts.sh'; do
   expect_out_has_text "$src" "\${$d}" "the hook default is the production value: $d"
@@ -1486,7 +1487,11 @@ refuse "a name-less registry entry of another app" preflight s_corrupt_nameless 
 refuse "an empty registry entry of another app" preflight s_corrupt_empty "reg/beta/app.yaml: cannot read name"
 refuse "a dangling registry entry of another app" preflight s_corrupt_dangling "reg/beta/app.yaml: cannot read name"
 refuse "a corrupt entry names the remedy" preflight s_corrupt_nameless "repair or remove that registry entry, then redeploy"
-for fn in s_nolock s_locklink s_lockdir; do
+s_lockowner() { XENV=(DEPLOY_LOCK_UID=$(($(id -u) + 1))); }
+s_lockro() { chmod 000 "$W/locks/_hostname-claims.lock"; }
+for fn in s_nolock s_locklink s_lockdir s_lockowner s_lockro; do
+  # An unreadable lock cannot be exercised as root (root opens any file).
+  if [ "$fn" = s_lockro ] && [ "$(id -u)" = 0 ]; then continue; fi
   refuse "a host without a usable claims lock file ($fn)" preflight "$fn" "make host-data"
   expect_calls_lacks "($fn) the claims lock file is refused before the pull" "docker pull"
 done
