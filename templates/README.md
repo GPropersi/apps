@@ -35,7 +35,7 @@ the sample, and these starter files carry assumptions about it:
   `fakeQueue.EnqueueUnique` accept only `add-note`) and the tests that use them (`server_test.go`, `jobs_test.go`, `run_test.go`).
 - `test_image.sh`: its job and table assertions (`/_jobs/add-note`, `select count(*) from items`, the `items` rows) and
   the `/api/me` probe.
-- `web/src/` pages and tests, and `web/index.html`'s title.
+- `web/src/` pages and tests, `web/index.html`'s title, and `web/public/favicon.svg` (the placeholder icon).
 
 `internal/platform/` is not rewritten: it is shared and byte-identical (see below).
 
