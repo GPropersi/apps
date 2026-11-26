@@ -8,6 +8,9 @@
 #
 # Host-side inputs (you create them; the installer never writes secrets and never edits /etc/group):
 #   /etc/platform/cloudflared.token   the tunnel token: regular file, owner root, group gid 64321, mode exactly 0640
+#   /etc/platform/cloudflared.webhook the supervisor's alert webhook: regular file, owner 65532:65532, mode exactly 0600,
+#                                     non-empty; only checked (never read, written or printed). The installer also
+#                                     creates /var/lib/cloudflared-supervisor-{blue,green} (65532:65532, 0755)
 #   /etc/platform/ingress.env         PLATFORM_DOMAIN=<your domain>: root-owned, not group/world writable
 #   /etc/platform/access.env          ACCESS_TEAM_DOMAIN= and ACCESS_AUD= (read by platform deploy): checked by status/verify
 #   the `deploy` group (install-deploy-user.sh creates it): the dynamic/ directory is root:deploy 1775 so the deploy user
@@ -50,16 +53,20 @@
 #
 # Test overrides (env, test-only): INSTALL_INGRESS_ROOT (path prefix for every host file), INSTALL_INGRESS_SUDO (the
 # privilege prefix; "sudo -n" by default, none when already root), INSTALL_INGRESS_SOCKET (the Docker socket path),
-# INSTALL_INGRESS_HEALTH_TIMEOUT / INSTALL_INGRESS_POLL (seconds), INSTALL_INGRESS_LIVE_LOCAL (run the live docker
-# commands locally instead of over ssh), INSTALL_INGRESS_LIVE_SLEEP, INSTALL_INGRESS_HOLD_TTY,
-# INSTALL_INGRESS_HOLD_TIMEOUT, INSTALL_INGRESS_AS_DEPLOY (the prefix that runs a command as the deploy user). The docker, stat and getent commands are the ones on PATH, so a test puts stubs there.
+# INSTALL_INGRESS_HEALTH_TIMEOUT (seconds, default 120: the health wait when this run started no connector),
+# INSTALL_INGRESS_CONNECTOR_HEALTH_TIMEOUT (seconds, default 240: the wait when this run's `up` started a connector,
+# because a fresh supervisor has a 120 s healthcheck start_period), INSTALL_INGRESS_POLL (seconds),
+# INSTALL_INGRESS_LIVE_LOCAL (run the live docker commands locally instead of over ssh),
+# INSTALL_INGRESS_LIVE_SLEEP, INSTALL_INGRESS_HOLD_TTY, INSTALL_INGRESS_HOLD_TIMEOUT, INSTALL_INGRESS_AS_DEPLOY (the
+# prefix that runs a command as the deploy user). The docker, stat and getent commands are the ones on PATH, so a test
+# puts stubs there.
 set -euo pipefail
 
 export LC_ALL=C
 # groupadd, getent and friends live in /usr/sbin, which a non-root ssh user's PATH lacks
 export PATH="$PATH:/usr/sbin:/sbin"
 
-readonly INSTALLER_STAMP=b53efad152be91db
+readonly INSTALLER_STAMP=7272c8d8299c8657
 # The dedicated token group. Fixed, chosen without knowledge of the host's group database; it must equal the numeric
 # group_add of cloudflared in compose.yaml (the test suite compares the two).
 readonly TOKEN_GID=64321
@@ -69,6 +76,8 @@ readonly STAMPS_DIR="/opt/platform/stamps"
 readonly STAMP_NAME="ingress"
 readonly ENV_FILE="/etc/platform/ingress.env"
 readonly TOKEN_FILE="/etc/platform/cloudflared.token"
+readonly WEBHOOK_FILE="/etc/platform/cloudflared.webhook"
+readonly STATE_DIRS=(/var/lib/cloudflared-supervisor-blue /var/lib/cloudflared-supervisor-green)
 readonly ACCESS_FILE="/etc/platform/access.env"
 readonly GID_FILE="/opt/platform/ingress/docker-gid.env"
 # The old compose file declared the network without a name:, so compose created it as <project>_<key>.
@@ -79,12 +88,15 @@ readonly TEAM_RE='^[a-z0-9-]+\.cloudflareaccess\.com$'
 readonly AUD_RE='^[0-9a-f]{64}$'
 readonly PROJECT="platform-ingress"
 readonly NETWORK="platform"
-readonly SERVICES=(cloudflared traefik down-page)
+readonly BASE_SERVICES=(traefik down-page)
+readonly CONNECTORS=(cloudflared cloudflared-blue cloudflared-green)
+readonly DEFAULT_CONNECTOR="cloudflared-blue"
 readonly EDGE_NAME="region1.v2.argotunnel.com"
 readonly DOMAIN_RE='^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]([a-z0-9-]{0,61}[a-z0-9])?$'
 ROOT="${INSTALL_INGRESS_ROOT:-}"
 SOCKET="${INSTALL_INGRESS_SOCKET:-/var/run/docker.sock}"
 HEALTH_TIMEOUT="${INSTALL_INGRESS_HEALTH_TIMEOUT:-120}"
+CONNECTOR_HEALTH_TIMEOUT="${INSTALL_INGRESS_CONNECTOR_HEALTH_TIMEOUT:-240}"
 POLL="${INSTALL_INGRESS_POLL:-2}"
 
 if [ -n "${INSTALL_INGRESS_SUDO+set}" ]; then
@@ -142,6 +154,10 @@ payload_compose_yaml() {
 # Host-side inputs (never written here): PLATFORM_DOMAIN (the env file), the tunnel token file mounted into
 # cloudflared.
 #
+# Connectors: `cloudflared` (official image) is the kept rollback definition. `cloudflared-blue` and
+# `cloudflared-green` are the permanent overlap pair (self-updating supervisor image); only one runs outside an
+# overlap. Every command names its service (never a bare `up`); see the ingress README runbook.
+#
 # Rules this file keeps (platform/ingress/test_ingress_stack.sh enforces them):
 # - It stays inside a small YAML subset (block style only) so the tests can read it without a YAML library.
 # - Traefik is configured ONLY through TRAEFIK_* environment variables, and has no `command:`. Traefik ignores
@@ -188,6 +204,78 @@ services:
       timeout: 5s
       retries: 3
       start_period: 20s
+
+  cloudflared-blue:
+    image: ghcr.io/gpropersi/cloudflared-supervisor:45649683873@sha256:dd629863d150e97e8e5af78f5053fe7ea75e5a130aec882d90c2c34860bcc367
+    environment:
+      TUNNEL_TOKEN_FILE: /run/cloudflared/token
+      CF_WEBHOOK_FILE: /run/secrets/cloudflared-webhook
+      CF_METRICS_A: 127.0.0.1:20251
+      CF_METRICS_B: 127.0.0.1:20252
+    volumes:
+      - /etc/platform/cloudflared.token:/run/cloudflared/token:ro
+      - /etc/platform/cloudflared.webhook:/run/secrets/cloudflared-webhook:ro
+      - /var/lib/cloudflared-supervisor-blue:/var/lib/cloudflared-supervisor
+    user: "65532:65532"
+    group_add:
+      - "64321"
+    networks:
+      - platform
+    restart: unless-stopped
+    mem_limit: 192m
+    stop_grace_period: 45s
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    read_only: true
+    tmpfs:
+      - /tmp
+    healthcheck:
+      test:
+        - CMD
+        - /usr/local/bin/cloudflared-supervisor.sh
+        - --health
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 120s
+
+  cloudflared-green:
+    image: ghcr.io/gpropersi/cloudflared-supervisor:45649683873@sha256:dd629863d150e97e8e5af78f5053fe7ea75e5a130aec882d90c2c34860bcc367
+    environment:
+      TUNNEL_TOKEN_FILE: /run/cloudflared/token
+      CF_WEBHOOK_FILE: /run/secrets/cloudflared-webhook
+      CF_METRICS_A: 127.0.0.1:20253
+      CF_METRICS_B: 127.0.0.1:20254
+    volumes:
+      - /etc/platform/cloudflared.token:/run/cloudflared/token:ro
+      - /etc/platform/cloudflared.webhook:/run/secrets/cloudflared-webhook:ro
+      - /var/lib/cloudflared-supervisor-green:/var/lib/cloudflared-supervisor
+    user: "65532:65532"
+    group_add:
+      - "64321"
+    networks:
+      - platform
+    restart: unless-stopped
+    mem_limit: 192m
+    stop_grace_period: 45s
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    read_only: true
+    tmpfs:
+      - /tmp
+    healthcheck:
+      test:
+        - CMD
+        - /usr/local/bin/cloudflared-supervisor.sh
+        - --health
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 120s
 
   traefik:
     image: docker.io/library/traefik:v3.7.15@sha256:0f6150202bc1fed72a7bd2107460eaa510e5b8a905f3fdb5b84f2c8619c33368
@@ -406,6 +494,18 @@ chk_token_file() {
   [ -n "$tok" ] || echo "token file has no non-blank content"
 }
 
+# chk_webhook_file: the alert webhook is checked by type, owner, mode and size only; its content is never read.
+# shellcheck disable=SC2329 # invoked by name through run_check and do_install
+chk_webhook_file() {
+  local p="$ROOT$WEBHOOK_FILE" meta
+  if ! priv test -e "$p"; then echo "webhook file missing: $WEBHOOK_FILE"; return 0; fi
+  if priv test -L "$p"; then echo "webhook file is a symlink: $WEBHOOK_FILE"; return 0; fi
+  if ! priv test -f "$p"; then echo "webhook file is not a regular file: $WEBHOOK_FILE"; return 0; fi
+  meta="$(priv stat -c '%u:%g %a' -- "$p")" || { echo "cannot stat the webhook file"; return 0; }
+  [ "$meta" = "65532:65532 600" ] || echo "webhook file uid:gid/mode is '$meta', want '65532:65532 600' (owner 65532:65532, mode 0600)"
+  if ! priv test -s "$p"; then echo "webhook file is empty"; return 0; fi
+}
+
 # env_domain: prints the PLATFORM_DOMAIN value of the env file (caller validates it).
 env_domain() {
   local lines=()
@@ -618,6 +718,8 @@ print_instructions() {
   err "  sudo tee $TOKEN_FILE >/dev/null     # paste the tunnel token from the Cloudflare dashboard, Enter, Ctrl-D"
   err "  sudo chown root:$TOKEN_GID $TOKEN_FILE && sudo chmod 0640 $TOKEN_FILE"
   err "  echo 'PLATFORM_DOMAIN=<your-domain>' | sudo tee $ENV_FILE >/dev/null && sudo chmod 0644 $ENV_FILE"
+  err "  sudo install -m 0600 -o 65532 -g 65532 /dev/null $WEBHOOK_FILE"
+  err "  sudo tee $WEBHOOK_FILE >/dev/null   # paste the alert webhook URL with no echo (e.g. read -rs), then Ctrl-D"
 }
 
 # ---- file helpers ----
@@ -651,6 +753,33 @@ place_dir() {
   priv chmod "$mode" "$dir"
   info "changed: $dir/"
   CHANGED=1
+}
+
+# place_state_dir <dir>: a supervisor state directory owned by the container user (65532:65532, 0755). A symlink (the
+# directory or its parent) is refused; an existing directory is repaired, never deleted or emptied.
+place_state_dir() {
+  local dir="$1" parent
+  parent="$(dirname -- "$dir")"
+  if [ -L "$parent" ]; then die "state directory parent is a symlink: $parent (nothing further was installed)"; fi
+  if [ -L "$dir" ]; then die "state directory is a symlink: $dir (nothing further was installed)"; fi
+  if [ -d "$dir" ] && [ "$(file_meta "$dir")" = "65532:65532 755" ]; then
+    info "already: $dir/"
+    return 0
+  fi
+  priv mkdir -p -- "$dir"
+  priv chown 65532:65532 "$dir"
+  priv chmod 0755 "$dir"
+  info "changed: $dir/"
+  CHANGED=1
+}
+
+# check_state_dir <dir>: owned by 65532:65532, exactly mode 0755.
+check_state_dir() {
+  local path="$ROOT$1" meta
+  if [ ! -e "$path" ]; then fail "state directory missing: $1"; return 1; fi
+  if [ -L "$path" ]; then fail "state directory is a symlink: $1"; return 1; fi
+  meta="$(file_meta "$path")"
+  if [ "$meta" = "65532:65532 755" ]; then pass "state directory $1 owner/mode ($meta)"; else fail "state directory $1 uid:gid/mode is '$meta', want '65532:65532 755'"; return 1; fi
 }
 
 # ---- compose helpers ----
@@ -700,10 +829,34 @@ retire_old_network() {
 # stack_ps: one "<name>|<service>|<state>|<health>" line per container of the project.
 stack_ps() { compose ps --all --format '{{.Name}}|{{.Service}}|{{.State}}|{{.Health}}'; }
 
-# stack_problems <ps text> [run]: one line per service that is absent, not running or (without "run") not healthy.
+# in_list <word> <list words...>: exact membership.
+in_list() {
+  local w="$1" x
+  shift
+  for x in "$@"; do [ "$x" = "$w" ] && return 0; done
+  return 1
+}
+
+# connector_idle <state>: fail closed. Idle is exactly exited or created (a missing container is idle by absence);
+# every other state, including empty or unknown, counts as present.
+connector_idle() { [ "$1" = "exited" ] || [ "$1" = "created" ]; }
+
+# present_connectors <ps text>: the service name of every connector container that is not idle, one per line.
+present_connectors() {
+  local ps="$1" name service state health
+  while IFS='|' read -r name service state health; do
+    [ -n "$service" ] || continue
+    in_list "$service" "${CONNECTORS[@]}" || continue
+    connector_idle "$state" || echo "$service"
+  done <<<"$ps"
+}
+
+# stack_problems <ps text> [run]: one line per problem. Base services (traefik, down-page) must exist, run and (without
+# "run") be healthy. At least one present connector must be running (and healthy without "run"); a present connector
+# in any other state or unhealthy is a problem; idle connectors are not; an unlisted service is a problem.
 stack_problems() {
-  local ps="$1" only_run="${2:-}" svc found name service state health
-  for svc in "${SERVICES[@]}"; do
+  local ps="$1" only_run="${2:-}" svc found name service state health ok=0
+  for svc in "${BASE_SERVICES[@]}"; do
     found=0
     while IFS='|' read -r name service state health; do
       [ "$service" = "$svc" ] || continue
@@ -716,6 +869,54 @@ stack_problems() {
     done <<<"$ps"
     [ "$found" -eq 1 ] || echo "service $svc has no container"
   done
+  while IFS='|' read -r name service state health; do
+    [ -n "$name" ] || continue
+    if in_list "$service" "${BASE_SERVICES[@]}"; then
+      continue
+    elif in_list "$service" "${CONNECTORS[@]}"; then
+      connector_idle "$state" && continue
+      if [ "$state" != "running" ]; then
+        echo "$name is $state"
+      elif [ -z "$only_run" ] && [ "$health" != "healthy" ]; then
+        echo "$name is ${health:-without a health status}"
+      else
+        ok=$((ok + 1))
+      fi
+    else
+      echo "unexpected service $service ($name)"
+    fi
+  done <<<"$ps"
+  [ "$ok" -ge 1 ] || echo "no running connector (want one of ${CONNECTORS[*]})"
+}
+
+# connector_notes <ps text>: the idle: and overlap: info lines (never failures).
+connector_notes() {
+  local ps="$1" name service state health idle="" running=""
+  while IFS='|' read -r name service state health; do
+    [ -n "$service" ] || continue
+    in_list "$service" "${CONNECTORS[@]}" || continue
+    if connector_idle "$state"; then idle="$idle $service"; elif [ "$state" = "running" ]; then running="$running $service"; fi
+  done <<<"$ps"
+  local c n=0 absent=""
+  for c in "${CONNECTORS[@]}"; do
+    # shellcheck disable=SC2086 # the lists are space-separated service names
+    in_list "$c" $idle $running || absent="$absent $c"
+  done
+  idle="$idle$absent"
+  [ -z "$idle" ] || info "idle:$idle"
+  for c in $running; do n=$((n + 1)); done
+  [ "$n" -lt 2 ] || info "overlap:$running (a pin bump is in progress)"
+}
+
+# running_connectors <ps text>: space-separated names of running connectors.
+running_connectors() {
+  local ps="$1" name service state health out=""
+  while IFS='|' read -r name service state health; do
+    [ -n "$service" ] || continue
+    in_list "$service" "${CONNECTORS[@]}" || continue
+    [ "$state" != "running" ] || out="$out $service"
+  done <<<"$ps"
+  echo "${out# }"
 }
 
 ensure_network() {
@@ -732,19 +933,23 @@ ensure_network() {
   fi
 }
 
+# wait_healthy [connector]: with "connector" (this run's up named a connector) the deadline is
+# CONNECTOR_HEALTH_TIMEOUT, else HEALTH_TIMEOUT; one deadline for the whole wait.
 wait_healthy() {
-  local deadline ps problems
-  deadline=$((SECONDS + HEALTH_TIMEOUT))
+  local deadline ps problems limit="$HEALTH_TIMEOUT" which="INSTALL_INGRESS_HEALTH_TIMEOUT"
+  if [ "${1:-}" = "connector" ]; then limit="$CONNECTOR_HEALTH_TIMEOUT"; which="INSTALL_INGRESS_CONNECTOR_HEALTH_TIMEOUT"; fi
+  deadline=$((SECONDS + limit))
   while :; do
     ps="$(stack_ps 2>/dev/null)" || ps=""
     problems="$(stack_problems "$ps")"
     if [ -z "$problems" ]; then
-      info "healthy: all ${#SERVICES[@]} containers"
+      info "healthy: ${BASE_SERVICES[*]} and connector $(running_connectors "$ps")"
+      connector_notes "$ps"
       return 0
     fi
     if [ "$SECONDS" -ge "$deadline" ]; then
       err "$problems"
-      die "the stack is not healthy after ${HEALTH_TIMEOUT}s (unhealthy: $(tr '\n' ';' <<<"$problems"))"
+      die "the stack is not healthy after ${limit}s ($which) (unhealthy: $(tr '\n' ';' <<<"$problems"))"
     fi
     sleep "$POLL"
   done
@@ -753,11 +958,11 @@ wait_healthy() {
 # ---- install ----
 
 do_install() {
-  local problems line ps dgid legacy
+  local problems line ps dgid legacy present sd wait_mode="" up_names=()
   require_privilege
   TMP="$(mktemp -d)"
 
-  problems="$(chk_token_file; chk_env_file; chk_token_group)"
+  problems="$(chk_token_file; chk_env_file; chk_token_group; chk_webhook_file)"
   if [ -n "$problems" ]; then
     while IFS= read -r line; do err "install-ingress: $line"; done <<<"$problems"
     print_instructions
@@ -775,21 +980,30 @@ do_install() {
   place_file "$TMP/compose.yaml" "$ROOT$INSTALL_DIR/compose.yaml" 644
   place_file "$TMP/dynamic.yml" "$ROOT$INSTALL_DIR/dynamic/dynamic.yml" 644
   place_file "$TMP/index.html" "$ROOT$INSTALL_DIR/down-page/index.html" 644
+  for sd in "${STATE_DIRS[@]}"; do place_state_dir "$ROOT$sd"; done
   retire_gid_file
   ensure_network
 
-  ps="$(stack_ps 2>/dev/null)" || ps=""
+  # An unreadable ps would look like "no connector present" and start blue: fail closed. A fresh project is rc 0, empty.
+  ps="$(stack_ps)" || die "cannot read the state of the compose project $PROJECT (docker compose ps failed); nothing was started"
+  present="$(present_connectors "$ps")"
   legacy="$(legacy_containers)" || die "cannot list docker containers to look for a retired socket-proxy container"
   if [ "$CHANGED" -eq 1 ] || [ -n "$legacy" ] || [ -n "$(stack_problems "$ps" run)" ]; then
-    compose up -d --remove-orphans || die "docker compose up failed"
-    info "changed: stack started"
+    if [ -z "$present" ]; then
+      up_names=(traefik down-page "$DEFAULT_CONNECTOR")
+      wait_mode=connector
+    else
+      up_names=(traefik down-page)
+    fi
+    compose up -d --remove-orphans "${up_names[@]}" || die "docker compose up failed"
+    info "changed: stack started (up: ${up_names[*]})"
   else
     info "already: stack running"
   fi
   legacy="$(legacy_containers)" || die "cannot list docker containers to look for a retired socket-proxy container"
   [ -z "$legacy" ] || die "a socket-proxy container still exists after compose up --remove-orphans: remove it by hand (docker rm -f $legacy)"
   retire_old_network
-  wait_healthy
+  wait_healthy "$wait_mode"
   # The stamp is the last action: a failed install leaves the previous stamp (or none), so the deploy gate fails closed.
   # It is placed after the compose up section, so it can never change a recreate decision.
   printf '%s\n' "$INSTALLER_STAMP" > "$TMP/stamp"
@@ -881,8 +1095,8 @@ container_checks() {
         elif grep -q '^TRAEFIK_PROVIDERS_DOCKER' <<<"$envcmd"; then fail "$name has a TRAEFIK_PROVIDERS_DOCKER_* variable"
         else pass "$name has no Docker provider variable"; fi
         ;;
-      cloudflared)
-        # The token is compared inside this shell only: never printed, never passed in an argv.
+      cloudflared | cloudflared-blue | cloudflared-green)
+        # Runs for stopped containers too (inspect works on them). The token is compared inside this shell only: never printed, never passed in an argv.
         tok="$(priv cat -- "$ROOT$TOKEN_FILE" 2>/dev/null || true)"
         tok="${tok//[$' \t\r\n']/}"
         envcmd="$(dk inspect --format '{{json .Config.Env}} {{json .Config.Cmd}}' "$name" 2>/dev/null || true)"
@@ -906,7 +1120,7 @@ container_checks() {
 }
 
 do_checks() {
-  local ps problems line dgid
+  local ps problems line dgid sd
   check_owned "install directory" "$ROOT$INSTALL_DIR" 755 || true
   if dgid="$(deploy_gid)"; then
     check_owned "dynamic directory" "$ROOT$INSTALL_DIR/dynamic" 1775 "$dgid" || true
@@ -933,6 +1147,8 @@ do_checks() {
   fi
 
   run_check "token file" chk_token_file
+  run_check "webhook file" chk_webhook_file
+  for sd in "${STATE_DIRS[@]}"; do check_state_dir "$sd" || true; done
   run_check "ingress env file" chk_env_file
   run_check "access env file" chk_access_file
   run_check "token group is private" chk_token_group
@@ -942,7 +1158,8 @@ do_checks() {
   if ps="$(stack_ps 2>/dev/null)"; then
     problems="$(stack_problems "$ps")"
     if [ -z "$problems" ]; then
-      pass "the ${#SERVICES[@]} containers are running and healthy"
+      pass "${BASE_SERVICES[*]} and connector $(running_connectors "$ps") are running and healthy"
+      connector_notes "$ps"
     else
       while IFS= read -r line; do fail "$line"; done <<<"$problems"
     fi
@@ -1341,6 +1558,7 @@ main() {
   if [ "$live" -eq 1 ] && [ "$cmd" != "verify" ]; then die "--live is only valid with verify" 2; fi
   if [ "$HOLD" -eq 1 ] && [ "$live" -ne 1 ]; then die "--hold is only valid with verify --live" 2; fi
   [[ "$HEALTH_TIMEOUT" =~ ^[0-9]+$ ]] || die "INSTALL_INGRESS_HEALTH_TIMEOUT must be a whole number of seconds" 2
+  [[ "$CONNECTOR_HEALTH_TIMEOUT" =~ ^[0-9]+$ ]] || die "INSTALL_INGRESS_CONNECTOR_HEALTH_TIMEOUT must be a whole number of seconds" 2
 
   if [ "$live" -eq 1 ]; then
     HOST="$host"

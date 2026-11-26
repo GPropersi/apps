@@ -22,9 +22,15 @@ here="$(cd "$(dirname "$0")" && pwd)"
 t_init
 host_readme="$(cd "$here/../host" && pwd)/README.md"
 
-services="cloudflared down-page traefik"
+services="cloudflared cloudflared-blue cloudflared-green down-page traefik"
+connectors="cloudflared cloudflared-blue cloudflared-green"
+supervisors="cloudflared-blue cloudflared-green"
+# The pilot supervisor image (the compose text; the check enforces only its shape).
+sup_ref="ghcr.io/gpropersi/cloudflared-supervisor:45649683873@sha256:dd629863d150e97e8e5af78f5053fe7ea75e5a130aec882d90c2c34860bcc367"
 declare -A svc_nets=(
   [cloudflared]="platform"
+  [cloudflared-blue]="platform"
+  [cloudflared-green]="platform"
   [traefik]="platform"
   [down-page]="platform"
 )
@@ -85,6 +91,7 @@ re_ok='^[]A-Za-z0-9_/;^$()|*+?.[-]*$'
 # Explicit exclusions for the hostname shape (a dotted name whose last label is letters only). Nothing else is
 # excused: the registry host of an image reference, the label name, the fake example domain, and file names.
 host_registry="docker.io"
+host_registry2="ghcr.io" # the registry of the supervisor image
 host_label="platform.app"
 host_fake="example.test"
 host_access="cloudflareaccess.com" # Cloudflare's own public team-domain suffix, named in access.env.example and the README
@@ -95,6 +102,8 @@ host_files="$host_files install-backup.sh restore.sh backup.sh platform-backup.s
 host_files="$host_files install-data.sh install-jobs.sh jobs-redis.password deploy.sh validate-app-yaml.sh new-db.sh notifs-key.sh rm-db.sh pg_hba.conf redis-entrypoint.sh postgres-admin.password redis-admin.password "
 host_files="$host_files verify-egress.sh verify-ingress.sh server-host-base.sh authorized_keys.d egress-deny.cidrs egress-allow.cidrs "
 host_files="$host_files write-access-env.sh check-installer-stamps.sh check-workflows.sh test_gate_run.sh "
+# The supervisor image's script path and the webhook file the supervisor connectors mount (exact tokens).
+host_files="$host_files cloudflared-supervisor.sh cloudflared.webhook "
 host_files="$host_files docker-user.rules.bak docker-user.rules docker-user-firewall.service "
 # Docker inspect template fields used by test_traefik_dynamic.sh.
 host_files="$host_files NetworkSettings.Networks State.Health.Status "
@@ -108,6 +117,7 @@ hostname_ok() {
   local t="$1" last="${1##*.}"
   [[ "$last" =~ ^[A-Za-z]+$ ]] || return 0
   [ "$t" = "$host_registry" ] && return 0
+  [ "$t" = "$host_registry2" ] && return 0
   [ "$t" = "$host_label" ] && return 0
   [ "$t" = "$host_fake" ] && return 0
   [ "$t" = "$host_access" ] && return 0
@@ -138,6 +148,77 @@ r() { REASONS+=("$*"); }
 
 contains_word() { [[ " $2 " == *" $1 "* ]]; }
 
+# dur_secs <Ns|Nm>: seconds, or "bad" for any other form.
+dur_secs() {
+  if [[ "$1" =~ ^([0-9]+)s$ ]]; then echo "$((10#${BASH_REMATCH[1]}))"
+  elif [[ "$1" =~ ^([0-9]+)m$ ]]; then echo "$((10#${BASH_REMATCH[1]} * 60))"
+  else echo bad; fi
+}
+
+# readme_checks <readme>: the fenced-command scan and the content assertions over the ingress README.
+# Scanned: fenced lines that, after optional leading whitespace and an optional "sudo ", begin with
+# "docker compose" or "make host-ingress". Prose outside fences is never scanned (a warning may name the words).
+readme_checks() {
+  local rd="$1" fences="$T_TMP/readme-fences" ln txt tok verb found s line_up line_stop sect
+  if [ ! -f "$rd" ]; then r "README scan: README.md is missing"; return; fi
+  awk '
+    /^#+ / { sec = $0; sub(/^#+ +/, "", sec) }
+    /^[[:space:]]*```/ { fence = !fence; next }
+    fence { printf "%s\t%d\t%s\n", sec, NR, $0 }
+  ' "$rd" > "$fences"
+  local -a toks
+  while IFS=$'\t' read -r _ ln txt; do
+    txt="${txt#"${txt%%[![:space:]]*}"}"
+    txt="${txt#sudo }"
+    # (d) nothing writes the host compose by hand
+    if [[ "$txt" == *"/opt/platform/ingress/compose.yaml"* && "$txt" != "docker compose "* ]]; then
+      r "README content: line $ln writes the host compose by hand: $txt"
+    fi
+    case "$txt" in
+      "docker compose"* | "make host-ingress"* | "docker rm"*) ;;
+      *) continue ;;
+    esac
+    read -ra toks <<<"$txt"
+    verb=""
+    found=0
+    for tok in "${toks[@]}"; do
+      case "$tok" in
+        --force-recreate) r "README scan: line $ln: --force-recreate in a fence: $txt" ;;
+        restart) r "README scan: line $ln: restart in a fence: $txt" ;;
+        down) r "README scan: line $ln: down in a fence: $txt" ;;
+        rm) r "README content: line $ln: a fenced line removes a container (rm): $txt" ;;
+      esac
+    done
+    [[ "$txt" == "docker compose"* ]] || continue
+    for tok in "${toks[@]}"; do
+      if [ -z "$verb" ]; then
+        case "$tok" in up | start | stop) verb="$tok" ;; esac
+        continue
+      fi
+      [[ "$tok" == -* ]] && continue
+      if contains_word "$tok" "$services" || [[ "$tok" =~ ^\<[A-Za-z_-]+\>$ ]]; then found=1; fi
+      break
+    done
+    if [ -n "$verb" ] && [ "$found" = 0 ]; then r "README scan: line $ln: $verb without a service name: $txt"; fi
+  done < "$fences"
+
+  # (a) the readiness-gate phrase in the first-cutover, pin-bump and token-rotation sections
+  for s in "First cutover" "Pin bump" "Rotating the tunnel token"; do
+    sect="$(awk -v h="$s" '/^#/ { on = (index($0, h) > 0 && $0 ~ /^#+ /) ; if (on) next } on' "$rd")"
+    grep -qF 'readiness gate' <<<"$sect" || r "README content: the '$s' section lacks the readiness gate phrase"
+  done
+  # (b) rollback order: up -d cloudflared before stop cloudflared-blue
+  line_up="$(awk -F '\t' '$3 ~ / up -d cloudflared$/ { print $2; exit }' "$fences")"
+  line_stop="$(awk -F '\t' '$3 ~ / stop cloudflared-blue$/ { print $2; exit }' "$fences")"
+  if [ -z "$line_up" ] || [ -z "$line_stop" ] || [ "$line_up" -ge "$line_stop" ]; then
+    r "README content: rollback order must be up -d cloudflared before stop cloudflared-blue"
+  fi
+  # (e) the rotation fence never names the legacy service as a whole word
+  if awk -F '\t' '$1 == "Rotating the tunnel token" { print $3 }' "$fences" | grep -qE '(^|[^A-Za-z0-9_-])cloudflared($|[^A-Za-z0-9_-])'; then
+    r "README content: the token-rotation fence names cloudflared (a rotation never touches the legacy service)"
+  fi
+}
+
 # run_checks <stack-dir> <extra-scan-file>: fill REASONS (empty means the stack passes).
 run_checks() {
   local dir="$1" extra="$2" cf df s k v i got got_nets want_nets
@@ -156,7 +237,10 @@ run_checks() {
   for s in $services; do
     contains_word "$s" "$got" || continue
     v="$(ys_get "$cf" "services/$s/image")"
-    if ! [[ "$v" =~ ^[a-z0-9.-]+/[a-z0-9._/-]+:v?[0-9]+\.[0-9]+(\.[0-9]+)?@sha256:[0-9a-f]{64}$ ]]; then
+    if contains_word "$s" "$supervisors"; then
+      [[ "$v" =~ ^ghcr\.io/gpropersi/cloudflared-supervisor:[0-9]+@sha256:[0-9a-f]{64}$ ]] \
+        || r "$s: image '$v' must be ghcr.io/gpropersi/cloudflared-supervisor:<run id>@sha256:<digest> (floating or unpinned)"
+    elif ! [[ "$v" =~ ^[a-z0-9.-]+/[a-z0-9._/-]+:v?[0-9]+\.[0-9]+(\.[0-9]+)?@sha256:[0-9a-f]{64}$ ]]; then
       r "$s: image '$v' is not fully qualified with an exact tag and a sha256 digest (floating or unpinned)"
     fi
     for k in ports privileged network_mode cap_add; do
@@ -181,7 +265,9 @@ run_checks() {
       r "$s: an inline token (environment value or command argument)"
     fi
   done
-  ys_has "$cf" services/cloudflared/environment/TUNNEL_TOKEN && r "cloudflared: an inline token (TUNNEL_TOKEN must come from the token file)"
+  for s in $connectors; do
+    ys_has "$cf" "services/$s/environment/TUNNEL_TOKEN" && r "$s: an inline token (TUNNEL_TOKEN must come from the token file)"
+  done
 
   # -- networks
   [ "$(ys_get "$cf" networks/platform/external)" = true ] || r "network platform must be external: true"
@@ -191,14 +277,61 @@ run_checks() {
   done
 
   # -- cloudflared
-  v="$(ys_get "$cf" services/cloudflared/user)"
-  if ! [[ "$v" =~ ^[1-9][0-9]*:[0-9]+$ ]]; then r "cloudflared user '$v' must be a fixed non-root uid:gid"; fi
-  ys_list "$cf" services/cloudflared/group_add | grep -qE '^[0-9]+$' || r "cloudflared group_add must hold the token group's numeric gid"
-  [ -n "$(ys_get "$cf" services/cloudflared/environment/TUNNEL_TOKEN_FILE)" ] || r "cloudflared must read its token from TUNNEL_TOKEN_FILE"
+  # shared token rules, all three connectors
+  for s in $connectors; do
+    v="$(ys_get "$cf" "services/$s/user")"
+    if ! [[ "$v" =~ ^[1-9][0-9]*:[0-9]+$ ]]; then r "$s user '$v' must be a fixed non-root uid:gid"; fi
+    ys_list "$cf" "services/$s/group_add" | grep -qE '^[0-9]+$' || r "$s group_add must hold the token group's numeric gid"
+    [ -n "$(ys_get "$cf" "services/$s/environment/TUNNEL_TOKEN_FILE")" ] || r "$s must read its token from TUNNEL_TOKEN_FILE"
+    ys_list "$cf" "services/$s/volumes" | grep -qE '^/etc/platform/cloudflared\.token:[^:]+:ro$' || r "$s must mount the host token file read-only"
+  done
+  # legacy-only rules
   ys_list "$cf" services/cloudflared/command | grep -qxF -- --no-autoupdate || r "cloudflared must run with --no-autoupdate"
   [[ "$(ys_get "$cf" services/cloudflared/environment/TUNNEL_METRICS)" == 127.0.0.1:* ]] || r "cloudflared metrics address must be set in its environment on loopback"
-  ys_list "$cf" services/cloudflared/volumes | grep -qE '^/etc/platform/cloudflared\.token:[^:]+:ro$' || r "cloudflared must mount the host token file read-only"
   ys_list "$cf" services/cloudflared/healthcheck/test | grep -qxF ready || r "cloudflared healthcheck must be the ready check"
+
+  # -- supervisor connectors (blue and green)
+  local sup colour want_a want_b hv wh_c vols sv ivl hostp all_addrs="" state_hosts=""
+  for sup in $supervisors; do
+    contains_word "$sup" "$got" || continue
+    colour="${sup#cloudflared-}"
+    if [ "$colour" = blue ]; then want_a=127.0.0.1:20251; want_b=127.0.0.1:20252; else want_a=127.0.0.1:20253; want_b=127.0.0.1:20254; fi
+    ys_has "$cf" "services/$sup/command" && r "$sup: command is not allowed (the image entrypoint takes supervisor arguments)"
+    ys_has "$cf" "services/$sup/environment/TUNNEL_METRICS" && r "$sup: TUNNEL_METRICS is not allowed (the supervisor sets it)"
+    ys_has "$cf" "services/$sup/environment/CF_DRILL" && r "$sup: CF_DRILL is not allowed"
+    ys_has "$cf" "services/$sup/environment/CF_STATE_DIR" && r "$sup: CF_STATE_DIR is not allowed (use the image default)"
+    [ "$(ys_get "$cf" "services/$sup/user")" = "65532:65532" ] || r "$sup: user must be exactly 65532:65532"
+    v="$(ys_get "$cf" "services/$sup/environment/CF_METRICS_A")"
+    [ "$v" = "$want_a" ] || r "$sup: CF_METRICS_A is '$v', want '$want_a'"
+    v="$(ys_get "$cf" "services/$sup/environment/CF_METRICS_B")"
+    [ "$v" = "$want_b" ] || r "$sup: CF_METRICS_B is '$v', want '$want_b'"
+    all_addrs="$all_addrs$(ys_get "$cf" "services/$sup/environment/CF_METRICS_A")"$'\n'"$(ys_get "$cf" "services/$sup/environment/CF_METRICS_B")"$'\n'
+    # webhook: a read-only file mount outside the state dir, named by CF_WEBHOOK_FILE
+    vols="$(ys_list "$cf" "services/$sup/volumes")"
+    hv="$(ys_get "$cf" "services/$sup/environment/CF_WEBHOOK_FILE")"
+    wh_c="$(grep -E '^/etc/platform/cloudflared\.webhook:[^:]+:ro$' <<<"$vols" | head -n 1 | cut -d: -f2)"
+    if [ -z "$hv" ] || [ "$hv" != "$wh_c" ] || [[ "$hv" == /var/lib/cloudflared-supervisor* ]]; then
+      r "$sup: CF_WEBHOOK_FILE must name the container side of a read-only webhook mount outside the state dir (webhook mount)"
+    fi
+    # state: own host dir, read-write
+    grep -qxF "/var/lib/cloudflared-supervisor-$colour:/var/lib/cloudflared-supervisor" <<<"$vols" \
+      || r "$sup: state volume must be exactly /var/lib/cloudflared-supervisor-$colour:/var/lib/cloudflared-supervisor (read-write)"
+    hostp="$(grep -E ':/var/lib/cloudflared-supervisor(:|$)' <<<"$vols" | head -n 1 | cut -d: -f1)"
+    state_hosts="$state_hosts$hostp"$'\n'
+    [ "$(ys_get "$cf" "services/$sup/mem_limit")" = 192m ] || r "$sup: mem_limit must be exactly 192m"
+    sv="$(dur_secs "$(ys_get "$cf" "services/$sup/stop_grace_period")")"
+    if [ "$sv" = bad ] || [ "$sv" -le 30 ]; then r "$sup: stop_grace_period must be Ns or Nm and above 30 seconds"; fi
+    ys_list "$cf" "services/$sup/healthcheck/test" | grep -qxF -- --health || r "$sup: healthcheck must run --health"
+    ivl="$(dur_secs "$(ys_get "$cf" "services/$sup/healthcheck/interval")")"
+    if [ "$ivl" = bad ] || [ "$ivl" -lt 60 ]; then r "$sup: healthcheck interval must be Ns or Nm and at least 60 seconds"; fi
+    ys_list "$cf" "services/$sup/tmpfs" | grep -qxF /tmp || r "$sup: tmpfs must contain /tmp"
+  done
+  if [ -n "$all_addrs" ] && [ -n "$(sort <<<"${all_addrs%$'\n'}" | uniq -d)" ]; then
+    r "supervisor metrics addresses are not pairwise distinct"
+  fi
+  if [ -n "$state_hosts" ] && [ -n "$(sort <<<"${state_hosts%$'\n'}" | uniq -d)" ]; then
+    r "supervisor state directories must be distinct per colour"
+  fi
 
   # -- no Docker access anywhere: no Docker provider key, no DOCKER_GID plumbing, no socket-proxy service
   grep -qF 'TRAEFIK_PROVIDERS_DOCKER' "$cf" && r "a TRAEFIK_PROVIDERS_DOCKER_* key is present (routing comes only from files)"
@@ -319,6 +452,9 @@ run_checks() {
   grep -qiE 'src=|href=|url\(|@import' "$dir/down-page/index.html" 2>/dev/null && r "down-page/index.html must not load external assets"
   grep -qE '^PLATFORM_DOMAIN=' "$dir/env.example" || r "env.example must carry the PLATFORM_DOMAIN placeholder"
 
+  # -- README: fenced command scan and content assertions (read from the directory under test)
+  readme_checks "$dir/README.md"
+
   # -- no-secrets scan over everything under the ingress dir plus the host README
   local f shape
   while IFS= read -r -d '' f; do
@@ -374,13 +510,18 @@ mutate() {
     table) target="$dir/jobs-paths.table" ;;
     env) target="$dir/env.example" ;;
     page) target="$dir/down-page/index.html" ;;
+    readme) target="$dir/README.md" ;;
   esac
   cp "$target" "$T_TMP/before-mut"
   M_SVC=; M_IND=2
   [ "$svc" = - ] || M_SVC="$svc"
   [ "$ind" = - ] || M_IND="$ind"
   export M_SVC M_IND
-  m_edit "$target" "$mode" "$re" "$text"
+  if [ "$mode" = sed ]; then
+    sed -E -i -e "$re" "$target" # the regex argument is the whole sed script
+  else
+    m_edit "$target" "$mode" "$re" "$text"
+  fi
   unset M_SVC M_IND
   if cmp -s "$T_TMP/before-mut" "$target"; then
     _fail "mutation '$label' did not change the file" "regex: $re"
@@ -464,7 +605,40 @@ mutate "DOCKER_GID plumbing returns" "DOCKER_GID plumbing" compose cloudflared 2
 mutate "ingress-proxy network returns" "unexpected network set" compose - - after '^    external: true' '  ingress-proxy:\n    internal: true'
 mutate "compose leaves the YAML subset" "outside the YAML subset" compose cloudflared 2 replace '^    cap_drop:' '    cap_drop: [ALL]'
 
-for svc in cloudflared down-page traefik; do
+for svc in $connectors; do
+  [ "$svc" != cloudflared ] || continue
+  # shared rules, repeated for the supervisor connectors (the legacy header regex does not match these names)
+  mutate "$svc published port" "ports is not allowed" compose "$svc" 2 after "^  $svc:" '    ports:\n      - "80:80"'
+  mutate "$svc tag without digest" "floating or unpinned" compose "$svc" 2 replace '^    image:' "    image: ${sup_ref%@*}"
+  mutate "$svc platform.app label" "platform.app label" compose "$svc" 2 after "^  $svc:" '    labels:\n      platform.app: cloudflared'
+  mutate "$svc inline token" "inline token" compose "$svc" 2 after '^    environment:' '      TUNNEL_TOKEN: placeholder'
+  mutate "$svc root user" "non-root" compose "$svc" 2 replace '^    user:' '    user: "0:0"'
+  mutate "$svc without group_add" "group_add" compose "$svc" 2 dropkey '^    group_add:'
+  mutate "$svc token file not read-only" "read-only" compose "$svc" 2 replace '^      - /etc/platform/cloudflared.token' '      - /etc/platform/cloudflared.token:/run/cloudflared/token'
+  mutate "$svc leaves the YAML subset" "outside the YAML subset" compose "$svc" 2 replace '^    cap_drop:' '    cap_drop: [ALL]'
+  mutate "$svc docker socket" "the Docker socket is mounted" compose "$svc" 2 after '^    volumes:' '      - /var/run/docker.sock:/var/run/docker.sock:ro'
+  # supervisor-specific rules
+  mutate "$svc latest tag" "floating or unpinned" compose "$svc" 2 replace '^    image:' "    image: ${sup_ref/:45649683873@/:latest@}"
+  mutate "$svc another ghcr owner" "floating or unpinned" compose "$svc" 2 replace '^    image:' "    image: ${sup_ref/gpropersi/otherowner}"
+  mutate "$svc command added" "command is not allowed" compose "$svc" 2 after '^    image:' '    command:\n      - tunnel'
+  mutate "$svc TUNNEL_METRICS added" "TUNNEL_METRICS is not allowed" compose "$svc" 2 after '^    environment:' '      TUNNEL_METRICS: 127.0.0.1:20241'
+  mutate "$svc state mount read-only" "state volume must be" compose "$svc" 2 replace '^      - /var/lib/cloudflared-supervisor-' "      - /var/lib/cloudflared-supervisor-${svc#cloudflared-}:/var/lib/cloudflared-supervisor:ro"
+  mutate "$svc webhook mount dropped" "webhook mount" compose "$svc" 2 delete '^      - /etc/platform/cloudflared.webhook'
+  mutate "$svc webhook mount not read-only" "webhook mount" compose "$svc" 2 replace '^      - /etc/platform/cloudflared.webhook' '      - /etc/platform/cloudflared.webhook:/run/secrets/cloudflared-webhook'
+  mutate "$svc mem_limit 128m" "mem_limit must be exactly 192m" compose "$svc" 2 replace '^    mem_limit:' '    mem_limit: 128m'
+  mutate "$svc stop_grace_period 20s" "stop_grace_period" compose "$svc" 2 replace '^    stop_grace_period:' '    stop_grace_period: 20s'
+  mutate "$svc healthcheck interval 30s" "healthcheck interval" compose "$svc" 2 replace '^      interval:' '      interval: 30s'
+  mutate "$svc tmpfs dropped" "tmpfs must contain /tmp" compose "$svc" 2 dropkey '^    tmpfs:'
+  mutate "$svc healthcheck without --health" "healthcheck must run --health" compose "$svc" 2 delete '^        - --health'
+  mutate "$svc CF_DRILL added" "CF_DRILL is not allowed" compose "$svc" 2 after '^    environment:' '      CF_DRILL: "1"'
+  mutate "$svc CF_STATE_DIR added" "CF_STATE_DIR is not allowed" compose "$svc" 2 after '^    environment:' '      CF_STATE_DIR: /tmp'
+  mutate "$svc other uid:gid" "user must be exactly 65532:65532" compose "$svc" 2 replace '^    user:' '    user: "1000:1000"'
+done
+mutate "green on blue's metrics pair" "CF_METRICS_A is" compose cloudflared-green 2 replace '^      CF_METRICS_A:' '      CF_METRICS_A: 127.0.0.1:20251'
+mutate "both colours on one state dir" "state directories must be distinct" compose cloudflared-green 2 replace '^      - /var/lib/cloudflared-supervisor-' '      - /var/lib/cloudflared-supervisor-blue:/var/lib/cloudflared-supervisor'
+mutate "blue metrics pair swapped" "CF_METRICS_A is" compose cloudflared-blue 2 replace '^      CF_METRICS_A:' '      CF_METRICS_A: 127.0.0.1:20252'
+
+for svc in $connectors down-page traefik; do
   mutate "$svc without cap_drop" "$svc: cap_drop must contain ALL" compose "$svc" 2 dropkey '^    cap_drop:'
   mutate "$svc without mem_limit" "$svc: mem_limit must be set" compose "$svc" 2 delete '^    mem_limit:'
   mutate "$svc without restart policy" "$svc: restart must be unless-stopped" compose "$svc" 2 delete '^    restart:'
@@ -511,6 +685,27 @@ mutate "recorded variant code wrong" "must be recorded as 503" dynamic - - repla
 mutate "recorded variant missing" "lacks upper" dynamic - - delete '^# upper \|'
 mutate "table lacks a lookalike row" "lacks the required row" table - - delete '^nomatch /_jobsx'
 mutate "page loads an external asset" "external assets" page - - after '^<title>' '<link rel="stylesheet" href="x">'
+
+# ---- mutation cases: the README fenced-command scan and content assertions ----
+
+dc='docker compose -p platform-ingress -f /opt/platform/ingress/compose.yaml --env-file /etc/platform/ingress.env'
+# Each plants a fenced line after the canary command (the "exec <active>" line, inside a fence).
+plant_after_exec() { printf '/exec <active>/s|$|\\n%s|' "$1"; }
+mutate "README bare up -d reason" "up without a service name" readme - - sed "$(plant_after_exec "sudo $dc up -d")"
+mutate "README fenced restart of the legacy service (indented)" "restart in a fence" readme - - sed "$(plant_after_exec "  $dc restart cloudflared")"
+mutate "README fenced --force-recreate" "--force-recreate in a fence" readme - - sed "$(plant_after_exec "sudo $dc up -d --force-recreate cloudflared-blue")"
+mutate "README fenced down" "down in a fence" readme - - sed "$(plant_after_exec "sudo $dc down")"
+mutate "README fenced start with no service" "start without a service name" readme - - sed "$(plant_after_exec "sudo $dc start")"
+mutate "README fenced stop with no service" "stop without a service name" readme - - sed "$(plant_after_exec "sudo $dc stop")"
+mutate "README fenced rm of a connector" "removes a container" readme - - sed "$(plant_after_exec "sudo $dc rm -f cloudflared")"
+mutate "README fenced docker rm of a connector" "removes a container" readme - - sed "$(plant_after_exec 'sudo docker rm cloudflared')"
+mutate "README writes the host compose by hand" "writes the host compose by hand" readme - - sed "$(plant_after_exec 'sudo tee /opt/platform/ingress/compose.yaml')"
+mutate "README cutover section loses the readiness gate phrase" "'First cutover' section lacks" readme - - sed '/^### First cutover/,/^### Pin bump/s/readiness gate/ready check/g'
+mutate "README pin-bump section loses the readiness gate phrase" "'Pin bump' section lacks" readme - - sed '/^### Pin bump/,/^### Connector rollback/s/readiness gate/ready check/g'
+mutate "README rotation section loses the readiness gate phrase" "'Rotating the tunnel token' section lacks" readme - - sed '/^## Rotating the tunnel token/,/^## Rollback/s/readiness gate/ready check/g'
+mutate "README rollback drops the up -d cloudflared step" "rollback order" readme - - sed '/ up -d cloudflared$/d'
+mutate "README rollback replaces the legacy start with a ps" "rollback order" readme - - sed 's| up -d cloudflared$| ps cloudflared|'
+mutate "README rotation fence names the legacy service" "token-rotation fence names cloudflared" readme - - sed '/^## Rotating the tunnel token/,/^## Rollback/s|stop <old>$|stop <old> cloudflared|'
 
 # ---- no-secrets scan: one planted value per shape (assembled at run time) ----
 
