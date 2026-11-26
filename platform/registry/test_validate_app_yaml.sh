@@ -390,5 +390,22 @@ run_cmd bash -c "cd '$repo' && '$tracked'"
 expect_rc "a tracked invalid app.yaml fails" 1
 expect_out_has "tracked invalid: reason" "unknown key 'colour'"
 expect_out_has "tracked invalid: names the file" "apps/x/app.yaml: "
+git -C "$repo" rm -q --cached apps/x/app.yaml
+rm -rf "${repo:?}/apps/x"
+
+for n in p1 p2; do
+  mkdir -p "$repo/apps/$n"
+  sed -e "s/^name: .*/name: $n/" "$example" > "$repo/apps/$n/app.yaml"
+  printf 'hostname: shared\n' >> "$repo/apps/$n/app.yaml"
+  git -C "$repo" add "apps/$n/app.yaml"
+done
+run_cmd bash -c "cd '$repo' && '$tracked'"
+expect_rc "two tracked apps sharing a hostname fail" 1
+expect_out_has "hostname clash: reason" "is also claimed by app 'p1' (apps/p1/app.yaml)"
+expect_out_has "hostname clash: names the file" "apps/p2/app.yaml: 'shared'"
+
+mkdir -p "$T_TMP/notgit"
+run_cmd bash -c "cd '$T_TMP/notgit' && GIT_CEILING_DIRECTORIES='$T_TMP' '$tracked'"
+expect_rc "outside a git repo fails closed" 1
 
 t_finish
