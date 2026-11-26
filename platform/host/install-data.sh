@@ -69,8 +69,7 @@ export PATH="$PATH:/usr/sbin:/sbin"
 
 # Fixed, chosen without knowledge of the host's group database. ADMIN_GID must equal the numeric group_add of both
 # services in compose.yaml (the stack test compares them); SECRETS_GID is the app-secrets group named in data/README.md.
-# shellcheck disable=SC2034  # read by the stamp write in the install path
-readonly INSTALLER_STAMP=8680adcbb6469bbb
+readonly INSTALLER_STAMP=b87f5f09bc699680
 readonly ADMIN_GID=64322
 readonly SECRETS_GID=64323
 # JOBS_GID is the job-secrets group (the jobs runner reads <app>/jobs-secret through it, and no DB password).
@@ -84,6 +83,9 @@ readonly PG_CTR_HBA="/etc/postgresql/pg_hba.conf"
 readonly APP_RE='^[a-z][a-z0-9-]{1,30}$'
 ROOT="${INSTALL_DATA_ROOT:-}"
 INSTALL_DIR="${INSTALL_DATA_DIR:-$ROOT/opt/platform/data}"
+# Where this installer records its INSTALLER_STAMP; the dispatcher's `stamps` command reads it back.
+readonly STAMPS_DIR="$ROOT/opt/platform/stamps"
+readonly STAMP_NAME="data"
 VAR_DIR="${INSTALL_DATA_VAR_DIR:-$ROOT/var/lib/platform}"
 SECRETS_DIR="${INSTALL_DATA_SECRETS_ROOT:-$VAR_DIR/secrets}"
 JOB_SECRETS_DIR="${INSTALL_DATA_JOB_SECRETS_ROOT:-$VAR_DIR/job-secrets}"
@@ -1796,6 +1798,11 @@ do_install() {
     if [ -n "$stopped" ] || [ "$COMPOSE_CHANGED" -eq 1 ]; then info "changed: stack started"; else info "already: stack running"; fi
   fi
   wait_healthy
+  # The stamp is the last action: a failed install leaves the previous stamp (or none), so the deploy gate fails closed.
+  # It is placed after the compose up section, so it can never change a recreate decision.
+  printf '%s\n' "$INSTALLER_STAMP" > "$TMP/stamp"
+  ensure_dir "$STAMPS_DIR" 0 0 755
+  place_file "$TMP/stamp" "$STAMPS_DIR/$STAMP_NAME" 644
   info "install-data: done"
 }
 
@@ -2140,6 +2147,12 @@ do_checks() {
   check_payload "notifs-key.sh" "$INSTALL_DIR/notifs-key.sh" payload_notifs_key_sh
   check_meta "connection.env" "$INSTALL_DIR/connection.env" "0:0 644" || true
   check_payload "connection.env" "$INSTALL_DIR/connection.env" connection_env
+  check_meta "stamps directory" "$STAMPS_DIR" "0:0 755" || true
+  if check_meta "installer stamp" "$STAMPS_DIR/$STAMP_NAME" "0:0 644" && [ -f "$STAMPS_DIR/$STAMP_NAME" ] && [ ! -L "$STAMPS_DIR/$STAMP_NAME" ] && printf '%s\n' "$INSTALLER_STAMP" | cmp -s - "$STAMPS_DIR/$STAMP_NAME"; then
+    pass "installer stamp matches this installer"
+  else
+    fail "stamp $STAMPS_DIR/$STAMP_NAME differs from this installer (run install)"
+  fi
 
   run_check "deploy user" chk_deploy_user
   run_check "network $NETWORK" chk_network

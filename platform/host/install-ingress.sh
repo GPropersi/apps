@@ -61,10 +61,12 @@ export PATH="$PATH:/usr/sbin:/sbin"
 
 # The dedicated token group. Fixed, chosen without knowledge of the host's group database; it must equal the numeric
 # group_add of cloudflared in compose.yaml (the test suite compares the two).
-# shellcheck disable=SC2034  # read by the stamp write in the install path
-readonly INSTALLER_STAMP=e0fb784a587149cb
+readonly INSTALLER_STAMP=1bd14a39924dfa34
 readonly TOKEN_GID=64321
 readonly INSTALL_DIR="/opt/platform/ingress"
+# Where this installer records its INSTALLER_STAMP; the dispatcher's `stamps` command reads it back.
+readonly STAMPS_DIR="/opt/platform/stamps"
+readonly STAMP_NAME="ingress"
 readonly ENV_FILE="/etc/platform/ingress.env"
 readonly TOKEN_FILE="/etc/platform/cloudflared.token"
 readonly ACCESS_FILE="/etc/platform/access.env"
@@ -788,6 +790,11 @@ do_install() {
   [ -z "$legacy" ] || die "a socket-proxy container still exists after compose up --remove-orphans: remove it by hand (docker rm -f $legacy)"
   retire_old_network
   wait_healthy
+  # The stamp is the last action: a failed install leaves the previous stamp (or none), so the deploy gate fails closed.
+  # It is placed after the compose up section, so it can never change a recreate decision.
+  printf '%s\n' "$INSTALLER_STAMP" > "$TMP/stamp"
+  place_dir "$ROOT$STAMPS_DIR" 755
+  place_file "$TMP/stamp" "$ROOT$STAMPS_DIR/$STAMP_NAME" 644
   info "install-ingress: done"
 }
 
@@ -918,6 +925,12 @@ do_checks() {
   check_payload "dynamic.yml" "$ROOT$INSTALL_DIR/dynamic/dynamic.yml" payload_dynamic_yml
   check_owned "down-page index.html" "$ROOT$INSTALL_DIR/down-page/index.html" 644 || true
   check_payload "down-page index.html" "$ROOT$INSTALL_DIR/down-page/index.html" payload_index_html
+  check_owned "stamps directory" "$ROOT$STAMPS_DIR" 755 || true
+  if check_owned "installer stamp" "$ROOT$STAMPS_DIR/$STAMP_NAME" 644 && [ -f "$ROOT$STAMPS_DIR/$STAMP_NAME" ] && [ ! -L "$ROOT$STAMPS_DIR/$STAMP_NAME" ] && printf '%s\n' "$INSTALLER_STAMP" | cmp -s - "$ROOT$STAMPS_DIR/$STAMP_NAME"; then
+    pass "installer stamp matches this installer"
+  else
+    fail "stamp $ROOT$STAMPS_DIR/$STAMP_NAME differs from this installer (run install)"
+  fi
 
   run_check "token file" chk_token_file
   run_check "ingress env file" chk_env_file
