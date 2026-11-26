@@ -42,6 +42,8 @@ export LC_ALL=C
 # sshd, useradd and friends live in /usr/sbin, which a non-root ssh user's PATH lacks
 export PATH="$PATH:/usr/sbin:/sbin"
 
+# shellcheck disable=SC2034  # read by the stamp write in the install path
+readonly INSTALLER_STAMP=c01b480c7da49213
 readonly DEPLOY_USER="deploy"
 readonly DISPATCHER_PATH="/usr/local/bin/platform"
 readonly WRAPPER_PATH="/usr/local/bin/platform-login"

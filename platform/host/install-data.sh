@@ -69,6 +69,8 @@ export PATH="$PATH:/usr/sbin:/sbin"
 
 # Fixed, chosen without knowledge of the host's group database. ADMIN_GID must equal the numeric group_add of both
 # services in compose.yaml (the stack test compares them); SECRETS_GID is the app-secrets group named in data/README.md.
+# shellcheck disable=SC2034  # read by the stamp write in the install path
+readonly INSTALLER_STAMP=8680adcbb6469bbb
 readonly ADMIN_GID=64322
 readonly SECRETS_GID=64323
 # JOBS_GID is the job-secrets group (the jobs runner reads <app>/jobs-secret through it, and no DB password).

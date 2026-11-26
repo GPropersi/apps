@@ -61,6 +61,8 @@ export PATH="$PATH:/usr/sbin:/sbin"
 
 # The dedicated token group. Fixed, chosen without knowledge of the host's group database; it must equal the numeric
 # group_add of cloudflared in compose.yaml (the test suite compares the two).
+# shellcheck disable=SC2034  # read by the stamp write in the install path
+readonly INSTALLER_STAMP=e0fb784a587149cb
 readonly TOKEN_GID=64321
 readonly INSTALL_DIR="/opt/platform/ingress"
 readonly ENV_FILE="/etc/platform/ingress.env"

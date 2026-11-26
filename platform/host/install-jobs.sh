@@ -60,6 +60,8 @@ export LC_ALL=C
 # getent and friends live in /usr/sbin, which a non-root ssh user's PATH lacks
 export PATH="$PATH:/usr/sbin:/sbin"
 
+# shellcheck disable=SC2034  # read by the stamp write in the install path
+readonly INSTALLER_STAMP=bb59b2a221818759
 readonly JOBS_GID=64324
 readonly RUNNER_UID=65532
 readonly PROJECT="platform-jobs"

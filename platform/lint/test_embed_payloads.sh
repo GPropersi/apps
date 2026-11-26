@@ -180,6 +180,77 @@ expect_out_has "marker-in-source message" "payload marker"
 new_root; c_dup_name; chk
 expect_out_has "duplicate function message" "payload_one_sh"
 
+# --- installer stamps ---
+# want_stamp <file>: independent computation: first 16 hex of sha256 over the file with the stamp line emptied.
+want_stamp() { sed -E 's/^readonly INSTALLER_STAMP=.*$/readonly INSTALLER_STAMP=/' "$1" | sha256sum | cut -c1-16; }
+stamp_of() { sed -n 's/^readonly INSTALLER_STAMP=//p' "$1"; }
+add_stamp() { sed -i "2i readonly INSTALLER_STAMP=$1" "$R/platform/host/install-alpha.sh"; }
+alpha() { echo "$R/platform/host/install-alpha.sh"; }
+
+new_root; add_stamp ""
+chk
+expect_rc "an empty stamp is drift" 1
+expect_out_has "empty stamp drift is named" "DRIFT platform/host/install-alpha.sh: stamp"
+gen
+expect_rc "regenerate fills an empty stamp" 0
+expect_eq "the filled stamp matches an independent sha256" "$(stamp_of "$(alpha)")" "$(want_stamp "$(alpha)")"
+if [[ "$(stamp_of "$(alpha)")" =~ ^[0-9a-f]{16}$ ]]; then _pass; else _fail "the stamp is 16 lowercase hex" "$(stamp_of "$(alpha)")"; fi
+chk
+expect_rc "check passes after regenerate" 0
+expect_eq "the stamp line count stays one" "$(grep -c '^readonly INSTALLER_STAMP=' "$(alpha)")" "1"
+snap="$(cat "$(alpha)")"
+gen
+expect_out_lacks "stamp regenerate is idempotent" "updated"
+expect_eq "stamp regenerate leaves bytes identical" "$(cat "$(alpha)")" "$snap"
+expect_eq "an installer without the line is untouched" "$(grep -c INSTALLER_STAMP "$R/platform/host/install-beta.sh")" "0"
+
+# a wrong stamp is drift; --check does not write
+sed -i 's/^readonly INSTALLER_STAMP=.*/readonly INSTALLER_STAMP=0123456789abcdef/' "$(alpha)"
+snap="$(cat "$(alpha)")"
+chk
+expect_rc "a wrong stamp is drift" 1
+expect_out_has "wrong stamp drift is named" "DRIFT platform/host/install-alpha.sh: stamp"
+expect_eq "--check leaves a wrong stamp in place" "$(cat "$(alpha)")" "$snap"
+gen
+expect_eq "regenerate replaces a wrong stamp" "$(stamp_of "$(alpha)")" "$(want_stamp "$(alpha)")"
+
+# a payload change also changes the stamp; one regenerate fixes both
+old_stamp="$(stamp_of "$(alpha)")"
+echo '# changed' >> "$R/platform/host/two.sh"
+chk
+expect_rc "a payload change is drift" 1
+expect_out_has "payload drift is named" "DRIFT platform/host/install-alpha.sh: platform/host/two.sh"
+expect_out_has "stamp drift is named beside it" "DRIFT platform/host/install-alpha.sh: stamp"
+gen
+chk
+expect_rc "one regenerate fixes payload and stamp" 0
+if [ "$(stamp_of "$(alpha)")" != "$old_stamp" ]; then _pass; else _fail "the stamp changed with the payload"; fi
+
+# a hand edit to any byte of a stamped installer is stamp drift
+sed -i 's/^echo after$/echo AFTER/' "$(alpha)"
+chk
+expect_rc "an edited stamped installer is drift" 1
+expect_out_has "edited installer stamp drift" "DRIFT platform/host/install-alpha.sh: stamp"
+
+c_stamp_two() { add_stamp ""; add_stamp ""; }
+c_stamp_malformed() { add_stamp "ABCDEF0123456789"; }
+c_stamp_short() { add_stamp "abc"; }
+c_stamp_outside_ci() { add_stamp ""; mkdir -p "$R/platform/ci"; printf 'readonly INSTALLER_STAMP=\n' > "$R/platform/ci/other.sh"; }
+c_stamp_outside_host() { add_stamp ""; printf 'readonly INSTALLER_STAMP=0123456789abcdef\n' >> "$R/platform/host/other.sh"; }
+bad_case "two stamp lines" c_stamp_two
+bad_case "uppercase hex stamp" c_stamp_malformed
+bad_case "short stamp" c_stamp_short
+bad_case "stamp line in a platform/ci file" c_stamp_outside_ci
+bad_case "stamp line in a non-installer host file" c_stamp_outside_host
+
+# test_*.sh files and the tool itself may carry stamp text
+new_root; add_stamp ""
+mkdir -p "$R/platform/ci" "$R/platform/lint"
+printf 'readonly INSTALLER_STAMP=\n' > "$R/platform/ci/test_fixture.sh"
+printf 'readonly INSTALLER_STAMP=\n' > "$R/platform/lint/embed-payloads.sh"
+gen
+expect_rc "stamp text in test_*.sh and embed-payloads.sh is not refused" 0
+
 # no installer at all is an error, not a pass
 new_root
 rm "$R"/platform/host/install-*.sh
@@ -229,9 +300,15 @@ if [[ "$out" =~ ([0-9]+)\ payload\(s\) ]] && [ "${BASH_REMATCH[1]}" -ge 2 ]; the
   cp "$repo_root/platform/backup/platform-backup.service" "$repo_root/platform/backup/platform-backup.timer" "$real/platform/backup/"
   # the jobs installer's payload sources (the whole runner tree: Go sources, go.mod/go.sum, Dockerfiles, compose.yaml)
   cp -R "$repo_root/platform/jobs" "$real/platform/jobs"
+  for inst in deploy-user data ingress jobs; do
+    expect_eq "install-$inst.sh carries exactly one stamp line" "$(grep -c '^readonly INSTALLER_STAMP=' "$real/platform/host/install-$inst.sh")" "1"
+    if [[ "$(stamp_of "$real/platform/host/install-$inst.sh")" =~ ^[0-9a-f]{16}$ ]]; then _pass; else _fail "install-$inst.sh has a 16-hex stamp"; fi
+    expect_eq "install-$inst.sh stamp matches an independent sha256" "$(stamp_of "$real/platform/host/install-$inst.sh")" "$(want_stamp "$real/platform/host/install-$inst.sh")"
+  done
   echo '# drift' >> "$real/platform/host/platform.sh"
   run_cmd "$tool" --check --root "$real"
   expect_rc "a drifted dispatcher source fails the check" 1
+  expect_out_has "a payload drift also reports the stamp drift" "DRIFT platform/host/install-deploy-user.sh: stamp"
   expect_out_has "drift names the real installer and source" "DRIFT platform/host/install-deploy-user.sh: platform/host/platform.sh"
   run_cmd "$tool" --root "$real"
   expect_rc "regenerating the drifted copy" 0
