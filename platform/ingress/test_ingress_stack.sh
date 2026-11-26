@@ -155,6 +155,70 @@ dur_secs() {
   else echo bad; fi
 }
 
+# readme_checks <readme>: the fenced-command scan and the content assertions over the ingress README.
+# Scanned: fenced lines that, after optional leading whitespace and an optional "sudo ", begin with
+# "docker compose" or "make host-ingress". Prose outside fences is never scanned (a warning may name the words).
+readme_checks() {
+  local rd="$1" fences="$T_TMP/readme-fences" ln txt tok verb found s line_up line_stop sect
+  if [ ! -f "$rd" ]; then r "README scan: README.md is missing"; return; fi
+  awk '
+    /^#+ / { sec = $0; sub(/^#+ +/, "", sec) }
+    /^[[:space:]]*```/ { fence = !fence; next }
+    fence { printf "%s\t%d\t%s\n", sec, NR, $0 }
+  ' "$rd" > "$fences"
+  local -a toks
+  while IFS=$'\t' read -r _ ln txt; do
+    txt="${txt#"${txt%%[![:space:]]*}"}"
+    txt="${txt#sudo }"
+    # (d) nothing writes the host compose by hand
+    if [[ "$txt" == *"/opt/platform/ingress/compose.yaml"* && "$txt" != "docker compose "* ]]; then
+      r "README content: line $ln writes the host compose by hand: $txt"
+    fi
+    case "$txt" in
+      "docker compose"* | "make host-ingress"* | "docker rm"*) ;;
+      *) continue ;;
+    esac
+    read -ra toks <<<"$txt"
+    verb=""
+    found=0
+    for tok in "${toks[@]}"; do
+      case "$tok" in
+        --force-recreate) r "README scan: line $ln: --force-recreate in a fence: $txt" ;;
+        restart) r "README scan: line $ln: restart in a fence: $txt" ;;
+        down) r "README scan: line $ln: down in a fence: $txt" ;;
+        rm) r "README content: line $ln: a fenced line removes a container (rm): $txt" ;;
+      esac
+    done
+    [[ "$txt" == "docker compose"* ]] || continue
+    for tok in "${toks[@]}"; do
+      if [ -z "$verb" ]; then
+        case "$tok" in up | start | stop) verb="$tok" ;; esac
+        continue
+      fi
+      [[ "$tok" == -* ]] && continue
+      if contains_word "$tok" "$services" || [[ "$tok" =~ ^\<[A-Za-z_-]+\>$ ]]; then found=1; fi
+      break
+    done
+    if [ -n "$verb" ] && [ "$found" = 0 ]; then r "README scan: line $ln: $verb without a service name: $txt"; fi
+  done < "$fences"
+
+  # (a) the readiness-gate phrase in the first-cutover, pin-bump and token-rotation sections
+  for s in "First cutover" "Pin bump" "Rotating the tunnel token"; do
+    sect="$(awk -v h="$s" '/^#/ { on = (index($0, h) > 0 && $0 ~ /^#+ /) ; if (on) next } on' "$rd")"
+    grep -qF 'readiness gate' <<<"$sect" || r "README content: the '$s' section lacks the readiness gate phrase"
+  done
+  # (b) rollback order: up -d cloudflared before stop cloudflared-blue
+  line_up="$(awk -F '\t' '$3 ~ / up -d cloudflared$/ { print $2; exit }' "$fences")"
+  line_stop="$(awk -F '\t' '$3 ~ / stop cloudflared-blue$/ { print $2; exit }' "$fences")"
+  if [ -z "$line_up" ] || [ -z "$line_stop" ] || [ "$line_up" -ge "$line_stop" ]; then
+    r "README content: rollback order must be up -d cloudflared before stop cloudflared-blue"
+  fi
+  # (e) the rotation fence never names the legacy service as a whole word
+  if awk -F '\t' '$1 == "Rotating the tunnel token" { print $3 }' "$fences" | grep -qE '(^|[^A-Za-z0-9_-])cloudflared($|[^A-Za-z0-9_-])'; then
+    r "README content: the token-rotation fence names cloudflared (a rotation never touches the legacy service)"
+  fi
+}
+
 # run_checks <stack-dir> <extra-scan-file>: fill REASONS (empty means the stack passes).
 run_checks() {
   local dir="$1" extra="$2" cf df s k v i got got_nets want_nets
@@ -388,6 +452,9 @@ run_checks() {
   grep -qiE 'src=|href=|url\(|@import' "$dir/down-page/index.html" 2>/dev/null && r "down-page/index.html must not load external assets"
   grep -qE '^PLATFORM_DOMAIN=' "$dir/env.example" || r "env.example must carry the PLATFORM_DOMAIN placeholder"
 
+  # -- README: fenced command scan and content assertions (read from the directory under test)
+  readme_checks "$dir/README.md"
+
   # -- no-secrets scan over everything under the ingress dir plus the host README
   local f shape
   while IFS= read -r -d '' f; do
@@ -443,13 +510,18 @@ mutate() {
     table) target="$dir/jobs-paths.table" ;;
     env) target="$dir/env.example" ;;
     page) target="$dir/down-page/index.html" ;;
+    readme) target="$dir/README.md" ;;
   esac
   cp "$target" "$T_TMP/before-mut"
   M_SVC=; M_IND=2
   [ "$svc" = - ] || M_SVC="$svc"
   [ "$ind" = - ] || M_IND="$ind"
   export M_SVC M_IND
-  m_edit "$target" "$mode" "$re" "$text"
+  if [ "$mode" = sed ]; then
+    sed -E -i -e "$re" "$target" # the regex argument is the whole sed script
+  else
+    m_edit "$target" "$mode" "$re" "$text"
+  fi
   unset M_SVC M_IND
   if cmp -s "$T_TMP/before-mut" "$target"; then
     _fail "mutation '$label' did not change the file" "regex: $re"
@@ -613,6 +685,28 @@ mutate "recorded variant code wrong" "must be recorded as 503" dynamic - - repla
 mutate "recorded variant missing" "lacks upper" dynamic - - delete '^# upper \|'
 mutate "table lacks a lookalike row" "lacks the required row" table - - delete '^nomatch /_jobsx'
 mutate "page loads an external asset" "external assets" page - - after '^<title>' '<link rel="stylesheet" href="x">'
+
+# ---- mutation cases: the README fenced-command scan and content assertions ----
+
+dc='docker compose -p platform-ingress -f /opt/platform/ingress/compose.yaml --env-file /etc/platform/ingress.env'
+# Each plants a fenced line after the canary command (the "exec <active>" line, inside a fence).
+plant_after_exec() { printf '/exec <active>/s|$|\\n%s|' "$1"; }
+mutate "README fenced bare up -d (sudo form)" "README scan:" readme - - sed "$(plant_after_exec "sudo $dc up -d")"
+mutate "README bare up -d reason" "up without a service name" readme - - sed "$(plant_after_exec "sudo $dc up -d")"
+mutate "README fenced restart of the legacy service (indented)" "restart in a fence" readme - - sed "$(plant_after_exec "  $dc restart cloudflared")"
+mutate "README fenced --force-recreate" "--force-recreate in a fence" readme - - sed "$(plant_after_exec "sudo $dc up -d --force-recreate cloudflared-blue")"
+mutate "README fenced down" "down in a fence" readme - - sed "$(plant_after_exec "sudo $dc down")"
+mutate "README fenced start with no service" "start without a service name" readme - - sed "$(plant_after_exec "sudo $dc start")"
+mutate "README fenced stop with no service" "stop without a service name" readme - - sed "$(plant_after_exec "sudo $dc stop")"
+mutate "README fenced rm of a connector" "removes a container" readme - - sed "$(plant_after_exec "sudo $dc rm -f cloudflared")"
+mutate "README fenced docker rm of a connector" "removes a container" readme - - sed "$(plant_after_exec 'sudo docker rm cloudflared')"
+mutate "README writes the host compose by hand" "writes the host compose by hand" readme - - sed "$(plant_after_exec 'sudo tee /opt/platform/ingress/compose.yaml')"
+mutate "README cutover section loses the readiness gate phrase" "'First cutover' section lacks" readme - - sed '/^### First cutover/,/^### Pin bump/s/readiness gate/ready check/g'
+mutate "README pin-bump section loses the readiness gate phrase" "'Pin bump' section lacks" readme - - sed '/^### Pin bump/,/^### Connector rollback/s/readiness gate/ready check/g'
+mutate "README rotation section loses the readiness gate phrase" "'Rotating the tunnel token' section lacks" readme - - sed '/^## Rotating the tunnel token/,/^## Rollback/s/readiness gate/ready check/g'
+mutate "README rollback drops the up -d cloudflared step" "rollback order" readme - - sed '/ up -d cloudflared$/d'
+mutate "README rollback replaces the legacy start with a ps" "rollback order" readme - - sed 's| up -d cloudflared$| ps cloudflared|'
+mutate "README rotation fence names the legacy service" "token-rotation fence names cloudflared" readme - - sed '/^## Rotating the tunnel token/,/^## Rollback/s|stop <old>$|stop <old> cloudflared|'
 
 # ---- no-secrets scan: one planted value per shape (assembled at run time) ----
 
