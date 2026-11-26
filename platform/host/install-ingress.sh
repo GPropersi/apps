@@ -8,6 +8,9 @@
 #
 # Host-side inputs (you create them; the installer never writes secrets and never edits /etc/group):
 #   /etc/platform/cloudflared.token   the tunnel token: regular file, owner root, group gid 64321, mode exactly 0640
+#   /etc/platform/cloudflared.webhook the supervisor's alert webhook: regular file, owner 65532:65532, mode exactly 0600,
+#                                     non-empty; only checked (never read, written or printed). The installer also
+#                                     creates /var/lib/cloudflared-supervisor-{blue,green} (65532:65532, 0755)
 #   /etc/platform/ingress.env         PLATFORM_DOMAIN=<your domain>: root-owned, not group/world writable
 #   /etc/platform/access.env          ACCESS_TEAM_DOMAIN= and ACCESS_AUD= (read by platform deploy): checked by status/verify
 #   the `deploy` group (install-deploy-user.sh creates it): the dynamic/ directory is root:deploy 1775 so the deploy user
@@ -65,6 +68,8 @@ readonly TOKEN_GID=64321
 readonly INSTALL_DIR="/opt/platform/ingress"
 readonly ENV_FILE="/etc/platform/ingress.env"
 readonly TOKEN_FILE="/etc/platform/cloudflared.token"
+readonly WEBHOOK_FILE="/etc/platform/cloudflared.webhook"
+readonly STATE_DIRS=(/var/lib/cloudflared-supervisor-blue /var/lib/cloudflared-supervisor-green)
 readonly ACCESS_FILE="/etc/platform/access.env"
 readonly GID_FILE="/opt/platform/ingress/docker-gid.env"
 # The old compose file declared the network without a name:, so compose created it as <project>_<key>.
@@ -478,6 +483,18 @@ chk_token_file() {
   [ -n "$tok" ] || echo "token file has no non-blank content"
 }
 
+# chk_webhook_file: the alert webhook is checked by type, owner, mode and size only; its content is never read.
+# shellcheck disable=SC2329 # invoked by name through run_check and do_install
+chk_webhook_file() {
+  local p="$ROOT$WEBHOOK_FILE" meta
+  if ! priv test -e "$p"; then echo "webhook file missing: $WEBHOOK_FILE"; return 0; fi
+  if priv test -L "$p"; then echo "webhook file is a symlink: $WEBHOOK_FILE"; return 0; fi
+  if ! priv test -f "$p"; then echo "webhook file is not a regular file: $WEBHOOK_FILE"; return 0; fi
+  meta="$(priv stat -c '%u:%g %a' -- "$p")" || { echo "cannot stat the webhook file"; return 0; }
+  [ "$meta" = "65532:65532 600" ] || echo "webhook file uid:gid/mode is '$meta', want '65532:65532 600' (owner 65532:65532, mode 0600)"
+  if ! priv test -s "$p"; then echo "webhook file is empty"; return 0; fi
+}
+
 # env_domain: prints the PLATFORM_DOMAIN value of the env file (caller validates it).
 env_domain() {
   local lines=()
@@ -690,6 +707,8 @@ print_instructions() {
   err "  sudo tee $TOKEN_FILE >/dev/null     # paste the tunnel token from the Cloudflare dashboard, Enter, Ctrl-D"
   err "  sudo chown root:$TOKEN_GID $TOKEN_FILE && sudo chmod 0640 $TOKEN_FILE"
   err "  echo 'PLATFORM_DOMAIN=<your-domain>' | sudo tee $ENV_FILE >/dev/null && sudo chmod 0644 $ENV_FILE"
+  err "  sudo install -m 0600 -o 65532 -g 65532 /dev/null $WEBHOOK_FILE"
+  err "  sudo tee $WEBHOOK_FILE >/dev/null   # paste the alert webhook URL with no echo (e.g. read -rs), then Ctrl-D"
 }
 
 # ---- file helpers ----
@@ -723,6 +742,33 @@ place_dir() {
   priv chmod "$mode" "$dir"
   info "changed: $dir/"
   CHANGED=1
+}
+
+# place_state_dir <dir>: a supervisor state directory owned by the container user (65532:65532, 0755). A symlink (the
+# directory or its parent) is refused; an existing directory is repaired, never deleted or emptied.
+place_state_dir() {
+  local dir="$1" parent
+  parent="$(dirname -- "$dir")"
+  if [ -L "$parent" ]; then die "state directory parent is a symlink: $parent (nothing further was installed)"; fi
+  if [ -L "$dir" ]; then die "state directory is a symlink: $dir (nothing further was installed)"; fi
+  if [ -d "$dir" ] && [ "$(file_meta "$dir")" = "65532:65532 755" ]; then
+    info "already: $dir/"
+    return 0
+  fi
+  priv mkdir -p -- "$dir"
+  priv chown 65532:65532 "$dir"
+  priv chmod 0755 "$dir"
+  info "changed: $dir/"
+  CHANGED=1
+}
+
+# check_state_dir <dir>: owned by 65532:65532, exactly mode 0755.
+check_state_dir() {
+  local path="$ROOT$1" meta
+  if [ ! -e "$path" ]; then fail "state directory missing: $1"; return 1; fi
+  if [ -L "$path" ]; then fail "state directory is a symlink: $1"; return 1; fi
+  meta="$(file_meta "$path")"
+  if [ "$meta" = "65532:65532 755" ]; then pass "state directory $1 owner/mode ($meta)"; else fail "state directory $1 uid:gid/mode is '$meta', want '65532:65532 755'"; return 1; fi
 }
 
 # ---- compose helpers ----
@@ -829,7 +875,7 @@ do_install() {
   require_privilege
   TMP="$(mktemp -d)"
 
-  problems="$(chk_token_file; chk_env_file; chk_token_group)"
+  problems="$(chk_token_file; chk_env_file; chk_token_group; chk_webhook_file)"
   if [ -n "$problems" ]; then
     while IFS= read -r line; do err "install-ingress: $line"; done <<<"$problems"
     print_instructions
@@ -847,6 +893,8 @@ do_install() {
   place_file "$TMP/compose.yaml" "$ROOT$INSTALL_DIR/compose.yaml" 644
   place_file "$TMP/dynamic.yml" "$ROOT$INSTALL_DIR/dynamic/dynamic.yml" 644
   place_file "$TMP/index.html" "$ROOT$INSTALL_DIR/down-page/index.html" 644
+  local sd
+  for sd in "${STATE_DIRS[@]}"; do place_state_dir "$ROOT$sd"; done
   retire_gid_file
   ensure_network
 
@@ -973,7 +1021,7 @@ container_checks() {
 }
 
 do_checks() {
-  local ps problems line dgid
+  local ps problems line dgid sd
   check_owned "install directory" "$ROOT$INSTALL_DIR" 755 || true
   if dgid="$(deploy_gid)"; then
     check_owned "dynamic directory" "$ROOT$INSTALL_DIR/dynamic" 1775 "$dgid" || true
@@ -994,6 +1042,8 @@ do_checks() {
   check_payload "down-page index.html" "$ROOT$INSTALL_DIR/down-page/index.html" payload_index_html
 
   run_check "token file" chk_token_file
+  run_check "webhook file" chk_webhook_file
+  for sd in "${STATE_DIRS[@]}"; do check_state_dir "$sd" || true; done
   run_check "ingress env file" chk_env_file
   run_check "access env file" chk_access_file
   run_check "token group is private" chk_token_group

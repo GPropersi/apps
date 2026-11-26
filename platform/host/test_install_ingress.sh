@@ -77,6 +77,7 @@ if [ ! -e "$path" ] && [ ! -L "$path" ]; then exit 1; fi
 ug="0:0"
 [ "$base" != "cloudflared.token" ] || ug="0:64321"
 [ "$base" != "dynamic" ] || ug="0:64330"
+case "$base" in cloudflared.webhook | cloudflared-supervisor-blue | cloudflared-supervisor-green) ug="65532:65532" ;; esac
 if [ -f "$STATE/stat_override" ]; then
   line="$(grep -F -- "$base " "$STATE/stat_override" | head -n1 || true)"
   [ -z "$line" ] || ug="${line##* }"
@@ -316,6 +317,7 @@ EOF
 # ---- fixtures ----
 
 TOKEN='FIXTURE-TUNNEL-TOKEN-NOT-A-REAL-SECRET-0123456789'
+WEBHOOK='FIXTURE-WEBHOOK-NOT-A-REAL-URL-0123456789'
 NAMES=(platform-ingress-cloudflared-1 platform-ingress-traefik-1 platform-ingress-down-page-1)
 CF=platform-ingress-cloudflared-1
 TR=platform-ingress-traefik-1
@@ -330,6 +332,8 @@ fresh() {
   R="$T_TMP/root"
   printf '%s\n' "$TOKEN" > "$R/etc/platform/cloudflared.token"
   chmod 640 "$R/etc/platform/cloudflared.token"
+  printf '%s\n' "$WEBHOOK" > "$R/etc/platform/cloudflared.webhook"
+  chmod 600 "$R/etc/platform/cloudflared.webhook"
   printf '# comment\nPLATFORM_DOMAIN=example.test\n' > "$R/etc/platform/ingress.env"
   chmod 644 "$R/etc/platform/ingress.env"
   printf 'ACCESS_TEAM_DOMAIN=example.cloudflareaccess.com\nACCESS_AUD=%s\n' "$(printf '0%.0s' {1..64})" > "$R/etc/platform/access.env"
@@ -429,7 +433,19 @@ precond() { # label, setup function, expected message
   expect_out_lacks "precondition output never shows the token: $1" "$TOKEN"
   no_docker_calls "precondition runs no docker command: $1"
   expect_eq "precondition installs nothing: $1" "$(find "$R/opt" 2>/dev/null | wc -l)" "0"
+  expect_eq "precondition creates no state dir: $1" "$(find "$R/var/lib" -maxdepth 1 -name 'cloudflared-supervisor-*' 2>/dev/null | wc -l)" "0"
+  expect_out_lacks "precondition output never shows the webhook value: $1" "$WEBHOOK"
 }
+c_wh_missing() { rm "$R/etc/platform/cloudflared.webhook"; }
+c_wh_empty() { : > "$R/etc/platform/cloudflared.webhook"; }
+c_wh_symlink() { mv "$R/etc/platform/cloudflared.webhook" "$R/etc/platform/real.webhook"; ln -s real.webhook "$R/etc/platform/cloudflared.webhook"; }
+c_wh_dir() { rm "$R/etc/platform/cloudflared.webhook"; mkdir "$R/etc/platform/cloudflared.webhook"; }
+c_wh_owner_root() { echo "cloudflared.webhook 0:0" > "$STATE/stat_override"; }
+c_wh_owner_user() { echo "cloudflared.webhook 1000:1000" > "$STATE/stat_override"; }
+c_wh_mode_0640() { chmod 640 "$R/etc/platform/cloudflared.webhook"; }
+c_wh_mode_0644() { chmod 644 "$R/etc/platform/cloudflared.webhook"; }
+c_wh_mode_0400() { chmod 400 "$R/etc/platform/cloudflared.webhook"; }
+c_wh_mode_0660() { chmod 660 "$R/etc/platform/cloudflared.webhook"; }
 c_tok_missing() { rm "$R/etc/platform/cloudflared.token"; }
 c_tok_empty() { : > "$R/etc/platform/cloudflared.token"; }
 c_tok_blank() { printf ' \n\n' > "$R/etc/platform/cloudflared.token"; }
@@ -468,6 +484,20 @@ precond "token file mode 0644" c_tok_mode_0644 "uid:gid/mode is '0:64321 644'"
 precond "token file mode 0400" c_tok_mode_0400 "uid:gid/mode is '0:64321 400'"
 precond "token file mode 0660" c_tok_mode_0660 "uid:gid/mode is '0:64321 660'"
 precond "token file is a symlink" c_tok_symlink "token file is a symlink"
+precond "webhook file missing" c_wh_missing "webhook file missing"
+precond "webhook file empty" c_wh_empty "webhook file is empty"
+precond "webhook file is a symlink" c_wh_symlink "webhook file is a symlink"
+precond "webhook file is a directory" c_wh_dir "webhook file is not a regular file"
+precond "webhook file owner root" c_wh_owner_root "uid:gid/mode is '0:0 600'"
+precond "webhook file owner 1000" c_wh_owner_user "uid:gid/mode is '1000:1000 600'"
+precond "webhook file mode 0640" c_wh_mode_0640 "uid:gid/mode is '65532:65532 640'"
+precond "webhook file mode 0644" c_wh_mode_0644 "uid:gid/mode is '65532:65532 644'"
+precond "webhook file mode 0400" c_wh_mode_0400 "uid:gid/mode is '65532:65532 400'"
+precond "webhook file mode 0660" c_wh_mode_0660 "uid:gid/mode is '65532:65532 660'"
+fresh
+c_wh_missing
+ins install
+expect_out_has "missing webhook prints the install instruction" "sudo install -m 0600 -o 65532 -g 65532 /dev/null /etc/platform/cloudflared.webhook"
 precond "env file missing" c_env_missing "ingress env file missing"
 precond "env file group writable" c_env_gw "group or world writable"
 precond "env file world writable" c_env_ww "group or world writable"
@@ -523,6 +553,20 @@ for bad in iptables ip6tables nft ufw docker-user.rules firewall; do
 done
 expect_calls_lacks "install does not touch /etc/group or accounts" "usermod"
 
+expect_eq "install leaves the webhook bytes identical" "$(printf '%s\n' "$WEBHOOK" | cmp -s - "$R/etc/platform/cloudflared.webhook" && echo same)" "same"
+expect_out_lacks "install never prints the webhook value" "$WEBHOOK"
+expect_calls_lacks "the call log never holds the webhook value" "$WEBHOOK"
+expect_calls_lacks "install never writes the webhook path" "cloudflared.webhook.new"
+for rd in cat head tail grep; do
+  expect_calls_lacks "install never reads the webhook with $rd" "$rd $R/etc/platform/cloudflared.webhook"
+done
+for sd in blue green; do
+  expect_out_has "install creates the $sd state dir" "changed: $R/var/lib/cloudflared-supervisor-$sd/"
+  expect_calls_has "the $sd state dir is chowned to the container user" "chown 65532:65532 $R/var/lib/cloudflared-supervisor-$sd"
+  expect_eq "the $sd state dir mode is 755" "$(stat -c %a "$R/var/lib/cloudflared-supervisor-$sd")" "755"
+done
+expect_eq "both state dirs are chowned before the first compose call" "$(awk '/^chown 65532:65532/ {c++} /docker compose/ {print c; exit}' "$CALL_LOG")" "2"
+
 # a second run changes nothing
 t_reset_calls
 ins install
@@ -539,6 +583,30 @@ expect_calls_lacks "second install: no network create" "network create"
 expect_calls_lacks "second install: no copy" "fakesudo cp"
 expect_calls_lacks "second install: no move" "fakesudo mv"
 expect_calls_lacks "second install: no stop, restart or removal" "docker rm"
+expect_out_has "second install: blue state dir already" "already: $R/var/lib/cloudflared-supervisor-blue/"
+expect_out_has "second install: green state dir already" "already: $R/var/lib/cloudflared-supervisor-green/"
+
+# drifted state dirs are repaired (mode 0700, owner 0:0), never deleted
+chmod 700 "$R/var/lib/cloudflared-supervisor-blue"
+echo "cloudflared-supervisor-green 0:0" > "$STATE/stat_override"
+touch "$R/var/lib/cloudflared-supervisor-blue/keep"
+t_reset_calls
+ins install
+expect_rc "install repairs drifted state dirs" 0
+expect_out_has "the drifted blue state dir is repaired" "changed: $R/var/lib/cloudflared-supervisor-blue/"
+expect_out_has "the wrongly owned green state dir is repaired" "changed: $R/var/lib/cloudflared-supervisor-green/"
+expect_eq "the repaired blue state dir is mode 755" "$(stat -c %a "$R/var/lib/cloudflared-supervisor-blue")" "755"
+expect_eq "a repair never empties a state dir" "$([ -e "$R/var/lib/cloudflared-supervisor-blue/keep" ] && echo kept || echo lost)" "kept"
+rm -f "$STATE/stat_override"
+
+# a symlinked state dir is refused before any docker call
+fresh
+mkdir -p "$R/var/lib/elsewhere"
+ln -s elsewhere "$R/var/lib/cloudflared-supervisor-blue"
+ins install
+expect_rc "a symlinked state dir is refused" 1
+expect_out_has "the symlinked state dir is named" "state directory is a symlink"
+no_docker_calls "a symlinked state dir runs no docker command"
 
 # an upgrade from the socket-proxy layout: the retired docker-gid.env and ingress-proxy network are removed, the stack
 # is brought up with --remove-orphans (which removes the live socket-proxy container), all logged, idempotent
@@ -670,6 +738,7 @@ vcase() { # label, setup function, expected FAIL fragment
   expect_rc "verify fails: $1" 1
   expect_out_has "verify names the cause: $1" "$3"
   expect_out_lacks "verify never prints the token: $1" "$TOKEN"
+  expect_out_lacks "verify never prints the webhook value: $1" "$WEBHOOK"
 }
 v_port() { echo "8080/tcp" > "$STATE/port_$TR"; }
 v_sock_traefik() { printf '/var/run/docker.sock\n' > "$STATE/mounts_$TR"; }
@@ -693,6 +762,16 @@ v_mode() { chmod 600 "$R$INST/dynamic/dynamic.yml"; }
 v_missing_file() { rm "$R$INST/down-page/index.html"; }
 v_ps_fail() { touch "$STATE/ps_fail"; }
 v_token_perm() { chmod 600 "$R/etc/platform/cloudflared.token"; }
+v_wh_mode() { chmod 640 "$R/etc/platform/cloudflared.webhook"; }
+v_wh_owner() { echo "cloudflared.webhook 0:0" > "$STATE/stat_override"; }
+v_wh_missing() { rm "$R/etc/platform/cloudflared.webhook"; }
+v_sd_missing() { rmdir "$R/var/lib/cloudflared-supervisor-green"; }
+v_sd_owner() { echo "cloudflared-supervisor-blue 0:0" > "$STATE/stat_override"; }
+vcase "the webhook mode drifted" v_wh_mode "webhook file: webhook file uid:gid/mode is '65532:65532 640'"
+vcase "the webhook owner drifted" v_wh_owner "webhook file: webhook file uid:gid/mode is '0:0 600'"
+vcase "the webhook file is missing" v_wh_missing "webhook file: webhook file missing"
+vcase "a state dir is missing" v_sd_missing "state directory missing: /var/lib/cloudflared-supervisor-green"
+vcase "a state dir has the wrong owner" v_sd_owner "state directory /var/lib/cloudflared-supervisor-blue uid:gid/mode is '0:0 755'"
 vcase "a container publishes a port" v_port "FAIL: $TR publishes a port"
 vcase "traefik mounts the docker socket" v_sock_traefik "FAIL: $TR mounts the Docker socket"
 vcase "another container mounts the docker socket" v_sock_other "FAIL: $DP mounts the Docker socket"
