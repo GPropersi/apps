@@ -687,6 +687,97 @@ expect_rc "a symlinked state dir parent is refused" 1
 expect_out_has "the symlinked state dir parent is named" "state directory parent is a symlink"
 no_docker_calls "a symlinked state dir parent runs no docker command"
 
+# ---- installer stamp ----
+STAMP_PATH="$R/opt/platform/stamps/ingress"
+STAMP_VALUE="$(sed -n 's/^readonly INSTALLER_STAMP=//p' "$script")"
+fresh
+ins install
+expect_rc "stamp: fresh install succeeds" 0
+if [[ "$STAMP_VALUE" =~ ^[0-9a-f]{16}$ ]]; then _pass; else _fail "the installer carries a 16-hex stamp" "$STAMP_VALUE"; fi
+expect_eq "stamp file holds the installer stamp and a newline" "$(od -An -c "$STAMP_PATH" | tr -d ' \n')" "$(printf '%s\n' "$STAMP_VALUE" | od -An -c | tr -d ' \n')"
+expect_eq "stamp file mode" "$(stat -c %a "$STAMP_PATH")" "644"
+expect_eq "stamps dir mode" "$(stat -c %a "$(dirname "$STAMP_PATH")")" "755"
+expect_calls_has "stamp is chowned root:root before the rename" "chown root:root $STAMP_PATH.new"
+expect_calls_has "stamps directory chown root:root" "chown root:root $(dirname "$STAMP_PATH")"
+# the stamp is written after every other placed file: its mv is the last mv in the call log
+last_mv="$(grep -n '^fakesudo mv -f' "$CALL_LOG" | tail -n1 | cut -d: -f2-)"
+expect_eq "the stamp is the last file placed" "$last_mv" "fakesudo mv -f -- $STAMP_PATH.new $STAMP_PATH"
+# second install: already, nothing changes
+t_reset_calls
+ins install
+expect_out_has "stamp: second install reports already" "already: $STAMP_PATH"
+expect_out_lacks "stamp: second install changes nothing" "changed:"
+# every payload matches but the stamp is missing: the no-op path still writes it, without touching the stack
+rm -f "$STAMP_PATH"
+t_reset_calls
+ins install
+expect_rc "stamp: install with only the stamp missing succeeds" 0
+expect_out_has "stamp: the missing stamp is written" "changed: $STAMP_PATH"
+expect_eq "stamp: rewritten stamp content" "$(cat "$STAMP_PATH")" "$STAMP_VALUE"
+expect_calls_lacks "stamp: a missing stamp does not recreate the stack" " up -d"
+expect_calls_lacks "stamp: a missing stamp makes no compose up call" "compose up"
+expect_out_lacks "stamp: a missing stamp does not report a changed stack" "changed: stack"
+# a stamp with different content is replaced
+printf 'ffffffffffffffff\n' > "$STAMP_PATH"
+ins install
+expect_out_has "stamp: a different stamp is replaced" "changed: $STAMP_PATH"
+expect_eq "stamp: replaced stamp content" "$(cat "$STAMP_PATH")" "$STAMP_VALUE"
+# verify: passes when it matches, FAILs for a wrong or missing stamp
+ins verify
+expect_rc "stamp: verify passes with a matching stamp" 0
+expect_out_has "stamp: verify reports the matching stamp" "PASS: installer stamp matches this installer"
+printf '%s\n\n' "$STAMP_VALUE" > "$STAMP_PATH"
+ins verify
+expect_rc "stamp: verify fails for a stamp with an extra trailing blank line" 1
+expect_out_has "stamp: verify names the padded stamp" "stamp $STAMP_PATH differs from this installer (run install)"
+printf '%s' "$STAMP_VALUE" > "$STAMP_PATH"
+ins verify
+expect_rc "stamp: verify fails for a stamp without its newline" 1
+printf 'ffffffffffffffff\n' > "$STAMP_PATH"
+ins verify
+expect_rc "stamp: verify fails for a wrong stamp" 1
+expect_out_has "stamp: verify names the wrong stamp" "stamp $STAMP_PATH differs from this installer (run install)"
+rm -f "$STAMP_PATH"
+ins verify
+expect_rc "stamp: verify fails for a missing stamp" 1
+expect_out_has "stamp: verify names the missing stamp" "stamp $STAMP_PATH differs from this installer (run install)"
+# a failed install (compose up fails) leaves the previous stamp untouched
+fresh
+mkdir -p "$(dirname "$STAMP_PATH")"
+printf 'ffffffffffffffff\n' > "$STAMP_PATH"
+touch "$STATE/up_fail"
+ins install
+expect_rc "stamp: failed install exits non-zero" 1
+expect_eq "stamp: a failed install leaves the old stamp" "$(cat "$STAMP_PATH")" "ffffffffffffffff"
+fresh
+touch "$STATE/up_fail"
+ins install
+if [ -e "$STAMP_PATH" ]; then _fail "a failed first install writes no stamp"; else _pass; fi
+# the stamp is written only after wait_healthy: an unhealthy stack leaves the old stamp, or none
+fresh
+mkdir -p "$(dirname "$STAMP_PATH")"
+printf 'ffffffffffffffff\n' > "$STAMP_PATH"
+printf '%s|cloudflared|running|healthy\n%s|traefik|running|unhealthy\n%s|down-page|running|healthy\n' "$CF" "$TR" "$DP" > "$STATE/ps"
+INSTALL_INGRESS_HEALTH_TIMEOUT=1 ins install
+expect_rc "stamp: an unhealthy stack fails the install" 1
+expect_out_has "stamp: the unhealthy container is named" "$TR is unhealthy"
+expect_eq "stamp: an unhealthy install leaves the old stamp" "$(cat "$STAMP_PATH")" "ffffffffffffffff"
+fresh
+printf '%s|cloudflared|running|healthy\n%s|traefik|running|unhealthy\n%s|down-page|running|healthy\n' "$CF" "$TR" "$DP" > "$STATE/ps"
+INSTALL_INGRESS_HEALTH_TIMEOUT=1 ins install
+expect_rc "stamp: an unhealthy first install fails" 1
+if [ -e "$STAMP_PATH" ]; then _fail "an unhealthy first install writes no stamp"; else _pass; fi
+# verify: a symlink to a file with the correct content is not a valid stamp
+fresh
+ins install
+expect_rc "stamp: install before the symlink case succeeds" 0
+printf '%s\n' "$STAMP_VALUE" > "$R/stamp-real"
+rm -f "$STAMP_PATH"
+ln -s "$R/stamp-real" "$STAMP_PATH"
+ins verify
+expect_rc "stamp: verify fails for a symlinked stamp with the right content" 1
+expect_out_has "stamp: verify names the symlinked stamp" "stamp $STAMP_PATH differs from this installer (run install)"
+
 # an upgrade from the socket-proxy layout: the retired docker-gid.env and ingress-proxy network are removed, the stack
 # is brought up with --remove-orphans (which removes the live socket-proxy container), all logged, idempotent
 fresh

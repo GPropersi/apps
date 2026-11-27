@@ -280,6 +280,78 @@ no_strays "second run"
 expect_calls_lacks "second run does not reload sshd" "reload"
 expect_calls_lacks "second run does not run sshd -t" "sshd -t"
 
+# ---- 2b. installer stamp ----
+STAMP_PATH=/opt/platform/stamps/deploy-user
+STAMP_VALUE="$(sed -n 's/^readonly INSTALLER_STAMP=//p' "$script")"
+fresh
+inst install --pubkey-file "$T_TMP/key.pub"
+expect_rc "stamp: fresh install succeeds" 0
+expect_eq "stamp file holds the installer stamp and a newline" "$(od -An -c "$(root $STAMP_PATH)" | tr -d ' \n')" "$(printf '%s\n' "$STAMP_VALUE" | od -An -c | tr -d ' \n')"
+if [[ "$STAMP_VALUE" =~ ^[0-9a-f]{16}$ ]]; then _pass; else _fail "the installer carries a 16-hex stamp" "$STAMP_VALUE"; fi
+expect_eq "stamp file mode" "$(/usr/bin/stat -c %a "$(root $STAMP_PATH)")" "644"
+expect_eq "stamps dir mode" "$(/usr/bin/stat -c %a "$(dirname "$(root $STAMP_PATH)")")" "755"
+expect_calls_has "stamp is chowned root:root before the rename" "chown root:root $(root $STAMP_PATH).new"
+expect_calls_has "stamps directory chown root:root" "chown root:root $(dirname "$(root $STAMP_PATH)")"
+# the stamp is written after every other placed file: its mv is the last mv in the call log
+last_mv="$(grep -n '^fakesudo mv -f' "$CALL_LOG" | tail -n1 | cut -d: -f2-)"
+expect_eq "the stamp is the last file placed" "$last_mv" "fakesudo mv -f -- $(root $STAMP_PATH).new $(root $STAMP_PATH)"
+no_strays "stamp install"
+# second install: already, nothing changes
+t_reset_calls
+tree_before="$(tree_snapshot)"
+inst install --pubkey-file "$T_TMP/key.pub"
+expect_out_has "stamp: second install reports already" "already: $(root $STAMP_PATH)"
+expect_out_lacks "stamp: second install changes nothing" "changed:"
+expect_eq "stamp: second install leaves the tree identical" "$(tree_snapshot)" "$tree_before"
+# every payload matches but the stamp is missing: the no-op path still writes it
+rm -f "$(root $STAMP_PATH)"
+inst install --pubkey-file "$T_TMP/key.pub"
+expect_rc "stamp: install with only the stamp missing succeeds" 0
+expect_out_has "stamp: the missing stamp is written" "changed: $(root $STAMP_PATH)"
+expect_eq "stamp: rewritten stamp content" "$(cat "$(root $STAMP_PATH)")" "$STAMP_VALUE"
+# a stamp with different content is replaced
+printf 'ffffffffffffffff\n' > "$(root $STAMP_PATH)"
+inst install --pubkey-file "$T_TMP/key.pub"
+expect_out_has "stamp: a different stamp is replaced" "changed: $(root $STAMP_PATH)"
+expect_eq "stamp: replaced stamp content" "$(cat "$(root $STAMP_PATH)")" "$STAMP_VALUE"
+# verify: passes when it matches, FAILs for a wrong or missing stamp
+inst verify
+expect_rc "stamp: verify passes with a matching stamp" 0
+printf 'ffffffffffffffff\n' > "$(root $STAMP_PATH)"
+inst verify
+expect_rc "stamp: verify fails for a wrong stamp" 1
+expect_out_has "stamp: verify names the wrong stamp" "stamp $(root $STAMP_PATH) differs from this installer (run install)"
+rm -f "$(root $STAMP_PATH)"
+inst verify
+expect_rc "stamp: verify fails for a missing stamp" 1
+expect_out_has "stamp: verify names the missing stamp" "stamp $(root $STAMP_PATH) differs from this installer (run install)"
+# byte-exact: an extra trailing blank line, a missing final newline and a symlinked stamp all FAIL
+printf '%s\n\n' "$STAMP_VALUE" > "$(root $STAMP_PATH)"
+chmod 644 "$(root $STAMP_PATH)"
+inst verify
+expect_rc "stamp: verify fails for an extra trailing blank line" 1
+printf '%s' "$STAMP_VALUE" > "$(root $STAMP_PATH)"
+inst verify
+expect_rc "stamp: verify fails for a missing final newline" 1
+rm -f "$(root $STAMP_PATH)"
+printf '%s\n' "$STAMP_VALUE" > "$(root $STAMP_PATH).real"
+ln -s "$(root $STAMP_PATH).real" "$(root $STAMP_PATH)"
+inst verify
+expect_rc "stamp: verify fails for a symlinked stamp" 1
+rm -f "$(root $STAMP_PATH)" "$(root $STAMP_PATH).real"
+# a failed install (sshd -t) leaves the previous stamp untouched
+fresh
+mkdir -p "$(dirname "$(root $STAMP_PATH)")"
+printf 'ffffffffffffffff\n' > "$(root $STAMP_PATH)"
+echo 1 > "$STATE/sshd_t_rc"
+inst install --pubkey-file "$T_TMP/key.pub"
+expect_rc "stamp: failed install exits non-zero" 1
+expect_eq "stamp: a failed install leaves the old stamp" "$(cat "$(root $STAMP_PATH)")" "ffffffffffffffff"
+fresh
+echo 1 > "$STATE/sshd_t_rc"
+inst install --pubkey-file "$T_TMP/key.pub"
+if [ -e "$(root $STAMP_PATH)" ]; then _fail "a failed first install writes no stamp"; else _pass; fi
+
 # ---- 3. from= goes first, in its defined position ----
 fresh
 inst install --pubkey-file "$T_TMP/key.pub" --from "10.*,!bad.example"

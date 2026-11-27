@@ -60,6 +60,7 @@ export LC_ALL=C
 # getent and friends live in /usr/sbin, which a non-root ssh user's PATH lacks
 export PATH="$PATH:/usr/sbin:/sbin"
 
+readonly INSTALLER_STAMP=3af0fff35ca4c71a
 readonly JOBS_GID=64324
 readonly RUNNER_UID=65532
 readonly PROJECT="platform-jobs"
@@ -96,6 +97,9 @@ BUILD_TIMEOUT="${INSTALL_JOBS_BUILD_TIMEOUT:-1200}"
 NET_TIMEOUT="${INSTALL_JOBS_NET_TIMEOUT:-300}"
 MIN_FREE_KB="${INSTALL_JOBS_MIN_FREE_KB:-1048576}"
 RECORD="$INSTALL_DIR/inputs.sha256"
+# Where this installer records its INSTALLER_STAMP; the dispatcher's `stamps` command reads it back.
+readonly STAMPS_DIR="$ROOT/opt/platform/stamps"
+readonly STAMP_NAME="jobs"
 HEARTBEAT_MAX_AGE=120
 
 if [ -n "${INSTALL_JOBS_SUDO+set}" ]; then
@@ -6464,6 +6468,13 @@ do_install() {
   wait_healthy
   printf '%s\n' "$want" > "$TMP/inputs.sha256"
   place_file "$TMP/inputs.sha256" "$RECORD" 600
+  # The stamp is the last action, after the runner is healthy and the record is written: a failed or unhealthy install
+  # leaves the previous stamp (or none), so the deploy gate fails closed. It is written even when everything else matched.
+  printf '%s\n' "$INSTALLER_STAMP" > "$TMP/stamp"
+  # A symlink in place of the stamps directory is removed (the link only, never its target), as install-ingress does.
+  if priv test -L "$STAMPS_DIR"; then priv rm -f -- "$STAMPS_DIR"; fi
+  ensure_dir "$STAMPS_DIR" 0 0 755
+  place_file "$TMP/stamp" "$STAMPS_DIR/$STAMP_NAME" 644
   if [ "$CHANGED" -eq 1 ]; then info "install-jobs: done (runner healthy)"; fi
 }
 
@@ -6598,6 +6609,14 @@ do_checks() {
   check_payload "compose.yaml" "$INSTALL_DIR/compose.yaml" payload_compose_yaml
   check_meta "inputs.sha256" "$RECORD" "0:0 600" || true
   run_check "inputs.sha256 matches jobs.env and jobs-redis.password" chk_record
+  check_meta "stamps directory" "$STAMPS_DIR" "0:0 755" || true
+  # priv never forwards stdin, so the expected bytes go through a file; cmp is byte-exact (no trailing-newline folding).
+  printf '%s\n' "$INSTALLER_STAMP" > "$TMP/want.stamp"
+  if check_meta "installer stamp" "$STAMPS_DIR/$STAMP_NAME" "0:0 644" && priv test -f "$STAMPS_DIR/$STAMP_NAME" && ! priv test -L "$STAMPS_DIR/$STAMP_NAME" && priv cmp -s "$TMP/want.stamp" "$STAMPS_DIR/$STAMP_NAME"; then
+    pass "installer stamp matches this installer"
+  else
+    fail "stamp $STAMPS_DIR/$STAMP_NAME differs from this installer (run install)"
+  fi
 
   uid="$(deploy_uid 2>/dev/null || true)"
   gid="$(deploy_gid 2>/dev/null || true)"

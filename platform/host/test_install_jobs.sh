@@ -511,6 +511,8 @@ expect_rc "a full disk does not block an install with the image present" 0
 # ---- 5. a full first install, then idempotence ----
 
 fresh
+STAMP_PATH="$R/opt/platform/stamps/jobs"
+STAMP_VALUE="$(sed -n 's/^readonly INSTALLER_STAMP=//p' "$script")"
 ins install
 expect_rc "first install" 0
 expect_out_has "image built" "changed: image platform-jobs-runner:$RTAG"
@@ -540,6 +542,63 @@ expect_calls_lacks "no ACL command on the second install" "docker exec -i"
 expect_calls_lacks "no build on the second install" "docker build"
 expect_calls_lacks "no recreate on the second install" "--force-recreate"
 expect_eq "no second SETUSER" "$(wc -l < "$STATE/setuser_count" | tr -d ' ')" "1"
+expect_out_has "a second install reports the stamp as already" "already: $STAMP_PATH"
+
+# the stamp: written last (after the healthy wait and inputs.sha256), root:root 0644, stamps dir root:root 0755
+STAMP_DIR="$R/opt/platform/stamps"
+expect_eq "the stamp file holds the installer stamp and one newline" "$(od -An -c "$STAMP_PATH" | tr -d ' \n')" "$(printf '%s\n' "$STAMP_VALUE" | od -An -c | tr -d ' \n')"
+if [[ "$STAMP_VALUE" =~ ^[0-9a-f]{16}$ ]]; then _pass; else _fail "the installer carries a 16-hex stamp" "$STAMP_VALUE"; fi
+expect_eq "the stamp file is 0644" "$(stat -c '%a' "$STAMP_PATH")" "644"
+expect_eq "the stamps directory is 0755" "$(stat -c '%a' "$STAMP_DIR")" "755"
+expect_eq "the stamps directory is root-owned" "$(cat "$STATE/owner/${STAMP_DIR//\//_}")" "0:0"
+
+# a first install writes the stamp as the very last placed file, after inputs.sha256
+fresh
+if [ -e "$STAMP_DIR" ]; then _fail "fresh starts without a stamps directory"; else _pass; fi
+ins install
+expect_rc "first install for the stamp order check" 0
+last_mv="$(grep -n '^fakesudo mv -f' "$CALL_LOG" | tail -n1 | cut -d: -f2-)"
+expect_eq "the stamp is the last file placed" "$last_mv" "fakesudo mv -f -- $STAMP_PATH.new $STAMP_PATH"
+rec_line="$(grep -n "^fakesudo mv -f -- $(J)/inputs.sha256.new " "$CALL_LOG" | tail -n1 | cut -d: -f1)"
+stamp_line="$(grep -n "^fakesudo mv -f -- $STAMP_PATH.new " "$CALL_LOG" | tail -n1 | cut -d: -f1)"
+if [ -n "$rec_line" ] && [ -n "$stamp_line" ] && [ "$stamp_line" -gt "$rec_line" ]; then _pass; else _fail "the stamp comes after inputs.sha256" "record line '$rec_line', stamp line '$stamp_line'"; fi
+if grep -qE "^install -m 644 -o root -g root -- [^ ]+/stamp $STAMP_PATH\.new\$" "$CALL_LOG"; then _pass; else _fail "the stamp is installed root:root 0644"; fi
+expect_out_has "the stamps directory is created" "changed: $STAMP_DIR/"
+expect_out_has "the stamp is written" "changed: $STAMP_PATH"
+
+# every payload, the image and inputs.sha256 match but the stamp is missing: the no-op path still writes it
+rm -f "$STAMP_PATH"
+t_reset_calls
+ins install
+expect_rc "install with only the stamp missing" 0
+expect_out_has "the missing stamp is written on the no-op path" "changed: $STAMP_PATH"
+expect_calls_lacks "the stamp-only repair does not recreate" "--force-recreate"
+expect_calls_lacks "the stamp-only repair does not build" "docker build"
+expect_eq "the repaired stamp content" "$(cat "$STAMP_PATH")" "$STAMP_VALUE"
+# a stale stamp is replaced
+printf 'ffffffffffffffff\n' > "$STAMP_PATH"
+ins install
+expect_out_has "a different stamp is replaced" "changed: $STAMP_PATH"
+expect_eq "the replaced stamp content" "$(cat "$STAMP_PATH")" "$STAMP_VALUE"
+# an absent stamps directory with everything else matching is created again
+rm -rf "$STAMP_DIR"
+ins install
+expect_rc "install with the stamps directory absent" 0
+expect_out_has "the absent stamps directory is recreated" "changed: $STAMP_DIR/"
+expect_eq "the recreated stamps directory is 0755" "$(stat -c '%a' "$STAMP_DIR")" "755"
+# a symlinked stamps directory is replaced (the link only): nothing is chowned, chmodded or written through it
+LINK_TARGET="$T_TMP/stamps-link-target"
+mkdir -p "$LINK_TARGET"
+chmod 700 "$LINK_TARGET"
+rm -rf "$STAMP_DIR"
+ln -s "$LINK_TARGET" "$STAMP_DIR"
+ins install
+expect_rc "install with a symlinked stamps directory" 0
+if [ -d "$STAMP_DIR" ] && [ ! -L "$STAMP_DIR" ]; then _pass; else _fail "the symlinked stamps directory is replaced by a real directory"; fi
+expect_eq "the link target is left empty" "$(ls -A "$LINK_TARGET")" ""
+expect_eq "the link target mode is untouched" "$(stat -c '%a' "$LINK_TARGET")" "700"
+if [ ! -e "$STATE/owner/${LINK_TARGET//\//_}" ]; then _pass; else _fail "the link target is never chowned"; fi
+expect_eq "the stamp is written in the real directory" "$(cat "$STAMP_PATH")" "$STAMP_VALUE"
 
 # ---- 6. password normalisation: with or without a trailing newline ----
 
@@ -593,12 +652,14 @@ expect_out_has "a changed password re-applies the user" "changed: Redis runner u
 expect_eq "SETUSER ran again for the new password" "$(wc -l < "$STATE/setuser_count" | tr -d ' ')" "2"
 expect_eq "SETUSER carried the new password" "$(cat "$STATE/setuser_pw")" "${RUNNER_PW}x"
 
-# a failed recreate leaves the old record
+# a failed recreate leaves the old record and the old stamp
 cp "$(J)/inputs.sha256" "$T_TMP/record.old"
+printf 'ffffffffffffffff\n' > "$STAMP_PATH"
 printf '%s\n' "DISCORD_WEBHOOK=${HOOK}3" > "$R/etc/platform/jobs.env"
 touch "$STATE/up_fail"
 ins install
 expect_rc "a failed compose up fails install" 1
+expect_eq "a failed recreate leaves the old stamp" "$(cat "$STAMP_PATH")" "ffffffffffffffff"
 if cmp -s "$T_TMP/record.old" "$(J)/inputs.sha256"; then _pass; else _fail "a failed recreate keeps the old record"; fi
 ins verify
 expect_rc "verify still fails after the failed recreate" 1
@@ -610,10 +671,12 @@ expect_calls_has "the next install recreates" "--force-recreate"
 
 # an unhealthy wait leaves the old record
 cp "$(J)/inputs.sha256" "$T_TMP/record.old"
+printf 'eeeeeeeeeeeeeeee\n' > "$STAMP_PATH"
 printf '%s\n' "DISCORD_WEBHOOK=${HOOK}4" > "$R/etc/platform/jobs.env"
 touch "$STATE/unhealthy_after_up"
 ins install
 expect_rc "an unhealthy runner fails install" 1
+expect_eq "an unhealthy wait leaves the old stamp" "$(cat "$STAMP_PATH")" "eeeeeeeeeeeeeeee"
 expect_out_has "the unhealthy wait is explained" "not healthy after 2s"
 if cmp -s "$T_TMP/record.old" "$(J)/inputs.sha256"; then _pass; else _fail "an unhealthy wait keeps the old record"; fi
 rm -f "$STATE/unhealthy_after_up"
@@ -628,6 +691,18 @@ touch "$STATE/unhealthy_after_up"
 ins install
 expect_rc "a first install with an unhealthy runner fails" 1
 if [ ! -e "$(J)/inputs.sha256" ]; then _pass; else _fail "no record after a failed first install"; fi
+if [ ! -e "$STAMP_PATH" ]; then _pass; else _fail "no stamp after a failed first install"; fi
+# a first install whose compose up fails writes no stamp either
+fresh
+touch "$STATE/up_fail"
+ins install
+expect_rc "a first install with a failed compose up fails" 1
+if [ ! -e "$STAMP_PATH" ]; then _pass; else _fail "no stamp after a failed first recreate"; fi
+rm -f "$STATE/up_fail"
+fresh
+touch "$STATE/unhealthy_after_up"
+ins install
+expect_rc "the unhealthy first install again" 1
 rm -f "$STATE/unhealthy_after_up"
 t_reset_calls
 ins install
@@ -832,6 +907,26 @@ verify_case "a wrong jobs-status mode fails verify" 1 "jobs-status directory uid
 chmod 755 "$(STATUS)"
 rm -f "$(J)/inputs.sha256"
 verify_case "a missing record fails verify" 1 "inputs.sha256 missing"
+
+# the installer stamp: byte-exact compare; wrong, missing, blank-line, no-newline and symlinked stamps all FAIL
+good_verify "stamp"
+expect_out_has "verify passes the stamp" "PASS: installer stamp matches this installer"
+printf 'ffffffffffffffff\n' > "$STAMP_PATH"
+verify_case "a wrong stamp fails verify" 1 "stamp $STAMP_PATH differs from this installer (run install)"
+rm -f "$STAMP_PATH"
+verify_case "a missing stamp fails verify" 1 "stamp $STAMP_PATH differs from this installer (run install)"
+printf '%s\n\n' "$STAMP_VALUE" > "$STAMP_PATH"
+chmod 644 "$STAMP_PATH"
+verify_case "an extra trailing blank line fails verify" 1 "stamp $STAMP_PATH differs from this installer (run install)"
+printf '%s' "$STAMP_VALUE" > "$STAMP_PATH"
+verify_case "a missing final newline fails verify" 1 "stamp $STAMP_PATH differs from this installer (run install)"
+rm -f "$STAMP_PATH"
+printf '%s\n' "$STAMP_VALUE" > "$STAMP_PATH.real"
+ln -s "$STAMP_PATH.real" "$STAMP_PATH"
+verify_case "a symlinked stamp fails verify" 1 "stamp $STAMP_PATH differs from this installer (run install)"
+rm -f "$STAMP_PATH" "$STAMP_PATH.real"
+rm -rf "$STAMP_DIR"
+verify_case "a missing stamps directory fails verify" 1 "stamps directory missing"
 
 # ---- 10. the test app: explicit modes only ----
 

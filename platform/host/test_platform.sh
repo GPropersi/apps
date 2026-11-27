@@ -51,10 +51,13 @@ NK_REC="$T_TMP/notifs-key-helper.rec"
 DEPLOY_STUB="$T_TMP/deploy-helper.sh"
 DEPLOY_REC="$T_TMP/deploy-helper.rec"
 STATE_TREE="$T_TMP/state-tree"
+STAMPS_TREE="$T_TMP/stamps-tree"
 copy="$T_TMP/platform-under-test.sh"
 sed -e "s#^readonly NEW_DB_HELPER=.*#readonly NEW_DB_HELPER='$HELPER'#" \
   -e "s#^readonly NOTIFS_KEY_HELPER=.*#readonly NOTIFS_KEY_HELPER='$NK_HELPER'#" \
   -e "s#^readonly DEPLOY_HELPER=.*#readonly DEPLOY_HELPER='$DEPLOY_STUB'#" \
+  -e "s#^readonly STAMPS_DIR=.*#readonly STAMPS_DIR='$STAMPS_TREE'#" \
+  -e "s#^readonly STAMPS_OWNER_UID=.*#readonly STAMPS_OWNER_UID=$(id -u)#" \
   -e "s#^readonly DEPLOY_STATE_DIR=.*#readonly DEPLOY_STATE_DIR='$STATE_TREE'#" "$script" > "$copy"
 if grep -qF "readonly NEW_DB_HELPER='$HELPER'" "$copy" && grep -qF "readonly DEPLOY_HELPER='$DEPLOY_STUB'" "$copy" &&
   grep -qF "readonly DEPLOY_STATE_DIR='$STATE_TREE'" "$copy"; then _pass; else _fail "the helper and state paths in the test copy were rewritten"; fi
@@ -63,6 +66,9 @@ if grep -qF "readonly NEW_DB_HELPER='/opt/platform/data/new-db.sh'" "$script"; t
 if grep -qF "readonly NOTIFS_KEY_HELPER='/opt/platform/data/notifs-key.sh'" "$script"; then _pass; else _fail "the real notifs-key helper path is /opt/platform/data/notifs-key.sh"; fi
 if grep -qF "readonly DEPLOY_HELPER='/opt/platform/deploy/deploy.sh'" "$script"; then _pass; else _fail "the real deploy helper path is /opt/platform/deploy/deploy.sh"; fi
 if grep -qF "readonly DEPLOY_STATE_DIR='/var/lib/platform/deploy'" "$script"; then _pass; else _fail "the real deploy state path is /var/lib/platform/deploy"; fi
+if grep -qF "readonly STAMPS_DIR='/opt/platform/stamps'" "$script"; then _pass; else _fail "the real stamps path is /opt/platform/stamps"; fi
+if grep -qxF "readonly STAMPS_OWNER_UID=0" "$script"; then _pass; else _fail "the real stamps owner uid is 0"; fi
+if grep -qF "readonly STAMPS_DIR='$STAMPS_TREE'" "$copy" && grep -qxF "readonly STAMPS_OWNER_UID=$(id -u)" "$copy"; then _pass; else _fail "the stamps path and owner in the test copy were rewritten"; fi
 
 # The stub records its argv, its stdin and every DEPLOY_* variable it can see.
 # (The record path is baked in: the dispatcher scrubs the environment, so the stub cannot be told where to write.)
@@ -475,5 +481,50 @@ for bad in "web${tab}running" "web${tab}running${tab}Up${tab}extra" "${tab}runni
   expect_out_has "ls: unparseable row prints an error line: $bad" "platform: ls failed"
   expect_out_lacks "ls: unparseable row prints no partial rows: $bad" "good"
 done
+
+# stamps: four fixed-order TSV lines from the seeded stamps dir. Bad content is reported as `invalid`, never echoed.
+mkdir -p "$STAMPS_TREE"
+printf 'abcdef0123456789\n' > "$STAMPS_TREE/deploy-user"
+printf 'abcdef0123456789\n' > "$T_TMP/stamp-target"
+ln -s "$T_TMP/stamp-target" "$STAMPS_TREE/ingress"
+printf 'abcdef0123456789\nSECRETLINE\n' > "$STAMPS_TREE/jobs"
+want_stamps="$(printf 'deploy-user\tabcdef0123456789\ndata\tmissing\ningress\tinvalid\njobs\tinvalid')"
+t_reset_calls
+run_copy "stamps"
+expect_rc "stamps exits 0" 0
+expect_eq "stamps prints four ordered lines (valid, missing, symlink, two lines)" "$out" "$want_stamps"
+expect_out_lacks "stamps never echoes bad content" "SECRETLINE"
+expect_eq "stamps makes no stub call" "$(t_calls)" ""
+# Wrong owner: the same dir through a copy whose required uid is not the file owner's.
+copy_uid="$T_TMP/platform-wrong-uid.sh"
+sed -e "s#^readonly STAMPS_OWNER_UID=.*#readonly STAMPS_OWNER_UID=$(($(id -u) + 1))#" "$copy" > "$copy_uid"
+run_cmd env LC_ALL=C SSH_ORIGINAL_COMMAND="stamps" bash "$copy_uid"
+expect_rc "stamps with another owner uid exits 0" 0
+expect_eq "a stamp owned by another uid reports invalid" "$out" "$(printf 'deploy-user\tinvalid\ndata\tmissing\ningress\tinvalid\njobs\tinvalid')"
+# More invalid single-file contents (one line, so only the 16-lowercase-hex rule and the regular-file rule can reject).
+rm -rf "$STAMPS_TREE"
+mkdir -p "$STAMPS_TREE"
+want_bad="$(printf 'deploy-user\tinvalid\ndata\tmissing\ningress\tmissing\njobs\tmissing')"
+for bad in 'ABCDEF0123456789' 'abcdef012345678' 'abcdef01234567890' ''; do
+  printf '%s\n' "$bad" > "$STAMPS_TREE/deploy-user"
+  run_copy "stamps"
+  expect_rc "stamps with content '$bad' exits 0" 0
+  expect_eq "stamps reports invalid for content '$bad'" "$out" "$want_bad"
+done
+: > "$STAMPS_TREE/deploy-user"
+run_copy "stamps"
+expect_eq "stamps reports invalid for an empty file" "$out" "$want_bad"
+rm -f "$STAMPS_TREE/deploy-user"
+mkdir "$STAMPS_TREE/deploy-user"
+run_copy "stamps"
+expect_rc "stamps with a directory at the stamp path exits 0" 0
+expect_eq "stamps reports invalid for a directory at the stamp path" "$out" "$want_bad"
+# No arguments allowed.
+: > "$LOGGER_LOG"
+run_copy "stamps x"
+expect_rc "stamps with an argument exits 2" 2
+expect_out_has "stamps with an argument prints usage" "usage: platform"
+expect_eq "stamps with an argument reaches no helper" "$(t_calls)" ""
+if grep -q 'reason=arg-count' "$LOGGER_LOG"; then _pass; else _fail "stamps with an argument logs reason=arg-count" "$(cat "$LOGGER_LOG")"; fi
 
 t_finish
