@@ -723,6 +723,7 @@ describe("one-time secrets", () => {
     expect(await screen.findByRole("heading", { name: "Phone notifications are set up" })).toBeInTheDocument();
     expect(screen.queryByText(NTFY_PASSWORD)).not.toBeInTheDocument();
     expect(screen.queryByRole("region", { name: "Your phone notification password" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("group", { name: "Phone notifications are set up" })).toBeInTheDocument();
     expect(screen.getByText(/If you lost it, generate a new one/)).toBeInTheDocument();
   });
 
@@ -759,9 +760,10 @@ describe("one-time secrets", () => {
     expect(hook).toHaveTextContent(HOOK_SECRET);
     await waitFor(() => expect(within(ntfy).getByRole("heading", { level: 2 })).toHaveFocus());
     expect(secretSections()).toHaveLength(2);
-    // The Generate button is gone with the lost-password panel, so acknowledging falls back to the screen heading.
+    // The block is closed after a reset, so acknowledging lands on the phone row button.
+    expect(screen.queryByRole("group", { name: "Phone notifications are set up" })).not.toBeInTheDocument();
     await user.click(within(ntfy).getByRole("button", { name: "I've saved it" }));
-    expect(screen.getByRole("heading", { level: 2, name: "Settings" })).toHaveFocus();
+    expect(screen.getByRole("button", { name: "Show setup again" })).toHaveFocus();
     expect(screen.getByRole("region", { name: HOOK_REGION("old-server") })).toHaveTextContent(HOOK_SECRET);
   });
 
@@ -786,16 +788,136 @@ describe("one-time secrets", () => {
     await waitFor(() => expect(within(screen.getByRole("region", { name: NTFY_REGION })).getByRole("heading", { level: 2 })).toHaveFocus());
   });
 
-  it("shows the lost-password state when the first set-up answers password:null", async () => {
-    const { user } = await open({
-      "POST /api/notify/ntfy": () => json({ user_id: "u1", setup_url: SETUP_URL, password: null, settings: settings({ ntfy: true }) }),
-    }, settings({ ntfy: false }));
+  const NULL_NTFY: Handler = () => json({ user_id: "u1", setup_url: SETUP_URL, password: null, settings: settings({ ntfy: true }) });
+  const SETUP_GROUP = "Phone notifications are set up";
+  const phoneBtn = (name: "Show setup again" | "Hide setup") => screen.getByRole("button", { name });
+
+  it("opens the setup block inside the phone row when the first set-up answers password:null", async () => {
+    const { user } = await open({ "POST /api/notify/ntfy": NULL_NTFY }, settings({ ntfy: false }));
     await user.click(screen.getByRole("button", { name: "Set up phone" }));
-    expect(await screen.findByRole("heading", { name: "Phone notifications are set up" })).toBeInTheDocument();
+    const group = await screen.findByRole("group", { name: SETUP_GROUP });
+    expect(within(screen.getByRole("list", { name: "Reminder destinations" })).getByRole("group", { name: SETUP_GROUP })).toBe(group);
+    expect(screen.getByRole("heading", { level: 3, name: SETUP_GROUP })).toHaveFocus();
+    const hide = phoneBtn("Hide setup");
+    expect(hide).toHaveAttribute("aria-expanded", "true");
+    expect(hide).toHaveAttribute("aria-controls", "ntfy-setup");
     expect(screen.getByText(/If you lost it, generate a new one/)).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Generate a new password" })).toBeInTheDocument();
     expect(screen.getByRole("link", { name: "Open the setup page" })).toHaveAttribute("href", SETUP_URL);
     expect(secretSections()).toHaveLength(0);
+    expect(document.querySelectorAll("#pw-h")).toHaveLength(1);
+  });
+
+  it("Hide setup closes the block without a request and keeps focus on the button", async () => {
+    const { user } = await open({ "POST /api/notify/ntfy": NULL_NTFY });
+    await user.click(phoneBtn("Show setup again"));
+    await screen.findByRole("group", { name: SETUP_GROUP });
+    await user.click(phoneBtn("Hide setup"));
+    expect(screen.queryByRole("group", { name: SETUP_GROUP })).not.toBeInTheDocument();
+    expect(count("POST /api/notify/ntfy")).toBe(1);
+    const show = phoneBtn("Show setup again");
+    expect(show).toHaveFocus();
+    expect(show).toHaveAttribute("aria-expanded", "false");
+    expect(show).not.toHaveAttribute("aria-controls");
+  });
+
+  it("reopening posts again, opens the block and focuses the heading", async () => {
+    const { user } = await open({ "POST /api/notify/ntfy": NULL_NTFY });
+    await user.click(phoneBtn("Show setup again"));
+    await screen.findByRole("group", { name: SETUP_GROUP });
+    await user.click(phoneBtn("Hide setup"));
+    await user.click(phoneBtn("Show setup again"));
+    await screen.findByRole("group", { name: SETUP_GROUP });
+    expect(count("POST /api/notify/ntfy")).toBe(2);
+    expect(screen.getByRole("heading", { level: 3, name: SETUP_GROUP })).toHaveFocus();
+  });
+
+  it("Hide setup clears an open reset confirm so reopening shows no stale prompt", async () => {
+    const { user } = await open({ "POST /api/notify/ntfy": NULL_NTFY });
+    await user.click(phoneBtn("Show setup again"));
+    await user.click(await screen.findByRole("button", { name: "Generate a new password" }));
+    expect(confirms()).toHaveLength(1);
+    await user.click(phoneBtn("Hide setup"));
+    await user.click(phoneBtn("Show setup again"));
+    await screen.findByRole("group", { name: SETUP_GROUP });
+    expect(confirms()).toHaveLength(0);
+  });
+
+  it("Hide setup is ignored and aria-disabled while a reset is in flight", async () => {
+    const reset = deferred();
+    const { user } = await open({
+      "POST /api/notify/ntfy": NULL_NTFY,
+      "POST /api/notify/ntfy/reset": () => reset.promise,
+    });
+    await user.click(phoneBtn("Show setup again"));
+    await user.click(await screen.findByRole("button", { name: "Generate a new password" }));
+    await user.click(within(screen.getByRole("group", { name: "Generate a new password?" })).getByRole("button", { name: "Yes, generate" }));
+    await waitFor(() => expect(phoneBtn("Hide setup")).toHaveAttribute("aria-disabled", "true"));
+    await user.click(phoneBtn("Hide setup"));
+    expect(screen.getByRole("group", { name: SETUP_GROUP })).toBeInTheDocument();
+    expect(count("POST /api/notify/ntfy/reset")).toBe(1);
+    reset.resolve(json({ password: NTFY_PASSWORD, setup_url: SETUP_URL, settings: settings({ ntfy: true }) }));
+    const region = await screen.findByRole("region", { name: NTFY_REGION });
+    expect(region).toHaveTextContent(NTFY_PASSWORD);
+    expect(screen.queryByRole("group", { name: SETUP_GROUP })).not.toBeInTheDocument();
+    expect(phoneBtn("Show setup again")).not.toHaveAttribute("aria-disabled");
+  });
+
+  it.each([
+    [409, "ntfy_not_set_up", "Phone notifications aren't set up yet."],
+    [429, "rate_limited", "Too many tries. Wait a minute and try again."],
+    [500, "notify_unavailable", "Reminders are unavailable right now. Try again in a minute."],
+  ])("a failed reset (%i) keeps the block open, shows the error and refocuses Generate", async (status, code, text) => {
+    const { user } = await open({
+      "POST /api/notify/ntfy": NULL_NTFY,
+      "POST /api/notify/ntfy/reset": () => json({ error: code }, status),
+    });
+    await user.click(phoneBtn("Show setup again"));
+    await user.click(await screen.findByRole("button", { name: "Generate a new password" }));
+    await user.click(within(screen.getByRole("group", { name: "Generate a new password?" })).getByRole("button", { name: "Yes, generate" }));
+    await waitFor(() => expect(destStatus()).toHaveTextContent(text));
+    expect(screen.getByRole("group", { name: SETUP_GROUP })).toBeInTheDocument();
+    await waitFor(() => expect(screen.getByRole("button", { name: "Generate a new password" })).toHaveFocus());
+  });
+
+  it("an unrelated settings change never moves focus back to the setup heading", async () => {
+    const { user } = await open({
+      "POST /api/notify/ntfy": NULL_NTFY,
+      "PATCH /api/settings": (init) => json(settings({ ntfy: true, ...(JSON.parse(String(init?.body)) as Partial<Settings>) })),
+    });
+    await user.click(phoneBtn("Show setup again"));
+    await screen.findByRole("group", { name: SETUP_GROUP });
+    const radio = screen.getByRole("radio", { name: "Frosting" });
+    await user.click(radio);
+    await waitFor(() => expect(radio).toBeChecked());
+    expect(screen.getByRole("heading", { level: 3, name: SETUP_GROUP })).not.toHaveFocus();
+    expect(radio).toHaveFocus();
+  });
+
+  it("a held secret with password:null focuses the panel heading and keeps the block closed", async () => {
+    let n = 0;
+    const { user } = await open({
+      "POST /api/notify/ntfy": () =>
+        json({ user_id: "u1", setup_url: SETUP_URL, password: ++n === 1 ? NTFY_PASSWORD : null, settings: settings({ ntfy: true }) }),
+    }, settings({ ntfy: false }));
+    await user.click(screen.getByRole("button", { name: "Set up phone" }));
+    const region = await screen.findByRole("region", { name: NTFY_REGION });
+    await user.click(phoneBtn("Show setup again"));
+    await waitFor(() => expect(count("POST /api/notify/ntfy")).toBe(2));
+    await waitFor(() => expect(within(region).getByRole("heading", { level: 2 })).toHaveFocus());
+    expect(destStatus()).toHaveTextContent("Your phone notification password is shown above.");
+    expect(screen.queryByRole("group", { name: SETUP_GROUP })).not.toBeInTheDocument();
+    const show = phoneBtn("Show setup again");
+    expect(show).toHaveAttribute("aria-expanded", "false");
+    expect(show).not.toHaveAttribute("aria-controls");
+  });
+
+  it("cancelling the reset confirm focuses Generate a new password", async () => {
+    const { user } = await open({ "POST /api/notify/ntfy": NULL_NTFY });
+    await user.click(phoneBtn("Show setup again"));
+    await user.click(await screen.findByRole("button", { name: "Generate a new password" }));
+    await user.click(within(screen.getByRole("group", { name: "Generate a new password?" })).getByRole("button", { name: "Cancel" }));
+    expect(screen.getByRole("button", { name: "Generate a new password" })).toHaveFocus();
   });
 
   it("copy for ntfy_not_set_up and rate_limited on reset", async () => {

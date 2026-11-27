@@ -87,8 +87,8 @@ export function SettingsTab({
   const [confirm, setConfirm] = useState<Confirm | null>(null);
   const [confirmBusy, setConfirmBusy] = useState(false);
   const [ntfySetup, setNtfySetup] = useState<string | null>(null);
-  // Set only when the server answered password:null and no ntfy entry was held; cleared when a password is shown.
-  const [ntfyLost, setNtfyLost] = useState(false);
+  // The phone setup details under the phone row; opened by the button, closed by Hide setup or a successful reset.
+  const [ntfyOpen, setNtfyOpen] = useState(false);
   const [ntfyBusy, setNtfyBusy] = useState(false);
   const [checking, setChecking] = useState<number | null>(null);
 
@@ -106,6 +106,9 @@ export function SettingsTab({
   const confirmBusyRef = useRef(false);
   const pendingFocus = useRef<number | null>(null);
   const destH = useRef<HTMLHeadingElement>(null);
+  const setupH = useRef<HTMLHeadingElement>(null);
+  // One-shot request to focus the setup heading once the block has mounted.
+  const focusSetup = useRef(false);
   const live = useRef(true);
   const loadSeq = useRef(0);
   // Rows added or removed here, so a destinations load that started earlier cannot undo them.
@@ -151,6 +154,14 @@ export function SettingsTab({
       pendingFocus.current = null;
     }
   }, [dests]);
+
+  const showSetup = ntfyOpen && settings?.ntfy === true && !hasNtfySecret;
+  useEffect(() => {
+    if (showSetup && focusSetup.current) {
+      focusSetup.current = false;
+      setupH.current?.focus();
+    }
+  }, [showSetup]);
 
   function openConfirm(next: ConfirmRequest) {
     nonce.current += 1;
@@ -209,10 +220,10 @@ export function SettingsTab({
     confirmBusyRef.current = false;
     if (res.kind === "ok") {
       applyCounters(res.data.settings);
-      // The Generate button unmounts with the lost-password panel, so acknowledging falls back to the screen heading.
+      // The block closes after a reset (Generate unmounts), so acknowledging lands on the phone row button.
       addSecret(
         { key: "ntfy", kind: "ntfy", title: NTFY_TITLE, value: res.data.password, setupUrl: res.data.setup_url },
-        () => find(GENERATE_TRIGGER),
+        () => find(NTFY_TRIGGER),
       );
     }
     if (!live.current) {
@@ -222,7 +233,7 @@ export function SettingsTab({
     setConfirm(null);
     if (res.kind === "ok") {
       setNtfySetup(res.data.setup_url);
-      setNtfyLost(false);
+      setNtfyOpen(false);
       return;
     }
     if (!onSessionFailure(res)) {
@@ -261,11 +272,34 @@ export function SettingsTab({
     }
     setNtfySetup(res.data.setup_url);
     if (res.data.password !== null) {
-      setNtfyLost(false);
+      focusSetup.current = false;
+      setNtfyOpen(false);
     } else if (!hasNtfyRef.current) {
-      setNtfyLost(true);
-      say("Phone notifications are set up. Your password was shown once; generate a new one if you lost it.");
+      focusSetup.current = true;
+      setNtfyOpen(true);
+    } else {
+      focusSetup.current = false;
+      setNtfyOpen(false);
+      find("[data-secret=ntfy] h2")?.focus();
+      say("Your phone notification password is shown above.");
     }
+  }
+
+  function onNtfyButton() {
+    if (locked) {
+      return;
+    }
+    if (showSetup) {
+      if (confirmBusy) {
+        return;
+      }
+      if (confirm?.k === "reset") {
+        setConfirm(null);
+      }
+      setNtfyOpen(false);
+      return;
+    }
+    void onNtfy();
   }
 
   async function onCheck(d: Destination) {
@@ -367,7 +401,6 @@ export function SettingsTab({
   const remindersOn = list === null ? 0 : list.filter((b) => b.reminder_offsets.length > 0).length;
   const staleNames = (dests ?? []).filter((d) => d.stale).map((d) => d.label);
   const setupHref = ntfySetup === null ? null : safeHref(ntfySetup);
-  const lost = ntfyLost && !hasNtfySecret && settings?.ntfy === true;
 
   return (
     <>
@@ -479,7 +512,7 @@ export function SettingsTab({
         <h2 id="dst-h" tabIndex={-1} ref={destH}>
           Where reminders go
         </h2>
-        <ul className="items" aria-label="Reminder destinations">
+        <ul className="items dests" aria-label="Reminder destinations">
           <li>
             <div className="pinfo">
               <strong>Phone notifications (ntfy)</strong>
@@ -489,15 +522,48 @@ export function SettingsTab({
               className="secondary"
               type="button"
               data-trigger="ntfy-setup"
-              aria-disabled={ntfyBusy || locked ? "true" : undefined}
-              onClick={() => {
-                if (!locked) {
-                  void onNtfy();
-                }
-              }}
+              aria-disabled={ntfyBusy || locked || (confirm?.k === "reset" && confirmBusy) ? "true" : undefined}
+              aria-expanded={settings?.ntfy === true ? showSetup : undefined}
+              aria-controls={showSetup ? "ntfy-setup" : undefined}
+              onClick={onNtfyButton}
             >
-              {settings?.ntfy === true ? "Show setup again" : "Set up phone"}
+              {settings?.ntfy !== true ? "Set up phone" : showSetup ? "Hide setup" : "Show setup again"}
             </button>
+            {showSetup && (
+              <div className="ntfysetup" id="ntfy-setup" role="group" aria-labelledby="pw-h">
+                <h3 id="pw-h" tabIndex={-1} ref={setupH}>
+                  Phone notifications are set up
+                </h3>
+                <p>Install the ntfy app, then follow the setup page to subscribe.</p>
+                <p className="hint">Your password was shown once when you set this up. If you lost it, generate a new one.</p>
+                <div className="row">
+                  {setupHref !== null && (
+                    <a className="signout" href={setupHref} target="_blank" rel="noopener noreferrer">
+                      Open the setup page
+                    </a>
+                  )}
+                  <button
+                    className="secondary"
+                    type="button"
+                    data-trigger="ntfy-generate"
+                    onClick={() => openConfirm({ k: "reset" })}
+                  >
+                    Generate a new password
+                  </button>
+                </div>
+                {confirm !== null && confirm.k === "reset" && (
+                  <ConfirmPrompt
+                    key={`reset:${confirm.n}`}
+                    question="Generate a new password?"
+                    note="The old password stops working. You will need to enter the new one in the ntfy app."
+                    confirmLabel="Yes, generate"
+                    busy={confirmBusy}
+                    onConfirm={() => void onReset()}
+                    onCancel={cancelConfirm}
+                  />
+                )}
+              </div>
+            )}
           </li>
           {(dests ?? []).map((d) => (
             <li key={d.id}>
@@ -615,40 +681,6 @@ export function SettingsTab({
           {status}
         </p>
       </section>
-
-      {lost && (
-        <section aria-labelledby="pw-h">
-          <h2 id="pw-h">Phone notifications are set up</h2>
-          <p>Install the ntfy app, then follow the setup page to subscribe.</p>
-          <p className="hint">Your password was shown once when you set this up. If you lost it, generate a new one.</p>
-          <div className="row">
-            {setupHref !== null && (
-              <a className="signout" href={setupHref} target="_blank" rel="noopener noreferrer">
-                Open the setup page
-              </a>
-            )}
-            <button
-              className="secondary"
-              type="button"
-              data-trigger="ntfy-generate"
-              onClick={() => openConfirm({ k: "reset" })}
-            >
-              Generate a new password
-            </button>
-          </div>
-          {confirm !== null && confirm.k === "reset" && (
-            <ConfirmPrompt
-              key={`reset:${confirm.n}`}
-              question="Generate a new password?"
-              note="The old password stops working. You will need to enter the new one in the ntfy app."
-              confirmLabel="Yes, generate"
-              busy={confirmBusy}
-              onConfirm={() => void onReset()}
-              onCancel={cancelConfirm}
-            />
-          )}
-        </section>
-      )}
 
       {noDest !== null && remindersOn > 0 && (
         <div className="alert" role="alert">

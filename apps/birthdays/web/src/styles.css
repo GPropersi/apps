@@ -338,6 +338,8 @@ fieldset.spaced { margin-bottom: 1rem; }
 .secretval { font-family: ui-monospace, monospace; font-size: 1rem; overflow-wrap: anywhere; }
 section[data-secret] { border-color: var(--accent); }
 ul.items > li > button { flex: none; }
+ul.items.dests > li { flex-wrap: wrap; }
+.ntfysetup { flex: 1 1 100%; display: grid; gap: 0.5rem; padding: 0.75rem; border-radius: 0.75rem; background: var(--surface-2); border: 1px solid var(--border); }
 /* Add-destination form: type and label share a row when there is room, the URL always gets a full row */
 .destform { display: grid; gap: 0.75rem; margin-top: 1.25rem; padding-top: 1rem; border-top: 1px solid var(--border); }
 .destform .fields { display: flex; flex-wrap: wrap; gap: 0.75rem; align-items: flex-start; }
