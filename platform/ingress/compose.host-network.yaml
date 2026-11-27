@@ -1,0 +1,86 @@
+# Cloudflared connectors for hosts that are not the app host: the same self-updating blue/green supervisor pair
+# the app host runs (compose.yaml), and nothing else (no Traefik, no down page, no legacy `cloudflared`).
+#
+# Host network because every origin these tunnels serve is a localhost listener, and the metrics listeners
+# (CF_METRICS_A / CF_METRICS_B) are host-loopback addresses. There is no `networks:`, no `ports:` and no `logging:`
+# (the journald default applies).
+#
+# Every command names its colour (never a bare `up`); only one colour runs outside an overlap, and a pin bump
+# repins the idle colour only. Both colours start on the regular pin because these hosts start fresh.
+#
+# Each service must stay identical to the same colour in compose.yaml apart from networking and the image pin:
+# platform/ingress/test_cloudflared_host_stack.sh enforces it (the YAML subset forbids anchors and merge keys, so
+# the two files cannot share a fragment). Host-side inputs (never written here): the token file, the webhook file
+# and the two state directories, laid down by the host-network installer.
+name: platform-cloudflared
+
+services:
+  cloudflared-blue:
+    image: ghcr.io/gpropersi/cloudflared-supervisor:45838827422@sha256:54a6d9c047024919011b9cbf477475085b9bc3a761702ac27b13554f4508d471
+    environment:
+      TUNNEL_TOKEN_FILE: /run/cloudflared/token
+      CF_WEBHOOK_FILE: /run/secrets/cloudflared-webhook
+      CF_METRICS_A: 127.0.0.1:20251
+      CF_METRICS_B: 127.0.0.1:20252
+    volumes:
+      - /etc/platform/cloudflared.token:/run/cloudflared/token:ro
+      - /etc/platform/cloudflared.webhook:/run/secrets/cloudflared-webhook:ro
+      - /var/lib/cloudflared-supervisor-blue:/var/lib/cloudflared-supervisor
+    user: "65532:65532"
+    group_add:
+      - "64321"
+    network_mode: host
+    restart: unless-stopped
+    mem_limit: 192m
+    stop_grace_period: 45s
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    read_only: true
+    tmpfs:
+      - /tmp
+    healthcheck:
+      test:
+        - CMD
+        - /usr/local/bin/cloudflared-supervisor.sh
+        - --health
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 120s
+
+  cloudflared-green:
+    image: ghcr.io/gpropersi/cloudflared-supervisor:45838827422@sha256:54a6d9c047024919011b9cbf477475085b9bc3a761702ac27b13554f4508d471
+    environment:
+      TUNNEL_TOKEN_FILE: /run/cloudflared/token
+      CF_WEBHOOK_FILE: /run/secrets/cloudflared-webhook
+      CF_METRICS_A: 127.0.0.1:20253
+      CF_METRICS_B: 127.0.0.1:20254
+    volumes:
+      - /etc/platform/cloudflared.token:/run/cloudflared/token:ro
+      - /etc/platform/cloudflared.webhook:/run/secrets/cloudflared-webhook:ro
+      - /var/lib/cloudflared-supervisor-green:/var/lib/cloudflared-supervisor
+    user: "65532:65532"
+    group_add:
+      - "64321"
+    network_mode: host
+    restart: unless-stopped
+    mem_limit: 192m
+    stop_grace_period: 45s
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    read_only: true
+    tmpfs:
+      - /tmp
+    healthcheck:
+      test:
+        - CMD
+        - /usr/local/bin/cloudflared-supervisor.sh
+        - --health
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 120s
