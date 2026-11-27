@@ -72,7 +72,7 @@ export LC_ALL=C
 # groupadd, getent and friends live in /usr/sbin, which a non-root ssh user's PATH lacks
 export PATH="$PATH:/usr/sbin:/sbin"
 
-readonly INSTALLER_STAMP=58ca699691c4fedb
+readonly INSTALLER_STAMP=997a94e3db6896f4
 # The dedicated token group. Fixed, chosen without knowledge of the host's group database; it must equal the numeric
 # group_add of cloudflared in compose.yaml (the test suite compares the two).
 readonly TOKEN_GID=64321
@@ -248,7 +248,7 @@ services:
       start_period: 120s
 
   cloudflared-green:
-    image: ghcr.io/gpropersi/cloudflared-supervisor:45649683873@sha256:dd629863d150e97e8e5af78f5053fe7ea75e5a130aec882d90c2c34860bcc367
+    image: ghcr.io/gpropersi/cloudflared-supervisor:45838827422@sha256:54a6d9c047024919011b9cbf477475085b9bc3a761702ac27b13554f4508d471
     environment:
       TUNNEL_TOKEN_FILE: /run/cloudflared/token
       CF_WEBHOOK_FILE: /run/secrets/cloudflared-webhook
