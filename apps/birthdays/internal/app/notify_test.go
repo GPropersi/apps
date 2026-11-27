@@ -157,7 +157,7 @@ func TestNtfyPasswordIsReturnedOnceAndRepeatDoesNotReprovision(t *testing.T) {
 	if first.Password == nil || *first.Password != "pw-first-secret" || first.UserID != "ntfy-user-1" {
 		t.Fatalf("first provision = %+v", first)
 	}
-	if want := "https://notifs-setup.4irl.app/?app=apps_birthdays&user=ntfy-user-1"; first.SetupURL != want {
+	if want := "https://notifs-setup.4irl.app/?app=apps_birthdays&user=ntfy-user-1&name=Birthdays"; first.SetupURL != want {
 		t.Fatalf("setup_url = %q, want %q", first.SetupURL, want)
 	}
 	if strings.Contains(first.SetupURL, "pw-") {
@@ -301,7 +301,7 @@ func TestNtfyReset(t *testing.T) {
 		Settings notifySettings `json:"settings"`
 	}
 	decode(t, rec.Body.String(), &ok)
-	if ok.Password != "pw-reset-secret" || !strings.HasSuffix(ok.SetupURL, "&user=ntfy-user-1") || !ok.Settings.Ntfy {
+	if ok.Password != "pw-reset-secret" || !strings.HasSuffix(ok.SetupURL, "&user=ntfy-user-1&name=Birthdays") || !ok.Settings.Ntfy {
 		t.Fatalf("reset = %+v", ok)
 	}
 	if rec.Header().Get("Cache-Control") != "no-store" {

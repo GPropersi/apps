@@ -26,6 +26,7 @@ const (
 	maxLabelRunes    = 50
 	hintLen          = 3
 	notifsSetupBase  = "https://notifs-setup.4irl.app/"
+	notifsSetupName  = "Birthdays"
 	cleanupTimeout   = 5 * time.Second
 	signingSecretLen = 32
 	maxURLLen        = 2048
@@ -59,7 +60,8 @@ func noStore(next http.Handler) http.Handler {
 }
 
 func (s *Server) setupURL(userID string) string {
-	return notifsSetupBase + "?app=" + url.QueryEscape(s.NotifsAppID) + "&user=" + url.QueryEscape(userID)
+	return notifsSetupBase + "?app=" + url.QueryEscape(s.NotifsAppID) + "&user=" + url.QueryEscape(userID) +
+		"&name=" + url.QueryEscape(notifsSetupName)
 }
 
 // isNotifsErr reports whether err came from the notifs client (as opposed to the database).
