@@ -200,9 +200,9 @@ serves: each can start, recreate or remove a connector you did not name, and the
 `/opt/platform/ingress/compose.yaml` by hand either (`status` fails on payload drift): pin changes go through the repo
 compose, `make embed`, merge and the installer.
 
-Once the stronghold's `make cloudflared-probe` exists, it runs across steps 1 to 3; until then watch
-`make cloudflared-drift` and the status file's `ready` value. Both are stronghold targets (run from the stronghold
-checkout), not targets of this repo; `make cloudflared-probe` does not exist yet.
+Run the stronghold's `make cloudflared-probe` across a cutover or a pin bump, for example with
+`ARGS="--count 120 --interval 1"` (or longer), and watch `make cloudflared-drift` as the second signal. Both are
+stronghold targets (run from the stronghold checkout), not targets of this repo.
 
 ### Readiness gate
 

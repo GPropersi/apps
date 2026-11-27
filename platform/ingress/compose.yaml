@@ -95,7 +95,7 @@ services:
       start_period: 120s
 
   cloudflared-green:
-    image: ghcr.io/gpropersi/cloudflared-supervisor:45649683873@sha256:dd629863d150e97e8e5af78f5053fe7ea75e5a130aec882d90c2c34860bcc367
+    image: ghcr.io/gpropersi/cloudflared-supervisor:45838827422@sha256:54a6d9c047024919011b9cbf477475085b9bc3a761702ac27b13554f4508d471
     environment:
       TUNNEL_TOKEN_FILE: /run/cloudflared/token
       CF_WEBHOOK_FILE: /run/secrets/cloudflared-webhook

@@ -25,8 +25,8 @@ host_readme="$(cd "$here/../host" && pwd)/README.md"
 services="cloudflared cloudflared-blue cloudflared-green down-page traefik"
 connectors="cloudflared cloudflared-blue cloudflared-green"
 supervisors="cloudflared-blue cloudflared-green"
-# The pilot supervisor image (the compose text; the check enforces only its shape).
-sup_ref="ghcr.io/gpropersi/cloudflared-supervisor:45649683873@sha256:dd629863d150e97e8e5af78f5053fe7ea75e5a130aec882d90c2c34860bcc367"
+# A supervisor image reference (the mutations below start from it; the check enforces only its shape, and blue and green may carry different pins).
+sup_ref="ghcr.io/gpropersi/cloudflared-supervisor:45838827422@sha256:54a6d9c047024919011b9cbf477475085b9bc3a761702ac27b13554f4508d471"
 declare -A svc_nets=(
   [cloudflared]="platform"
   [cloudflared-blue]="platform"
@@ -101,7 +101,7 @@ host_files="$host_files platform.sh login-shell.sh install-deploy-user.sh claude
 host_files="$host_files install-backup.sh restore.sh backup.sh platform-backup.service platform-backup.timer RUNBOOK.md "
 host_files="$host_files install-data.sh install-jobs.sh jobs-redis.password deploy.sh validate-app-yaml.sh new-db.sh notifs-key.sh rm-db.sh pg_hba.conf redis-entrypoint.sh postgres-admin.password redis-admin.password "
 host_files="$host_files verify-egress.sh verify-ingress.sh server-host-base.sh authorized_keys.d egress-deny.cidrs egress-allow.cidrs "
-host_files="$host_files write-access-env.sh check-installer-stamps.sh check-workflows.sh test_gate_run.sh "
+host_files="$host_files check-unique-hosts.sh _hostname-claims.lock write-access-env.sh check-installer-stamps.sh check-workflows.sh test_gate_run.sh "
 # The supervisor image's script path and the webhook file the supervisor connectors mount (exact tokens).
 host_files="$host_files cloudflared-supervisor.sh cloudflared.webhook "
 host_files="$host_files docker-user.rules.bak docker-user.rules docker-user-firewall.service "
@@ -618,7 +618,7 @@ for svc in $connectors; do
   mutate "$svc leaves the YAML subset" "outside the YAML subset" compose "$svc" 2 replace '^    cap_drop:' '    cap_drop: [ALL]'
   mutate "$svc docker socket" "the Docker socket is mounted" compose "$svc" 2 after '^    volumes:' '      - /var/run/docker.sock:/var/run/docker.sock:ro'
   # supervisor-specific rules
-  mutate "$svc latest tag" "floating or unpinned" compose "$svc" 2 replace '^    image:' "    image: ${sup_ref/:45649683873@/:latest@}"
+  mutate "$svc latest tag" "floating or unpinned" compose "$svc" 2 replace '^    image:' "    image: ${sup_ref/:45838827422@/:latest@}"
   mutate "$svc another ghcr owner" "floating or unpinned" compose "$svc" 2 replace '^    image:' "    image: ${sup_ref/gpropersi/otherowner}"
   mutate "$svc command added" "command is not allowed" compose "$svc" 2 after '^    image:' '    command:\n      - tunnel'
   mutate "$svc TUNNEL_METRICS added" "TUNNEL_METRICS is not allowed" compose "$svc" 2 after '^    environment:' '      TUNNEL_METRICS: 127.0.0.1:20241'
