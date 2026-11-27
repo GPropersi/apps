@@ -338,6 +338,12 @@ fieldset.spaced { margin-bottom: 1rem; }
 .secretval { font-family: ui-monospace, monospace; font-size: 1rem; overflow-wrap: anywhere; }
 section[data-secret] { border-color: var(--accent); }
 ul.items > li > button { flex: none; }
+ul.items.dests > li { flex-wrap: wrap; gap: 0.5rem 0.75rem; }
+ul.items.dests .pinfo { flex: 1 1 10rem; }
+ul.items.dests .actions { display: flex; flex-wrap: wrap; gap: 0.5rem; }
+ul.items.dests .actions button { flex: none; }
+ul.items.dests + .status:empty { min-height: 0; }
+.ntfysetup { flex: 1 1 100%; display: grid; gap: 0.5rem; padding: 0.75rem; border-radius: 0.75rem; background: var(--surface-2); border: 1px solid var(--border); }
 /* Add-destination form: type and label share a row when there is room, the URL always gets a full row */
 .destform { display: grid; gap: 0.75rem; margin-top: 1.25rem; padding-top: 1rem; border-top: 1px solid var(--border); }
 .destform .fields { display: flex; flex-wrap: wrap; gap: 0.75rem; align-items: flex-start; }
@@ -369,6 +375,7 @@ fieldset:disabled .week { opacity: 0.7; }
   .seg label span { padding: 0; }
   /* People rows: a smaller avatar and chip so the name column fits a whole first name */
   ul.items > li { gap: 0.5rem; }
+  ul.items.dests > li { gap: 0.5rem; }
   ul.items .avatar:not(.big) { width: 2.25rem; height: 2.25rem; font-size: 0.8125rem; }
   .chip { font-size: 0.75rem; padding: 0.25rem 0.5rem; }
   .schemes { gap: 0.375rem; }

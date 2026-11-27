@@ -1,6 +1,16 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { FormEvent } from "react";
-import { checkDestination, deleteDestination, getDestinations, postDestination, postNtfy, postNtfyReset } from "./api";
+import {
+  checkDestination,
+  deleteDestination,
+  getDestinations,
+  getMe,
+  postDestination,
+  postDestinationTest,
+  postNtfy,
+  postNtfyReset,
+  postNtfyTest,
+} from "./api";
 import type { Birthday, CalendarZoom, ColorScheme, Destination, Failure, ListView, Settings, StartTab } from "./api";
 import { noDestination } from "./format";
 import { failureText } from "./messages";
@@ -52,7 +62,8 @@ const ADD_TRIGGER = '[data-trigger="add-destination"]';
 const GENERATE_TRIGGER = '[data-trigger="ntfy-generate"]';
 const LABEL_FIELD = "#dest-label";
 const URL_FIELD = "#dest-url";
-const removeSel =(id: number) => `[data-remove="${id}"]`;
+const removeSel = (id: number) => `[data-remove="${id}"]`;
+const checkSel = (id: number) => `[data-check="${id}"]`;
 const find = (sel: string) => document.querySelector<HTMLElement>(sel);
 
 function destLabel(d: Destination): string {
@@ -87,10 +98,14 @@ export function SettingsTab({
   const [confirm, setConfirm] = useState<Confirm | null>(null);
   const [confirmBusy, setConfirmBusy] = useState(false);
   const [ntfySetup, setNtfySetup] = useState<string | null>(null);
-  // Set only when the server answered password:null and no ntfy entry was held; cleared when a password is shown.
-  const [ntfyLost, setNtfyLost] = useState(false);
+  // The phone setup details under the phone row; opened by the button, closed by Hide setup or a successful reset.
+  const [ntfyOpen, setNtfyOpen] = useState(false);
   const [ntfyBusy, setNtfyBusy] = useState(false);
   const [checking, setChecking] = useState<number | null>(null);
+  // The one test send in flight: "ntfy" or the destination id. testText is its own live region under the list.
+  const [testing, setTesting] = useState<string | null>(null);
+  const [testText, setTestText] = useState("");
+  const [testOk, setTestOk] = useState(false);
 
   const [kind, setKind] = useState<"discord" | "webhook">("discord");
   const [label, setLabel] = useState("");
@@ -104,8 +119,14 @@ export function SettingsTab({
   const ntfyRef = useRef(false);
   const addingRef = useRef(false);
   const confirmBusyRef = useRef(false);
+  const testingRef = useRef(false);
   const pendingFocus = useRef<number | null>(null);
+  // Set only by onTest after a destination_stale, so the reload lands focus on that row's Check again.
+  const pendingCheckFocus = useRef<number | null>(null);
   const destH = useRef<HTMLHeadingElement>(null);
+  const setupH = useRef<HTMLHeadingElement>(null);
+  // One-shot request to focus the setup heading once the block has mounted.
+  const focusSetup = useRef(false);
   const live = useRef(true);
   const loadSeq = useRef(0);
   // Rows added or removed here, so a destinations load that started earlier cannot undo them.
@@ -123,34 +144,56 @@ export function SettingsTab({
 
   const say = useCallback((message: string) => announce(setStatus, message), []);
 
-  const loadDests = useCallback(async () => {
+  const sayTest = useCallback((message: string, kind: "ok" | "err") => {
+    setTestOk(kind === "ok");
+    announce(setTestText, message);
+  }, []);
+
+  // Resolves true only when it applied the loaded rows; false when superseded, unmounted or failed.
+  const loadDests = useCallback(async (): Promise<boolean> => {
     setLoadErr("");
     loadSeq.current += 1;
     const seq = loadSeq.current;
     const res = await getDestinations();
     if (!live.current || seq !== loadSeq.current) {
-      return;
+      return false;
     }
     if (res.kind === "ok") {
       const rows = res.data.filter((d) => !removedRef.current.has(d.id));
       const extra = addedRef.current.filter((a) => !removedRef.current.has(a.id) && !rows.some((d) => d.id === a.id));
       setDests([...rows, ...extra]);
-    } else if (!onSessionFailure(res)) {
+      return true;
+    }
+    if (!onSessionFailure(res)) {
       setLoadErr(failureText(res.kind));
     }
+    return false;
   }, [onSessionFailure]);
 
   useEffect(() => {
     void loadDests();
   }, [loadDests]);
 
-  // After Check again un-stales a row, focus moves to that row's Remove button once it has rendered.
+  // After Check again un-stales a row, focus moves to that row's Remove button once it has rendered. After a failed
+  // test send marks a row stale, focus moves to its Check again button (or the heading if the row is gone).
   useEffect(() => {
     if (pendingFocus.current !== null) {
       find(removeSel(pendingFocus.current))?.focus();
       pendingFocus.current = null;
     }
+    if (pendingCheckFocus.current !== null) {
+      (find(checkSel(pendingCheckFocus.current)) ?? destH.current)?.focus();
+      pendingCheckFocus.current = null;
+    }
   }, [dests]);
+
+  const showSetup = ntfyOpen && settings?.ntfy === true && !hasNtfySecret;
+  useEffect(() => {
+    if (showSetup && focusSetup.current) {
+      focusSetup.current = false;
+      setupH.current?.focus();
+    }
+  }, [showSetup]);
 
   function openConfirm(next: ConfirmRequest) {
     nonce.current += 1;
@@ -188,6 +231,7 @@ export function SettingsTab({
     setConfirmBusy(false);
     setConfirm(null);
     if (res.kind === "ok" || res.kind === "not_found") {
+      setTestText("");
       setDests((d) => (d === null ? d : d.filter((x) => x.id !== c.id)));
       say(`Removed ${c.label}`);
       destH.current?.focus();
@@ -209,10 +253,10 @@ export function SettingsTab({
     confirmBusyRef.current = false;
     if (res.kind === "ok") {
       applyCounters(res.data.settings);
-      // The Generate button unmounts with the lost-password panel, so acknowledging falls back to the screen heading.
+      // The block closes after a reset (Generate unmounts), so acknowledging lands on the phone row button.
       addSecret(
         { key: "ntfy", kind: "ntfy", title: NTFY_TITLE, value: res.data.password, setupUrl: res.data.setup_url },
-        () => find(GENERATE_TRIGGER),
+        () => find(NTFY_TRIGGER),
       );
     }
     if (!live.current) {
@@ -222,7 +266,7 @@ export function SettingsTab({
     setConfirm(null);
     if (res.kind === "ok") {
       setNtfySetup(res.data.setup_url);
-      setNtfyLost(false);
+      setNtfyOpen(false);
       return;
     }
     if (!onSessionFailure(res)) {
@@ -261,10 +305,100 @@ export function SettingsTab({
     }
     setNtfySetup(res.data.setup_url);
     if (res.data.password !== null) {
-      setNtfyLost(false);
+      focusSetup.current = false;
+      setNtfyOpen(false);
     } else if (!hasNtfyRef.current) {
-      setNtfyLost(true);
-      say("Phone notifications are set up. Your password was shown once; generate a new one if you lost it.");
+      focusSetup.current = true;
+      setNtfyOpen(true);
+    } else {
+      focusSetup.current = false;
+      setNtfyOpen(false);
+      find("[data-secret=ntfy] h2")?.focus();
+      say("Your phone notification password is shown above.");
+    }
+  }
+
+  function onNtfyButton() {
+    if (locked) {
+      return;
+    }
+    if (showSetup) {
+      if (confirmBusy) {
+        return;
+      }
+      if (confirm?.k === "reset") {
+        setConfirm(null);
+      }
+      setTestText("");
+      setNtfyOpen(false);
+      return;
+    }
+    setTestText("");
+    void onNtfy();
+  }
+
+  // One test at a time: the guard is held until the whole flow (including the stale reload) has finished.
+  async function onTest(target: "ntfy" | Destination) {
+    if (locked || testingRef.current) {
+      return;
+    }
+    testingRef.current = true;
+    try {
+      await runTest(target);
+    } finally {
+      testingRef.current = false;
+    }
+  }
+
+  async function runTest(target: "ntfy" | Destination) {
+    const id = target === "ntfy" ? null : target.id;
+    const name = target === "ntfy" ? "your phone" : target.label;
+    setTesting(target === "ntfy" ? "ntfy" : String(target.id));
+    setTestText("");
+    const res = await (target === "ntfy" ? postNtfyTest() : postDestinationTest(target.id));
+    if (res.kind === "ok") {
+      applyCounters(res.data.settings);
+    }
+    if (!live.current) {
+      return;
+    }
+    setTesting(null);
+    if (id !== null && removedRef.current.has(id)) {
+      return;
+    }
+    if (res.kind === "ok") {
+      sayTest(`Test sent to ${name}. It can take a few seconds to arrive.`, "ok");
+      return;
+    }
+    if (id !== null && res.kind === "not_found") {
+      removedRef.current.add(id);
+      addedRef.current = addedRef.current.filter((a) => a.id !== id);
+      setDests((d) => (d === null ? d : d.filter((x) => x.id !== id)));
+      sayTest("That destination is already gone.", "err");
+      destH.current?.focus();
+      return;
+    }
+    if (id !== null && res.kind === "destination_stale") {
+      sayTest(failureText("destination_stale"), "err");
+      const me = await getMe();
+      if (!live.current) {
+        return;
+      }
+      if (me.kind === "ok") {
+        applyCounters(me.data.settings);
+      } else if (onSessionFailure(me)) {
+        return;
+      }
+      pendingCheckFocus.current = id;
+      const applied = await loadDests();
+      if (!applied) {
+        pendingCheckFocus.current = null;
+      }
+      return;
+    }
+    if (!onSessionFailure(res)) {
+      const extra = id === null && res.kind === "ntfy_not_set_up" ? " Tap Show setup again to finish phone setup." : "";
+      sayTest(`${failureText(res.kind)}${extra}`, "err");
     }
   }
 
@@ -367,7 +501,6 @@ export function SettingsTab({
   const remindersOn = list === null ? 0 : list.filter((b) => b.reminder_offsets.length > 0).length;
   const staleNames = (dests ?? []).filter((d) => d.stale).map((d) => d.label);
   const setupHref = ntfySetup === null ? null : safeHref(ntfySetup);
-  const lost = ntfyLost && !hasNtfySecret && settings?.ntfy === true;
 
   return (
     <>
@@ -479,25 +612,72 @@ export function SettingsTab({
         <h2 id="dst-h" tabIndex={-1} ref={destH}>
           Where reminders go
         </h2>
-        <ul className="items" aria-label="Reminder destinations">
+        <ul className="items dests" aria-label="Reminder destinations">
           <li>
             <div className="pinfo">
               <strong>Phone notifications (ntfy)</strong>
               <div className="meta">{settings?.ntfy === true ? "Set up" : "Not set up yet"}</div>
             </div>
-            <button
-              className="secondary"
-              type="button"
-              data-trigger="ntfy-setup"
-              aria-disabled={ntfyBusy || locked ? "true" : undefined}
-              onClick={() => {
-                if (!locked) {
-                  void onNtfy();
-                }
-              }}
-            >
-              {settings?.ntfy === true ? "Show setup again" : "Set up phone"}
-            </button>
+            <div className="actions">
+              {settings?.ntfy === true && (
+                <button
+                  className="secondary"
+                  type="button"
+                  data-trigger="ntfy-test"
+                  aria-disabled={testing === "ntfy" || locked ? "true" : undefined}
+                  aria-label={testing === "ntfy" ? "Sending…: your phone" : "Send test to your phone"}
+                  onClick={() => void onTest("ntfy")}
+                >
+                  {testing === "ntfy" ? "Sending…" : "Send test"}
+                </button>
+              )}
+              <button
+                className="secondary"
+                type="button"
+                data-trigger="ntfy-setup"
+                aria-disabled={ntfyBusy || locked || (confirm?.k === "reset" && confirmBusy) ? "true" : undefined}
+                aria-expanded={settings?.ntfy === true ? showSetup : undefined}
+                aria-controls={showSetup ? "ntfy-setup" : undefined}
+                onClick={onNtfyButton}
+              >
+                {settings?.ntfy !== true ? "Set up phone" : showSetup ? "Hide setup" : "Show setup again"}
+              </button>
+            </div>
+            {showSetup && (
+              <div className="ntfysetup" id="ntfy-setup" role="group" aria-labelledby="pw-h">
+                <h3 id="pw-h" tabIndex={-1} ref={setupH}>
+                  Phone notifications are set up
+                </h3>
+                <p>Install the ntfy app, then follow the setup page to subscribe.</p>
+                <p className="hint">Your password was shown once when you set this up. If you lost it, generate a new one.</p>
+                <div className="row">
+                  {setupHref !== null && (
+                    <a className="signout" href={setupHref} target="_blank" rel="noopener noreferrer">
+                      Open the setup page
+                    </a>
+                  )}
+                  <button
+                    className="secondary"
+                    type="button"
+                    data-trigger="ntfy-generate"
+                    onClick={() => openConfirm({ k: "reset" })}
+                  >
+                    Generate a new password
+                  </button>
+                </div>
+                {confirm !== null && confirm.k === "reset" && (
+                  <ConfirmPrompt
+                    key={`reset:${confirm.n}`}
+                    question="Generate a new password?"
+                    note="The old password stops working. You will need to enter the new one in the ntfy app."
+                    confirmLabel="Yes, generate"
+                    busy={confirmBusy}
+                    onConfirm={() => void onReset()}
+                    onCancel={cancelConfirm}
+                  />
+                )}
+              </div>
+            )}
           </li>
           {(dests ?? []).map((d) => (
             <li key={d.id}>
@@ -508,29 +688,49 @@ export function SettingsTab({
                   {d.stale ? " · stale, not used for reminders" : ""}
                 </div>
               </div>
-              {d.stale && (
+              <div className="actions">
+                {d.stale ? (
+                  <button
+                    className="secondary"
+                    type="button"
+                    data-check={d.id}
+                    aria-disabled={checking === d.id ? "true" : undefined}
+                    aria-label={`${checking === d.id ? "Checking…" : "Check again"}: ${d.label}`}
+                    onClick={() => void onCheck(d)}
+                  >
+                    {checking === d.id ? "Checking…" : "Check again"}
+                  </button>
+                ) : (
+                  <button
+                    className="secondary"
+                    type="button"
+                    aria-disabled={testing === String(d.id) || locked ? "true" : undefined}
+                    aria-label={testing === String(d.id) ? `Sending…: ${d.label}` : `Send test to ${d.label}`}
+                    onClick={() => void onTest(d)}
+                  >
+                    {testing === String(d.id) ? "Sending…" : "Send test"}
+                  </button>
+                )}
                 <button
                   className="secondary"
                   type="button"
-                  aria-disabled={checking === d.id ? "true" : undefined}
-                  aria-label={`${checking === d.id ? "Checking…" : "Check again"}: ${d.label}`}
-                  onClick={() => void onCheck(d)}
+                  data-remove={d.id}
+                  aria-label={`Remove destination ${d.label}`}
+                  onClick={() => openConfirm({ k: "remove", id: d.id, label: d.label })}
                 >
-                  {checking === d.id ? "Checking…" : "Check again"}
+                  Remove
                 </button>
-              )}
-              <button
-                className="secondary"
-                type="button"
-                data-remove={d.id}
-                aria-label={`Remove destination ${d.label}`}
-                onClick={() => openConfirm({ k: "remove", id: d.id, label: d.label })}
-              >
-                Remove
-              </button>
+              </div>
             </li>
           ))}
         </ul>
+        <p
+          className={testText === "" ? "status" : testOk ? "status ok" : "status err"}
+          role="status"
+          data-testid="test-status"
+        >
+          {testText}
+        </p>
         {dests === null && loadErr === "" && <p className="loading">Loading destinations&hellip;</p>}
         {loadErr !== "" && (
           <div className="row">
@@ -615,40 +815,6 @@ export function SettingsTab({
           {status}
         </p>
       </section>
-
-      {lost && (
-        <section aria-labelledby="pw-h">
-          <h2 id="pw-h">Phone notifications are set up</h2>
-          <p>Install the ntfy app, then follow the setup page to subscribe.</p>
-          <p className="hint">Your password was shown once when you set this up. If you lost it, generate a new one.</p>
-          <div className="row">
-            {setupHref !== null && (
-              <a className="signout" href={setupHref} target="_blank" rel="noopener noreferrer">
-                Open the setup page
-              </a>
-            )}
-            <button
-              className="secondary"
-              type="button"
-              data-trigger="ntfy-generate"
-              onClick={() => openConfirm({ k: "reset" })}
-            >
-              Generate a new password
-            </button>
-          </div>
-          {confirm !== null && confirm.k === "reset" && (
-            <ConfirmPrompt
-              key={`reset:${confirm.n}`}
-              question="Generate a new password?"
-              note="The old password stops working. You will need to enter the new one in the ntfy app."
-              confirmLabel="Yes, generate"
-              busy={confirmBusy}
-              onConfirm={() => void onReset()}
-              onCancel={cancelConfirm}
-            />
-          )}
-        </section>
-      )}
 
       {noDest !== null && remindersOn > 0 && (
         <div className="alert" role="alert">

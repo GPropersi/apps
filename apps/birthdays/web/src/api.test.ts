@@ -12,9 +12,11 @@ import {
   patchSettings,
   postBirthday,
   postDestination,
+  postDestinationTest,
   postGift,
   postNtfy,
   postNtfyReset,
+  postNtfyTest,
   postShare,
   putBirthday,
   putReminders,
@@ -146,6 +148,7 @@ describe("api result mapping", () => {
     [400, "invalid_setting"],
     [400, "empty"],
     [500, "notify_unavailable"],
+    [409, "destination_stale"],
   ])("maps %i %s to its own kind", async (status, code) => {
     respond(JSON.stringify({ error: code }), status, JSON_CT);
     expect(await postBirthday({ name: "x", month: 1, day: 1, offsets: [] })).toEqual({ kind: code });
@@ -184,6 +187,27 @@ describe("api result mapping", () => {
     expect(await postBirthday({ name: "x", month: 1, day: 1, offsets: [] })).toEqual({ kind: "session_expired" });
     respond("<html>odd</html>", 201, HTML);
     expect(await postBirthday({ name: "x", month: 1, day: 1, offsets: [] })).toEqual({ kind: "generic" });
+  });
+});
+
+describe("test sends", () => {
+  it("posts to the phone test path and returns the settings", async () => {
+    const f = respond(JSON.stringify({ settings: SETTINGS }), 200, JSON_CT);
+    expect(await postNtfyTest()).toEqual({ kind: "ok", data: { settings: SETTINGS } });
+    expect(f.mock.calls[0]?.[0]).toBe("/api/notify/ntfy/test");
+    expect((f.mock.calls[0]?.[1] as RequestInit).method).toBe("POST");
+  });
+
+  it("posts to the destination test path and returns the settings", async () => {
+    const f = respond(JSON.stringify({ settings: SETTINGS }), 200, JSON_CT);
+    expect(await postDestinationTest(7)).toEqual({ kind: "ok", data: { settings: SETTINGS } });
+    expect(f.mock.calls[0]?.[0]).toBe("/api/notify/destinations/7/test");
+    expect((f.mock.calls[0]?.[1] as RequestInit).method).toBe("POST");
+  });
+
+  it("maps a 409 destination_stale to its own kind", async () => {
+    respond('{"error":"destination_stale"}', 409, JSON_CT);
+    expect(await postDestinationTest(7)).toEqual({ kind: "destination_stale" });
   });
 });
 

@@ -112,6 +112,7 @@ var realWrites = []struct{ method, path string }{
 	{"POST", "/api/birthdays/1/gifts"}, {"PATCH", "/api/gifts/1"}, {"DELETE", "/api/gifts/1"},
 	{"POST", "/api/notify/ntfy"}, {"POST", "/api/notify/ntfy/reset"}, {"POST", "/api/notify/destinations"},
 	{"POST", "/api/notify/destinations/1/check"}, {"DELETE", "/api/notify/destinations/1"},
+	{"POST", "/api/notify/ntfy/test"}, {"POST", "/api/notify/destinations/1/test"},
 }
 
 func TestEveryRealWriteRouteHasTheWriteGuard(t *testing.T) {

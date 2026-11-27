@@ -3,6 +3,8 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { App } from "./App";
 import type { Birthday, Destination, Settings } from "./api";
+import { SettingsTab } from "./Settings";
+import type { SettingsSaver } from "./useSettingsSaver";
 
 type Handler = (init?: RequestInit) => Response | Promise<Response>;
 type Routes = Record<string, Handler>;
@@ -508,6 +510,416 @@ describe("destinations", () => {
   });
 });
 
+describe("send test buttons", () => {
+  const LIST_ROUTES: Routes = { "GET /api/notify/destinations": () => json({ destinations: [D_OK, D_STALE] }) };
+  const WITH = settings({ ntfy: true, destinations: 2, stale_destinations: 1 });
+  const GONE = settings({ ntfy: false, destinations: 2, stale_destinations: 1 });
+  const PHONE_TEST = "POST /api/notify/ntfy/test";
+  const DEST_TEST = "POST /api/notify/destinations/5/test";
+  const testStatus = () => screen.getByTestId("test-status");
+  const phoneTest = () => screen.getByRole("button", { name: "Send test to your phone" });
+  const checkBtn = (id: number) => document.querySelector<HTMLElement>(`[data-check="${id}"]`);
+  const SENT_PHONE = "Test sent to your phone. It can take a few seconds to arrive.";
+  const SENT_DEST = "Test sent to family-server. It can take a few seconds to arrive.";
+  const heading = () => screen.getByRole("heading", { name: "Where reminders go" });
+
+  it("shows the phone button only when the phone is set up", async () => {
+    await open(LIST_ROUTES, settings({ ntfy: false, destinations: 2, stale_destinations: 1 }));
+    await screen.findByRole("button", { name: "Send test to family-server" });
+    expect(screen.queryByRole("button", { name: "Send test to your phone" })).not.toBeInTheDocument();
+  });
+
+  it("shows a destination button only on non-stale rows, which keep Check again", async () => {
+    await open(LIST_ROUTES, WITH);
+    expect(await screen.findByRole("button", { name: "Send test to family-server" })).toBeInTheDocument();
+    expect(phoneTest()).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Send test to old-server" })).not.toBeInTheDocument();
+    expect(checkBtn(6)).not.toBeNull();
+    expect(checkBtn(5)).toBeNull();
+  });
+
+  it("announces the phone success copy with class ok and applies the counters", async () => {
+    const { user } = await open({ ...LIST_ROUTES, [PHONE_TEST]: () => json({ settings: GONE }) }, WITH);
+    await screen.findByRole("button", { name: "Send test to family-server" });
+    await user.click(phoneTest());
+    await waitFor(() => expect(testStatus()).toHaveTextContent(SENT_PHONE));
+    expect(testStatus()).toHaveClass("ok");
+    expect(await screen.findByRole("button", { name: "Set up phone" })).toBeInTheDocument();
+    expect(bodyOf(PHONE_TEST)).toEqual({});
+  });
+
+  it("announces the destination success copy and applies the counters", async () => {
+    const { user } = await open({ ...LIST_ROUTES, [DEST_TEST]: () => json({ settings: GONE }) }, WITH);
+    await user.click(await screen.findByRole("button", { name: "Send test to family-server" }));
+    await waitFor(() => expect(testStatus()).toHaveTextContent(SENT_DEST));
+    expect(testStatus()).toHaveClass("ok");
+    expect(await screen.findByRole("button", { name: "Set up phone" })).toBeInTheDocument();
+    expect(count(PHONE_TEST)).toBe(0);
+  });
+
+  it("is busy while in flight: Sending…, aria-disabled, focus kept, no second post from any test button", async () => {
+    const d = deferred();
+    const { user } = await open({ ...LIST_ROUTES, [DEST_TEST]: () => d.promise, [PHONE_TEST]: () => json({ settings: WITH }) }, WITH);
+    const btn = await screen.findByRole("button", { name: "Send test to family-server" });
+    await user.click(btn);
+    const busy = screen.getByRole("button", { name: "Sending…: family-server" });
+    expect(busy).toBe(btn);
+    expect(busy).toHaveTextContent("Sending…");
+    expect(busy).toHaveAttribute("aria-disabled", "true");
+    expect(busy).toHaveFocus();
+    await user.click(busy);
+    await user.click(phoneTest());
+    expect(count(DEST_TEST)).toBe(1);
+    expect(count(PHONE_TEST)).toBe(0);
+    await act(async () => {
+      d.resolve(json({ settings: WITH }));
+    });
+    await waitFor(() => expect(testStatus()).toHaveTextContent(SENT_DEST));
+    expect(btn).not.toHaveAttribute("aria-disabled");
+  });
+
+  it("names the phone button Sending…: your phone while in flight", async () => {
+    const d = deferred();
+    const { user } = await open({ ...LIST_ROUTES, [PHONE_TEST]: () => d.promise }, WITH);
+    await screen.findByRole("button", { name: "Send test to family-server" });
+    await user.click(phoneTest());
+    expect(screen.getByRole("button", { name: "Sending…: your phone" })).toHaveAttribute("aria-disabled", "true");
+    await act(async () => {
+      d.resolve(json({ settings: WITH }));
+    });
+    await waitFor(() => expect(testStatus()).toHaveTextContent(SENT_PHONE));
+  });
+
+  it.each([
+    ["rate_limited", 429, "Too many tries. Wait a minute and try again."],
+    ["notify_unavailable", 500, "Reminders are unavailable right now. Try again in a minute."],
+    ["ntfy_not_set_up", 409, "Phone notifications aren't set up yet."],
+  ])("announces %s for the phone with class err", async (code, status, text) => {
+    const { user } = await open({ ...LIST_ROUTES, [PHONE_TEST]: () => json({ error: code }, status) }, WITH);
+    await screen.findByRole("button", { name: "Send test to family-server" });
+    await user.click(phoneTest());
+    await waitFor(() => expect(testStatus()).toHaveTextContent(text));
+    expect(testStatus()).toHaveClass("err");
+    if (code === "ntfy_not_set_up") {
+      expect(testStatus()).toHaveTextContent("Show setup again");
+    } else {
+      expect(testStatus()).not.toHaveTextContent("Show setup again");
+    }
+    expect(phoneTest()).toHaveFocus();
+  });
+
+  it.each([
+    ["rate_limited", 429, "Too many tries. Wait a minute and try again."],
+    ["notify_unavailable", 500, "Reminders are unavailable right now. Try again in a minute."],
+    ["ntfy_not_set_up", 409, "Phone notifications aren't set up yet."],
+  ])("announces %s for a destination without the setup sentence", async (code, status, text) => {
+    const { user } = await open({ ...LIST_ROUTES, [DEST_TEST]: () => json({ error: code }, status) }, WITH);
+    await user.click(await screen.findByRole("button", { name: "Send test to family-server" }));
+    await waitFor(() => expect(testStatus()).toHaveTextContent(text));
+    expect(testStatus()).toHaveClass("err");
+    expect(testStatus()).not.toHaveTextContent("Show setup again");
+  });
+
+  it("shows the same result again after a repeated test", async () => {
+    const { user } = await open({ ...LIST_ROUTES, [DEST_TEST]: () => json({ settings: WITH }) }, WITH);
+    const btn = await screen.findByRole("button", { name: "Send test to family-server" });
+    await user.click(btn);
+    await waitFor(() => expect(testStatus()).toHaveTextContent(SENT_DEST));
+    await user.click(btn);
+    await waitFor(() => expect(count(DEST_TEST)).toBe(2));
+    await waitFor(() => expect(testStatus()).toHaveTextContent(SENT_DEST));
+  });
+
+  it("a session_expired shows the reload prompt and no test status", async () => {
+    const { user } = await open({ ...LIST_ROUTES, [DEST_TEST]: () => html(200) }, WITH);
+    await user.click(await screen.findByRole("button", { name: "Send test to family-server" }));
+    expect(await screen.findByText("Your sign-in has expired.")).toBeInTheDocument();
+    expect(testStatus()).toBeEmptyDOMElement();
+  });
+
+  describe("destination_stale", () => {
+    const STALE_BODY = () => json({ error: "destination_stale" }, 409);
+    function staleRoutes(over: Routes = {}) {
+      let stale = false;
+      let me = 0;
+      return {
+        ...LIST_ROUTES,
+        "GET /api/me": () => {
+          me += 1;
+          return json({ email: EMAIL, settings: me === 1 ? WITH : GONE });
+        },
+        "GET /api/notify/destinations": () => json({ destinations: [{ ...D_OK, stale }, D_STALE] }),
+        [DEST_TEST]: () => {
+          stale = true;
+          return STALE_BODY();
+        },
+        ...over,
+      } satisfies Routes;
+    }
+
+    it("announces the copy, refreshes counters via GET /api/me, reloads the list and focuses Check again", async () => {
+      const { user } = await open(staleRoutes(), WITH);
+      await user.click(await screen.findByRole("button", { name: "Send test to family-server" }));
+      const copy = "That destination didn't accept the test, so it's marked stale. Check the address, then tap Check again.";
+      await waitFor(() => expect(checkBtn(5)).not.toBeNull());
+      expect(testStatus()).toHaveTextContent(copy);
+      expect(testStatus()).toHaveClass("err");
+      expect(checkBtn(5)).toHaveFocus();
+      expect(count("GET /api/me")).toBe(2);
+      expect(count("GET /api/notify/destinations")).toBe(2);
+      expect(screen.getByRole("button", { name: "Set up phone" })).toBeInTheDocument();
+      expect(screen.queryByRole("button", { name: "Send test to family-server" })).not.toBeInTheDocument();
+    });
+
+    it("keeps the copy and counters when GET /api/me fails, and still reloads the list", async () => {
+      let me = 0;
+      const { user } = await open(
+        staleRoutes({
+          "GET /api/me": () => {
+            me += 1;
+            return me === 1 ? json({ email: EMAIL, settings: WITH }) : json({ error: "notify_unavailable" }, 500);
+          },
+        }),
+        WITH,
+      );
+      await user.click(await screen.findByRole("button", { name: "Send test to family-server" }));
+      await waitFor(() => expect(checkBtn(5)).not.toBeNull());
+      expect(testStatus()).toHaveTextContent("marked stale");
+      expect(phoneTest()).toBeInTheDocument();
+      expect(screen.queryByRole("button", { name: "Set up phone" })).not.toBeInTheDocument();
+    });
+
+    it("shows the reload prompt when GET /api/me answers session_expired", async () => {
+      let me = 0;
+      const { user } = await open(
+        staleRoutes({
+          "GET /api/me": () => {
+            me += 1;
+            return me === 1 ? json({ email: EMAIL, settings: WITH }) : html(200);
+          },
+        }),
+        WITH,
+      );
+      await user.click(await screen.findByRole("button", { name: "Send test to family-server" }));
+      expect(await screen.findByText("Your sign-in has expired.")).toBeInTheDocument();
+    });
+
+    it("focuses the Where reminders go heading when the reloaded list no longer has the row", async () => {
+      let gone = false;
+      const { user } = await open(
+        staleRoutes({
+          "GET /api/notify/destinations": () => json({ destinations: gone ? [D_STALE] : [D_OK, D_STALE] }),
+          [DEST_TEST]: () => {
+            gone = true;
+            return STALE_BODY();
+          },
+        }),
+        WITH,
+      );
+      await user.click(await screen.findByRole("button", { name: "Send test to family-server" }));
+      await waitFor(() => expect(heading()).toHaveFocus());
+      expect(testStatus()).toHaveTextContent("marked stale");
+    });
+
+    it("keeps focus on Send test when the reload fails, and a later dests change does not move focus", async () => {
+      let reloads = 0;
+      const { user } = await open(
+        staleRoutes({
+          "GET /api/notify/destinations": () => {
+            reloads += 1;
+            if (reloads === 2) {
+              return json({ error: "notify_unavailable" }, 500);
+            }
+            return json({ destinations: [{ ...D_OK, stale: reloads > 2 }, D_STALE] });
+          },
+        }),
+        WITH,
+      );
+      const btn = await screen.findByRole("button", { name: "Send test to family-server" });
+      await user.click(btn);
+      await screen.findByRole("button", { name: "Try again" });
+      expect(testStatus()).toHaveTextContent("marked stale");
+      expect(btn).toHaveFocus();
+      await user.click(screen.getByRole("button", { name: "Try again" }));
+      await waitFor(() => expect(checkBtn(5)).not.toBeNull());
+      expect(checkBtn(5)).not.toHaveFocus();
+    });
+
+    it("does not touch state or focus when the tab unmounts before the reload answers", async () => {
+      const late = deferred();
+      let reloads = 0;
+      const { user } = await open(
+        staleRoutes({
+          "GET /api/notify/destinations": () => {
+            reloads += 1;
+            return reloads === 2 ? late.promise : json({ destinations: [D_OK, D_STALE] });
+          },
+        }),
+        WITH,
+      );
+      await user.click(await screen.findByRole("button", { name: "Send test to family-server" }));
+      await waitFor(() => expect(reloads).toBe(2));
+      await user.click(within(nav()).getByRole("link", { name: /Add/ }));
+      await act(async () => {
+        late.resolve(json({ destinations: [{ ...D_OK, stale: true }, D_STALE] }));
+      });
+      expect(screen.queryByTestId("test-status")).not.toBeInTheDocument();
+      expect(checkBtn(5)).toBeNull();
+    });
+
+    it("ignores another test click while the stale refresh is still running", async () => {
+      const meLate = deferred();
+      let me = 0;
+      const { user } = await open(
+        staleRoutes({
+          "GET /api/me": () => {
+            me += 1;
+            return me === 1 ? json({ email: EMAIL, settings: WITH }) : meLate.promise;
+          },
+          [PHONE_TEST]: () => json({ settings: WITH }),
+        }),
+        WITH,
+      );
+      await user.click(await screen.findByRole("button", { name: "Send test to family-server" }));
+      await waitFor(() => expect(me).toBe(2));
+      await user.click(phoneTest());
+      expect(count(PHONE_TEST)).toBe(0);
+      await act(async () => {
+        meLate.resolve(json({ email: EMAIL, settings: GONE }));
+      });
+      await waitFor(() => expect(checkBtn(5)).not.toBeNull());
+    });
+  });
+
+  it("drops the row on a destination not_found, says so, focuses the heading and does not reload", async () => {
+    const { user } = await open({ ...LIST_ROUTES, [DEST_TEST]: () => json({ error: "not_found" }, 404) }, WITH);
+    await user.click(await screen.findByRole("button", { name: "Send test to family-server" }));
+    await waitFor(() => expect(testStatus()).toHaveTextContent("That destination is already gone."));
+    expect(testStatus()).toHaveClass("err");
+    expect(screen.queryByText("Discord: family-server")).not.toBeInTheDocument();
+    expect(heading()).toHaveFocus();
+    expect(count("GET /api/notify/destinations")).toBe(1);
+    expect(testStatus()).not.toHaveTextContent(/birthday/i);
+  });
+
+  it("announces nothing and moves no focus for a destination removed while its test was in flight", async () => {
+    const d = deferred();
+    const { user } = await open(
+      {
+        ...LIST_ROUTES,
+        [DEST_TEST]: () => d.promise,
+        "DELETE /api/notify/destinations/5": () => json({ settings: WITH }),
+      },
+      WITH,
+    );
+    await user.click(await screen.findByRole("button", { name: "Send test to family-server" }));
+    await user.click(screen.getByRole("button", { name: "Remove destination family-server" }));
+    await user.click(
+      within(screen.getByRole("group", { name: "Remove destination family-server?" })).getByRole("button", { name: "Yes, remove" }),
+    );
+    await waitFor(() => expect(heading()).toHaveFocus());
+    await act(async () => {
+      d.resolve(json({ settings: GONE }));
+    });
+    expect(testStatus()).toBeEmptyDOMElement();
+    expect(heading()).toHaveFocus();
+    expect(await screen.findByRole("button", { name: "Set up phone" })).toBeInTheDocument();
+  });
+
+  it("posts nothing from a locked Settings tab", async () => {
+    const posts: string[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((path: string, init?: RequestInit) => {
+        if (init?.method === "POST") {
+          posts.push(path);
+        }
+        return Promise.resolve(json({ destinations: [D_OK] }));
+      }),
+    );
+    const saver = { applyCounters: vi.fn(), save: vi.fn(), adopt: vi.fn(), latest: () => undefined, status: "", error: false };
+    const user = userEvent.setup();
+    render(
+      <SettingsTab
+        settings={WITH}
+        list={[]}
+        disabled
+        saver={saver as unknown as SettingsSaver}
+        onSessionFailure={() => false}
+        addSecret={() => undefined}
+        hasNtfySecret={false}
+      />,
+    );
+    await user.click(await screen.findByRole("button", { name: "Send test to family-server" }));
+    await user.click(phoneTest());
+    expect(posts).toEqual([]);
+    expect(saver.applyCounters).not.toHaveBeenCalled();
+  });
+
+  it("clears the test status when a new test starts", async () => {
+    const d = deferred();
+    let n = 0;
+    const { user } = await open(
+      {
+        ...LIST_ROUTES,
+        [DEST_TEST]: () => {
+          n += 1;
+          return n === 1 ? json({ settings: WITH }) : d.promise;
+        },
+      },
+      WITH,
+    );
+    const btn = await screen.findByRole("button", { name: "Send test to family-server" });
+    await user.click(btn);
+    await waitFor(() => expect(testStatus()).toHaveTextContent(SENT_DEST));
+    await user.click(btn);
+    await waitFor(() => expect(testStatus()).toBeEmptyDOMElement());
+    await act(async () => {
+      d.resolve(json({ settings: WITH }));
+    });
+  });
+
+  it("clears the test status when a destination is removed", async () => {
+    const { user } = await open(
+      {
+        ...LIST_ROUTES,
+        [DEST_TEST]: () => json({ settings: WITH }),
+        "DELETE /api/notify/destinations/6": () => json({ settings: WITH }),
+      },
+      WITH,
+    );
+    await user.click(await screen.findByRole("button", { name: "Send test to family-server" }));
+    await waitFor(() => expect(testStatus()).toHaveTextContent(SENT_DEST));
+    await user.click(screen.getByRole("button", { name: "Remove destination old-server" }));
+    await user.click(
+      within(screen.getByRole("group", { name: "Remove destination old-server?" })).getByRole("button", { name: "Yes, remove" }),
+    );
+    await waitFor(() => expect(destStatus()).toHaveTextContent("Removed old-server"));
+    expect(testStatus()).toBeEmptyDOMElement();
+  });
+
+  it("clears the test status when the setup block opens and closes", async () => {
+    const { user } = await open(
+      {
+        ...LIST_ROUTES,
+        [PHONE_TEST]: () => json({ settings: WITH }),
+        "POST /api/notify/ntfy": () => json({ user_id: "u1", setup_url: SETUP_URL, password: null, settings: WITH }),
+      },
+      WITH,
+    );
+    await screen.findByRole("button", { name: "Send test to family-server" });
+    await user.click(phoneTest());
+    await waitFor(() => expect(testStatus()).toHaveTextContent(SENT_PHONE));
+    await user.click(screen.getByRole("button", { name: "Show setup again" }));
+    await screen.findByRole("button", { name: "Hide setup" });
+    expect(testStatus()).toBeEmptyDOMElement();
+    await user.click(phoneTest());
+    await waitFor(() => expect(testStatus()).toHaveTextContent(SENT_PHONE));
+    await user.click(screen.getByRole("button", { name: "Hide setup" }));
+    expect(testStatus()).toBeEmptyDOMElement();
+  });
+});
+
 describe("the no-destination warning", () => {
   const NONE = settings({ ntfy: false, destinations: 0, stale_destinations: 0 });
   const warning = () => screen.queryByText("No place to send reminders yet.");
@@ -723,6 +1135,7 @@ describe("one-time secrets", () => {
     expect(await screen.findByRole("heading", { name: "Phone notifications are set up" })).toBeInTheDocument();
     expect(screen.queryByText(NTFY_PASSWORD)).not.toBeInTheDocument();
     expect(screen.queryByRole("region", { name: "Your phone notification password" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("group", { name: "Phone notifications are set up" })).toBeInTheDocument();
     expect(screen.getByText(/If you lost it, generate a new one/)).toBeInTheDocument();
   });
 
@@ -759,9 +1172,10 @@ describe("one-time secrets", () => {
     expect(hook).toHaveTextContent(HOOK_SECRET);
     await waitFor(() => expect(within(ntfy).getByRole("heading", { level: 2 })).toHaveFocus());
     expect(secretSections()).toHaveLength(2);
-    // The Generate button is gone with the lost-password panel, so acknowledging falls back to the screen heading.
+    // The block is closed after a reset, so acknowledging lands on the phone row button.
+    expect(screen.queryByRole("group", { name: "Phone notifications are set up" })).not.toBeInTheDocument();
     await user.click(within(ntfy).getByRole("button", { name: "I've saved it" }));
-    expect(screen.getByRole("heading", { level: 2, name: "Settings" })).toHaveFocus();
+    expect(screen.getByRole("button", { name: "Show setup again" })).toHaveFocus();
     expect(screen.getByRole("region", { name: HOOK_REGION("old-server") })).toHaveTextContent(HOOK_SECRET);
   });
 
@@ -786,16 +1200,136 @@ describe("one-time secrets", () => {
     await waitFor(() => expect(within(screen.getByRole("region", { name: NTFY_REGION })).getByRole("heading", { level: 2 })).toHaveFocus());
   });
 
-  it("shows the lost-password state when the first set-up answers password:null", async () => {
-    const { user } = await open({
-      "POST /api/notify/ntfy": () => json({ user_id: "u1", setup_url: SETUP_URL, password: null, settings: settings({ ntfy: true }) }),
-    }, settings({ ntfy: false }));
+  const NULL_NTFY: Handler = () => json({ user_id: "u1", setup_url: SETUP_URL, password: null, settings: settings({ ntfy: true }) });
+  const SETUP_GROUP = "Phone notifications are set up";
+  const phoneBtn = (name: "Show setup again" | "Hide setup") => screen.getByRole("button", { name });
+
+  it("opens the setup block inside the phone row when the first set-up answers password:null", async () => {
+    const { user } = await open({ "POST /api/notify/ntfy": NULL_NTFY }, settings({ ntfy: false }));
     await user.click(screen.getByRole("button", { name: "Set up phone" }));
-    expect(await screen.findByRole("heading", { name: "Phone notifications are set up" })).toBeInTheDocument();
+    const group = await screen.findByRole("group", { name: SETUP_GROUP });
+    expect(within(screen.getByRole("list", { name: "Reminder destinations" })).getByRole("group", { name: SETUP_GROUP })).toBe(group);
+    expect(screen.getByRole("heading", { level: 3, name: SETUP_GROUP })).toHaveFocus();
+    const hide = phoneBtn("Hide setup");
+    expect(hide).toHaveAttribute("aria-expanded", "true");
+    expect(hide).toHaveAttribute("aria-controls", "ntfy-setup");
     expect(screen.getByText(/If you lost it, generate a new one/)).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Generate a new password" })).toBeInTheDocument();
     expect(screen.getByRole("link", { name: "Open the setup page" })).toHaveAttribute("href", SETUP_URL);
     expect(secretSections()).toHaveLength(0);
+    expect(document.querySelectorAll("#pw-h")).toHaveLength(1);
+  });
+
+  it("Hide setup closes the block without a request and keeps focus on the button", async () => {
+    const { user } = await open({ "POST /api/notify/ntfy": NULL_NTFY });
+    await user.click(phoneBtn("Show setup again"));
+    await screen.findByRole("group", { name: SETUP_GROUP });
+    await user.click(phoneBtn("Hide setup"));
+    expect(screen.queryByRole("group", { name: SETUP_GROUP })).not.toBeInTheDocument();
+    expect(count("POST /api/notify/ntfy")).toBe(1);
+    const show = phoneBtn("Show setup again");
+    expect(show).toHaveFocus();
+    expect(show).toHaveAttribute("aria-expanded", "false");
+    expect(show).not.toHaveAttribute("aria-controls");
+  });
+
+  it("reopening posts again, opens the block and focuses the heading", async () => {
+    const { user } = await open({ "POST /api/notify/ntfy": NULL_NTFY });
+    await user.click(phoneBtn("Show setup again"));
+    await screen.findByRole("group", { name: SETUP_GROUP });
+    await user.click(phoneBtn("Hide setup"));
+    await user.click(phoneBtn("Show setup again"));
+    await screen.findByRole("group", { name: SETUP_GROUP });
+    expect(count("POST /api/notify/ntfy")).toBe(2);
+    expect(screen.getByRole("heading", { level: 3, name: SETUP_GROUP })).toHaveFocus();
+  });
+
+  it("Hide setup clears an open reset confirm so reopening shows no stale prompt", async () => {
+    const { user } = await open({ "POST /api/notify/ntfy": NULL_NTFY });
+    await user.click(phoneBtn("Show setup again"));
+    await user.click(await screen.findByRole("button", { name: "Generate a new password" }));
+    expect(confirms()).toHaveLength(1);
+    await user.click(phoneBtn("Hide setup"));
+    await user.click(phoneBtn("Show setup again"));
+    await screen.findByRole("group", { name: SETUP_GROUP });
+    expect(confirms()).toHaveLength(0);
+  });
+
+  it("Hide setup is ignored and aria-disabled while a reset is in flight", async () => {
+    const reset = deferred();
+    const { user } = await open({
+      "POST /api/notify/ntfy": NULL_NTFY,
+      "POST /api/notify/ntfy/reset": () => reset.promise,
+    });
+    await user.click(phoneBtn("Show setup again"));
+    await user.click(await screen.findByRole("button", { name: "Generate a new password" }));
+    await user.click(within(screen.getByRole("group", { name: "Generate a new password?" })).getByRole("button", { name: "Yes, generate" }));
+    await waitFor(() => expect(phoneBtn("Hide setup")).toHaveAttribute("aria-disabled", "true"));
+    await user.click(phoneBtn("Hide setup"));
+    expect(screen.getByRole("group", { name: SETUP_GROUP })).toBeInTheDocument();
+    expect(count("POST /api/notify/ntfy/reset")).toBe(1);
+    reset.resolve(json({ password: NTFY_PASSWORD, setup_url: SETUP_URL, settings: settings({ ntfy: true }) }));
+    const region = await screen.findByRole("region", { name: NTFY_REGION });
+    expect(region).toHaveTextContent(NTFY_PASSWORD);
+    expect(screen.queryByRole("group", { name: SETUP_GROUP })).not.toBeInTheDocument();
+    expect(phoneBtn("Show setup again")).not.toHaveAttribute("aria-disabled");
+  });
+
+  it.each([
+    [409, "ntfy_not_set_up", "Phone notifications aren't set up yet."],
+    [429, "rate_limited", "Too many tries. Wait a minute and try again."],
+    [500, "notify_unavailable", "Reminders are unavailable right now. Try again in a minute."],
+  ])("a failed reset (%i) keeps the block open, shows the error and refocuses Generate", async (status, code, text) => {
+    const { user } = await open({
+      "POST /api/notify/ntfy": NULL_NTFY,
+      "POST /api/notify/ntfy/reset": () => json({ error: code }, status),
+    });
+    await user.click(phoneBtn("Show setup again"));
+    await user.click(await screen.findByRole("button", { name: "Generate a new password" }));
+    await user.click(within(screen.getByRole("group", { name: "Generate a new password?" })).getByRole("button", { name: "Yes, generate" }));
+    await waitFor(() => expect(destStatus()).toHaveTextContent(text));
+    expect(screen.getByRole("group", { name: SETUP_GROUP })).toBeInTheDocument();
+    await waitFor(() => expect(screen.getByRole("button", { name: "Generate a new password" })).toHaveFocus());
+  });
+
+  it("an unrelated settings change never moves focus back to the setup heading", async () => {
+    const { user } = await open({
+      "POST /api/notify/ntfy": NULL_NTFY,
+      "PATCH /api/settings": (init) => json(settings({ ntfy: true, ...(JSON.parse(String(init?.body)) as Partial<Settings>) })),
+    });
+    await user.click(phoneBtn("Show setup again"));
+    await screen.findByRole("group", { name: SETUP_GROUP });
+    const radio = screen.getByRole("radio", { name: "Frosting" });
+    await user.click(radio);
+    await waitFor(() => expect(radio).toBeChecked());
+    expect(screen.getByRole("heading", { level: 3, name: SETUP_GROUP })).not.toHaveFocus();
+    expect(radio).toHaveFocus();
+  });
+
+  it("a held secret with password:null focuses the panel heading and keeps the block closed", async () => {
+    let n = 0;
+    const { user } = await open({
+      "POST /api/notify/ntfy": () =>
+        json({ user_id: "u1", setup_url: SETUP_URL, password: ++n === 1 ? NTFY_PASSWORD : null, settings: settings({ ntfy: true }) }),
+    }, settings({ ntfy: false }));
+    await user.click(screen.getByRole("button", { name: "Set up phone" }));
+    const region = await screen.findByRole("region", { name: NTFY_REGION });
+    await user.click(phoneBtn("Show setup again"));
+    await waitFor(() => expect(count("POST /api/notify/ntfy")).toBe(2));
+    await waitFor(() => expect(within(region).getByRole("heading", { level: 2 })).toHaveFocus());
+    expect(destStatus()).toHaveTextContent("Your phone notification password is shown above.");
+    expect(screen.queryByRole("group", { name: SETUP_GROUP })).not.toBeInTheDocument();
+    const show = phoneBtn("Show setup again");
+    expect(show).toHaveAttribute("aria-expanded", "false");
+    expect(show).not.toHaveAttribute("aria-controls");
+  });
+
+  it("cancelling the reset confirm focuses Generate a new password", async () => {
+    const { user } = await open({ "POST /api/notify/ntfy": NULL_NTFY });
+    await user.click(phoneBtn("Show setup again"));
+    await user.click(await screen.findByRole("button", { name: "Generate a new password" }));
+    await user.click(within(screen.getByRole("group", { name: "Generate a new password?" })).getByRole("button", { name: "Cancel" }));
+    expect(screen.getByRole("button", { name: "Generate a new password" })).toHaveFocus();
   });
 
   it("copy for ntfy_not_set_up and rate_limited on reset", async () => {

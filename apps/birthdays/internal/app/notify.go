@@ -26,6 +26,7 @@ const (
 	maxLabelRunes    = 50
 	hintLen          = 3
 	notifsSetupBase  = "https://notifs-setup.4irl.app/"
+	notifsSetupName  = "Birthdays"
 	cleanupTimeout   = 5 * time.Second
 	signingSecretLen = 32
 	maxURLLen        = 2048
@@ -39,6 +40,8 @@ type Notifier interface {
 	CreatePersonalDestination(ctx context.Context, email string, in platform.PersonalDestinationInput) (int64, error)
 	DeletePersonalDestination(ctx context.Context, email string, id int64) error
 	LookupPersonalDestinations(ctx context.Context, email string, ids []int64) (map[int64]bool, error)
+	Send(ctx context.Context, m platform.Message) (platform.Result, error)
+	EnsurePublisher(ctx context.Context) error
 }
 
 // destinationJSON is D from the HTTP API contract. It never carries the URL.
@@ -59,7 +62,8 @@ func noStore(next http.Handler) http.Handler {
 }
 
 func (s *Server) setupURL(userID string) string {
-	return notifsSetupBase + "?app=" + url.QueryEscape(s.NotifsAppID) + "&user=" + url.QueryEscape(userID)
+	return notifsSetupBase + "?app=" + url.QueryEscape(s.NotifsAppID) + "&user=" + url.QueryEscape(userID) +
+		"&name=" + url.QueryEscape(notifsSetupName)
 }
 
 // isNotifsErr reports whether err came from the notifs client (as opposed to the database).

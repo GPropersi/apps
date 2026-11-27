@@ -31,6 +31,7 @@ const BY_KIND: Record<Failure["kind"], string> = {
   ntfy_not_set_up: "Phone notifications aren't set up yet.",
   rate_limited: "Too many tries. Wait a minute and try again.",
   notify_unavailable: "Reminders are unavailable right now. Try again in a minute.",
+  destination_stale: "That destination didn't accept the test, so it's marked stale. Check the address, then tap Check again.",
 };
 
 export function failureText(kind: Failure["kind"]): string {

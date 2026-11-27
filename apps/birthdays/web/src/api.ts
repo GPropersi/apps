@@ -65,6 +65,7 @@ const SERVER_CODES = [
   "ntfy_not_set_up",
   "rate_limited",
   "notify_unavailable",
+  "destination_stale",
 ] as const;
 export type ServerCode = (typeof SERVER_CODES)[number];
 
@@ -380,6 +381,14 @@ export function postNtfy(): Promise<ApiResult<NtfyResult>> {
 
 export function postNtfyReset(): Promise<ApiResult<NtfyReset>> {
   return send("POST", "/api/notify/ntfy/reset", {}, validateNtfyReset);
+}
+
+export function postNtfyTest(): Promise<ApiResult<{ settings: Settings }>> {
+  return send("POST", "/api/notify/ntfy/test", {}, validateSettingsOnly);
+}
+
+export function postDestinationTest(id: number): Promise<ApiResult<{ settings: Settings }>> {
+  return send("POST", `/api/notify/destinations/${id}/test`, {}, validateSettingsOnly);
 }
 
 export function getDestinations(): Promise<ApiResult<Destination[]>> {
