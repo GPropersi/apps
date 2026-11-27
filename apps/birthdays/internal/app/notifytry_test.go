@@ -13,7 +13,6 @@ import (
 
 const (
 	ntfyTestPath = "/api/notify/ntfy/test"
-	noMatchMsg   = "no destination matched"
 )
 
 // useClock injects a controllable clock and returns a pointer to the current instant.
@@ -55,7 +54,7 @@ func TestNtfyTestSendsToThePhoneOnly(t *testing.T) {
 	}
 	m := hn.notifs.sends[0]
 	if m.Via != "ntfy" || len(m.PersonalDestinationIDs) != 0 || m.Recipient != alice || m.Channel != "all" ||
-		m.Title != "Birthdays test notification" || m.Body != "Reminders will reach you here." {
+		m.Title != testTitle || m.Body != testBody {
 		t.Fatalf("message = %+v", m)
 	}
 	if len(hn.store.reminders) != reminders || len(hn.store.jobRuns) != runs {
@@ -99,7 +98,7 @@ func TestNtfyTestSendErrorMapping(t *testing.T) {
 		want int
 		code string
 	}{
-		{"no destination matched", nerr(422, noMatchMsg), 409, "ntfy_not_set_up"},
+		{"no destination matched", nerr(422, msgNoDestMatched), 409, "ntfy_not_set_up"},
 		{"delivery 429", nerr(429, "slow down"), 429, "rate_limited"},
 		{"503", nerr(503, "down"), 500, "notify_unavailable"},
 		{"unconfigured", platform.ErrNotifsUnconfigured, 500, "notify_unavailable"},
@@ -134,7 +133,7 @@ func TestNtfyTestNoPublisherPath(t *testing.T) {
 		{"mint then resend succeeds", []error{noPub, nil}, nil, 200, "", 2, 1},
 		{"ensure 429", []error{noPub}, nerr(429, "x"), 429, "rate_limited", 1, 1},
 		{"ensure 503", []error{noPub}, nerr(503, "x"), 500, "notify_unavailable", 1, 1},
-		{"resend no match", []error{noPub, nerr(422, noMatchMsg)}, nil, 409, "ntfy_not_set_up", 2, 1},
+		{"resend no match", []error{noPub, nerr(422, msgNoDestMatched)}, nil, 409, "ntfy_not_set_up", 2, 1},
 		{"resend 429", []error{noPub, nerr(429, "x")}, nil, 429, "rate_limited", 2, 1},
 		{"second no publisher", []error{noPub, noPub}, nil, 500, "notify_unavailable", 2, 1},
 		{"resend 503", []error{noPub, nerr(503, "x")}, nil, 500, "notify_unavailable", 2, 1},
@@ -180,7 +179,7 @@ func TestDestinationTestSendsToThatDestinationOnly(t *testing.T) {
 	}
 	m := hn.notifs.sends[0]
 	if m.Via != "personal" || len(m.PersonalDestinationIDs) != 1 || m.PersonalDestinationIDs[0] != 901 || m.Recipient != alice ||
-		m.Channel != "all" || m.Title != "Birthdays test notification" || m.Body != "Reminders will reach you here." {
+		m.Channel != "all" || m.Title != testTitle || m.Body != testBody {
 		t.Fatalf("message = %+v", m)
 	}
 	if len(hn.store.reminders) != reminders || len(hn.store.jobRuns) != runs {
@@ -222,7 +221,7 @@ func TestDestinationTestSendErrorMapping(t *testing.T) {
 	}{
 		{"429", nerr(429, "x"), 429, "rate_limited", false},
 		{"503", nerr(503, "x"), 500, "notify_unavailable", false},
-		{"no destination matched", nerr(422, noMatchMsg), 500, "notify_unavailable", false},
+		{"no destination matched", nerr(422, msgNoDestMatched), 500, "notify_unavailable", false},
 		{"409", nerr(409, "destination disabled"), 500, "notify_unavailable", false},
 		{"unconfigured", platform.ErrNotifsUnconfigured, 500, "notify_unavailable", false},
 	}

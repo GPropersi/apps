@@ -704,7 +704,6 @@ export function SettingsTab({
                   <button
                     className="secondary"
                     type="button"
-                    data-test={d.id}
                     aria-disabled={testing === String(d.id) || locked ? "true" : undefined}
                     aria-label={testing === String(d.id) ? `Sending…: ${d.label}` : `Send test to ${d.label}`}
                     onClick={() => void onTest(d)}
