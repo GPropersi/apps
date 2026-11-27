@@ -28,6 +28,29 @@ type fakeNotifs struct {
 	beforeProvision                                         func()
 	resetEmptyPassword                                      bool
 	onLookup                                                func()
+	sends                                                   []platform.Message
+	sendErrs                                                []error // consumed in order, one per Send; a nil entry succeeds
+	ensurePublisherErr                                      error
+	ensurePublishers                                        int
+}
+
+func (f *fakeNotifs) Send(_ context.Context, m platform.Message) (platform.Result, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.sends = append(f.sends, m)
+	if len(f.sendErrs) > 0 {
+		err := f.sendErrs[0]
+		f.sendErrs = f.sendErrs[1:]
+		return platform.Result{}, err
+	}
+	return platform.Result{}, nil
+}
+
+func (f *fakeNotifs) EnsurePublisher(context.Context) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.ensurePublishers++
+	return f.ensurePublisherErr
 }
 
 func (f *fakeNotifs) rec(name string) {

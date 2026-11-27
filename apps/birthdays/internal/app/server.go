@@ -12,6 +12,7 @@ import (
 	"mime"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -49,6 +50,11 @@ type Server struct {
 	EmailOf func(*http.Request) (string, bool)
 	// NotifsAppID is this app's 4irl-notifs app_id (apps_birthdays); it goes in the phone setup link.
 	NotifsAppID string
+	// Now is the clock for the test-send cooldown (nil means time.Now).
+	Now func() time.Time
+
+	testMu   sync.Mutex
+	testSeen map[string]time.Time // cooldown start per person+target, see allowTest
 }
 
 // Handler builds the router. Security headers and request logging wrap every response, including 401, 404, 405 and 413.
@@ -87,9 +93,11 @@ func (s *Server) Handler() http.Handler {
 		// Notification settings: one-time secrets can appear in these answers (no-store comes from the group).
 		write.Post("/notify/ntfy", s.handleNtfy)
 		write.Post("/notify/ntfy/reset", s.handleNtfyReset)
+		write.Post("/notify/ntfy/test", s.handleNtfyTest)
 		api.Get("/notify/destinations", s.handleListDestinations)
 		write.Post("/notify/destinations", s.handlePostDestination)
 		write.Post("/notify/destinations/{id}/check", s.handleCheckDestination)
+		write.Post("/notify/destinations/{id}/test", s.handleDestinationTest)
 		write.Delete("/notify/destinations/{id}", s.handleDeleteDestination)
 	})
 

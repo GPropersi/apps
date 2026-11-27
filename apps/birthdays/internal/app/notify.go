@@ -40,6 +40,8 @@ type Notifier interface {
 	CreatePersonalDestination(ctx context.Context, email string, in platform.PersonalDestinationInput) (int64, error)
 	DeletePersonalDestination(ctx context.Context, email string, id int64) error
 	LookupPersonalDestinations(ctx context.Context, email string, ids []int64) (map[int64]bool, error)
+	Send(ctx context.Context, m platform.Message) (platform.Result, error)
+	EnsurePublisher(ctx context.Context) error
 }
 
 // destinationJSON is D from the HTTP API contract. It never carries the URL.

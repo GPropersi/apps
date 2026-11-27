@@ -195,6 +195,7 @@ type harness struct {
 	probeBytes atomic.Int64
 	notifs     *fakeNotifs
 	logs       *syncBuffer // everything the server logged
+	srv        *Server
 }
 
 // syncBuffer is a concurrency-safe log sink.
@@ -227,7 +228,7 @@ func newHarness(t *testing.T) *harness {
 	})
 	srv := &Server{Store: store, Tx: store, Queue: queue, Notifs: notifs, NotifsAppID: "apps_birthdays", Jobs: jobs, Static: testStatic,
 		Logger: logger, Auth: fakeAuth.Middleware, EmailOf: fakeAuth.EmailOf}
-	hn := &harness{t: t, store: store, queue: queue, h: srv.Handler(), notifs: notifs, logs: logs}
+	hn := &harness{t: t, store: store, queue: queue, h: srv.Handler(), notifs: notifs, logs: logs, srv: srv}
 
 	r := chi.NewRouter()
 	r.Use(srv.securityHeaders, srv.requestLog)
