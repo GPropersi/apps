@@ -105,6 +105,7 @@ host_files="$host_files write-access-env.sh check-installer-stamps.sh check-work
 host_files="$host_files check-unique-hosts.sh _hostname-claims.lock "
 # The supervisor image's script path and the webhook file the supervisor connectors mount (exact tokens).
 host_files="$host_files cloudflared-supervisor.sh cloudflared.webhook test_cloudflared_host_stack.sh "
+host_files="$host_files compose.host-network.yaml install-cloudflared-host.sh cloudflared.token "
 host_files="$host_files docker-user.rules.bak docker-user.rules docker-user-firewall.service "
 # Docker inspect template fields used by test_traefik_dynamic.sh.
 host_files="$host_files NetworkSettings.Networks State.Health.Status "

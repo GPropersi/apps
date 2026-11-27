@@ -9,6 +9,7 @@ here is **run by you**; Claude never touches the live host or the Cloudflare acc
 | File | Role |
 |---|---|
 | `compose.yaml` | The Compose project `platform-ingress`: three connector services (`cloudflared`, the official-image connector kept as the rollback path and stopped after the first cutover; `cloudflared-blue` and `cloudflared-green`, the self-updating supervisor image, one running at a time and the other idle), `traefik` (routes from files only, no Docker access) and `down-page`. Every connector reads its token from a host file. No published ports. Traefik is configured by `TRAEFIK_*` environment variables only; its healthcheck is `traefik healthcheck`. |
+| `compose.host-network.yaml` | The Compose project `platform-cloudflared` for the non-Pi tunnel hosts: only `cloudflared-blue` and `cloudflared-green` (the same supervisor hardening as `compose.yaml`) on the host network. Installed by `platform/host/install-cloudflared-host.sh`; see "Non-Pi hosts". |
 | `dynamic.yml` | Traefik file-provider config: the `/_jobs` deny router, the lowest-priority catch-all and the `errors` middleware. |
 | `down-page/index.html` | The static "this app is down or does not exist" page. |
 | `jobs-paths.table` | The `/_jobs` path variants the tests probe. |
@@ -314,3 +315,67 @@ A legacy-only host (before the first cutover) runs the first cutover above the s
    run, which exercises only the stack-stop leg.
 
 After step 1 the Pi runs no ingress containers and the firewall rules are unchanged.
+
+## Non-Pi hosts
+
+The other tunnel hosts run only the two self-updating connector colours on the host network (their tunnels route to
+`localhost` origins), from `compose.host-network.yaml`, as the Compose project `platform-cloudflared` in
+`/opt/platform/cloudflared`. They have no Traefik, no down page and no `platform` network. The installer
+`platform/host/install-cloudflared-host.sh` only places files and checks inputs: it starts no connector and leaves the
+host's systemd `cloudflared` unit alone. The `docker compose` lines below run as a user allowed to use Docker (root or a
+member of the Docker group, via `sudo` otherwise). After the cutover the connector depends on the Docker daemon
+(`restart: unless-stopped` brings it back with the daemon, so a stopped daemon means no tunnel).
+
+### One-time secret setup (you, on each host)
+
+Create the host-side inputs yourself; the installer prints this same list when one is missing and never writes a
+secret. Copy the tunnel token from the host's existing unit and the webhook from a trusted source; never paste either
+into chat or git. The webhook on every non-Pi host is a copy of the same webhook the Pi uses (the stronghold
+drift-check webhook), copied by you over a trusted channel.
+
+```
+sudo groupadd --gid 64321 cloudflared-token
+sudo install -d -m 0755 -o root -g root /etc/platform
+sudo install -m 0640 -o root -g 64321 /dev/null /etc/platform/cloudflared.token
+sudo tee /etc/platform/cloudflared.token >/dev/null
+sudo install -m 0600 -o 65532 -g 65532 /dev/null /etc/platform/cloudflared.webhook
+sudo tee /etc/platform/cloudflared.webhook >/dev/null
+```
+
+The group must have no members, be no account's primary group and not be the Docker socket's group.
+
+### Install and overlap start
+
+Run the installer (it prompts for the sudo password on the host; `HOST` is an ssh alias):
+
+```
+make host-cloudflared HOST=<alias> ARGS="install"
+```
+
+Then check the host with `make host-cloudflared HOST=<alias> ARGS="status"` and resolve any metrics-port `warning:`
+(a listener already on 127.0.0.1 ports 20251-20254) before starting blue. Start blue beside the running unit:
+
+```
+docker compose -p platform-cloudflared -f /opt/platform/cloudflared/compose.yaml up -d cloudflared-blue
+```
+
+Wait for the readiness gate on blue (`ready` 4 or more and `age` below 180 in
+`/var/lib/cloudflared-supervisor-blue/status`, the same check as in the Readiness gate section above). Then hand over
+by disabling the unit:
+
+```
+sudo systemctl disable --now cloudflared
+```
+
+### Non-Pi rollback and pin bumps
+
+To go back to the unit, enable it and then stop blue:
+
+```
+sudo systemctl enable --now cloudflared
+docker compose -p platform-cloudflared -f /opt/platform/cloudflared/compose.yaml stop cloudflared-blue
+```
+
+A pin bump on the Pi does not move these hosts: they bump their own idle colour's image pin in
+`compose.host-network.yaml`, re-run `make embed` and the installer, then start the idle colour, wait for the readiness
+gate and stop the old one, exactly as on the Pi but with the `platform-cloudflared` project and file above.

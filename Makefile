@@ -1,5 +1,7 @@
 .DEFAULT_GOAL := help
-.PHONY: help lint test test-changed test-app embed app-ls app-sqlc app-new host-app-ls host-deploy-user host-claude-access host-verify-egress host-ingress host-access-env host-data host-jobs host-backup host-restore host-app-rm host-verify-ingress
+SSH ?= ssh
+SCP ?= scp
+.PHONY: host-cloudflared help lint test test-changed test-app embed app-ls app-sqlc app-new host-app-ls host-deploy-user host-claude-access host-verify-egress host-ingress host-access-env host-data host-jobs host-backup host-restore host-app-rm host-verify-ingress
 
 # Live-host targets (host-*) stream a script to the app host over SSH. HOST (an ssh alias) is required, with no
 # default alias; ARGS is passed to the script. They are for you to run, never inside a worktree.
@@ -91,6 +93,21 @@ host-app-rm: ## LIVE, DESTRUCTIVE: remove a retired app completely over ssh as r
 	@[ -n "$$HOST" ] || { echo 'usage: make host-app-rm HOST=<ssh-alias> ARGS="APP --confirm APP [--stop]"' >&2; exit 2; }
 	@# ARGS words must be plain tokens (no spaces or shell metacharacters): the remote shell re-parses them as root.
 	@ssh -o BatchMode=yes -- "$$HOST" sudo -n /opt/platform/data/rm-db.sh $$ARGS
+
+host-cloudflared: ## LIVE: host-network cloudflared compose installer for non-Pi tunnel hosts, prompts for sudo (HOST=<alias> ARGS="install | verify"; default status)
+	@[ -n "$$HOST" ] || { echo 'usage: make host-cloudflared HOST=<ssh-alias> [ARGS=...]' >&2; exit 2; }
+	@# No passwordless sudo on these hosts: copy the installer to a private remote path, run it under an interactive sudo, always remove it.
+	@# ARGS words must be plain tokens (no spaces or shell metacharacters): the remote shell re-parses them as root.
+	@p=$$($(SSH) "$$HOST" mktemp); rc=$$?; \
+	[ "$$rc" -eq 0 ] || exit "$$rc"; \
+	[ -n "$$p" ] || { echo "host-cloudflared: ssh mktemp returned an empty path" >&2; exit 1; }; \
+	pid=; \
+	cleanup() { [ -z "$$pid" ] || kill "$$pid" 2>/dev/null; $(SSH) "$$HOST" rm -f "$$p"; }; \
+	trap cleanup EXIT; trap 'exit 143' TERM INT HUP; \
+	$(SCP) platform/host/install-cloudflared-host.sh "$$HOST:$$p" || exit $$?; \
+	exec 3<&0; \
+	$(SSH) -t "$$HOST" sudo bash "$$p" $${ARGS:-status} <&3 & pid=$$!; \
+	wait "$$pid"; rc=$$?; pid=; exit $$rc
 
 app-ls: ## List the registered apps (apps/*/app.yaml), registry only and offline; ignores HOST
 	@platform/registry/app-ls.sh
