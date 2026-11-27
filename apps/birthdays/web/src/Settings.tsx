@@ -1,6 +1,16 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { FormEvent } from "react";
-import { checkDestination, deleteDestination, getDestinations, postDestination, postNtfy, postNtfyReset } from "./api";
+import {
+  checkDestination,
+  deleteDestination,
+  getDestinations,
+  getMe,
+  postDestination,
+  postDestinationTest,
+  postNtfy,
+  postNtfyReset,
+  postNtfyTest,
+} from "./api";
 import type { Birthday, CalendarZoom, ColorScheme, Destination, Failure, ListView, Settings, StartTab } from "./api";
 import { noDestination } from "./format";
 import { failureText } from "./messages";
@@ -52,7 +62,8 @@ const ADD_TRIGGER = '[data-trigger="add-destination"]';
 const GENERATE_TRIGGER = '[data-trigger="ntfy-generate"]';
 const LABEL_FIELD = "#dest-label";
 const URL_FIELD = "#dest-url";
-const removeSel =(id: number) => `[data-remove="${id}"]`;
+const removeSel = (id: number) => `[data-remove="${id}"]`;
+const checkSel = (id: number) => `[data-check="${id}"]`;
 const find = (sel: string) => document.querySelector<HTMLElement>(sel);
 
 function destLabel(d: Destination): string {
@@ -91,6 +102,10 @@ export function SettingsTab({
   const [ntfyOpen, setNtfyOpen] = useState(false);
   const [ntfyBusy, setNtfyBusy] = useState(false);
   const [checking, setChecking] = useState<number | null>(null);
+  // The one test send in flight: "ntfy" or the destination id. testText is its own live region under the list.
+  const [testing, setTesting] = useState<string | null>(null);
+  const [testText, setTestText] = useState("");
+  const [testOk, setTestOk] = useState(false);
 
   const [kind, setKind] = useState<"discord" | "webhook">("discord");
   const [label, setLabel] = useState("");
@@ -104,7 +119,10 @@ export function SettingsTab({
   const ntfyRef = useRef(false);
   const addingRef = useRef(false);
   const confirmBusyRef = useRef(false);
+  const testingRef = useRef(false);
   const pendingFocus = useRef<number | null>(null);
+  // Set only by onTest after a destination_stale, so the reload lands focus on that row's Check again.
+  const pendingCheckFocus = useRef<number | null>(null);
   const destH = useRef<HTMLHeadingElement>(null);
   const setupH = useRef<HTMLHeadingElement>(null);
   // One-shot request to focus the setup heading once the block has mounted.
@@ -126,32 +144,46 @@ export function SettingsTab({
 
   const say = useCallback((message: string) => announce(setStatus, message), []);
 
-  const loadDests = useCallback(async () => {
+  const sayTest = useCallback((message: string, kind: "ok" | "err") => {
+    setTestOk(kind === "ok");
+    announce(setTestText, message);
+  }, []);
+
+  // Resolves true only when it applied the loaded rows; false when superseded, unmounted or failed.
+  const loadDests = useCallback(async (): Promise<boolean> => {
     setLoadErr("");
     loadSeq.current += 1;
     const seq = loadSeq.current;
     const res = await getDestinations();
     if (!live.current || seq !== loadSeq.current) {
-      return;
+      return false;
     }
     if (res.kind === "ok") {
       const rows = res.data.filter((d) => !removedRef.current.has(d.id));
       const extra = addedRef.current.filter((a) => !removedRef.current.has(a.id) && !rows.some((d) => d.id === a.id));
       setDests([...rows, ...extra]);
-    } else if (!onSessionFailure(res)) {
+      return true;
+    }
+    if (!onSessionFailure(res)) {
       setLoadErr(failureText(res.kind));
     }
+    return false;
   }, [onSessionFailure]);
 
   useEffect(() => {
     void loadDests();
   }, [loadDests]);
 
-  // After Check again un-stales a row, focus moves to that row's Remove button once it has rendered.
+  // After Check again un-stales a row, focus moves to that row's Remove button once it has rendered. After a failed
+  // test send marks a row stale, focus moves to its Check again button (or the heading if the row is gone).
   useEffect(() => {
     if (pendingFocus.current !== null) {
       find(removeSel(pendingFocus.current))?.focus();
       pendingFocus.current = null;
+    }
+    if (pendingCheckFocus.current !== null) {
+      (find(checkSel(pendingCheckFocus.current)) ?? destH.current)?.focus();
+      pendingCheckFocus.current = null;
     }
   }, [dests]);
 
@@ -199,6 +231,7 @@ export function SettingsTab({
     setConfirmBusy(false);
     setConfirm(null);
     if (res.kind === "ok" || res.kind === "not_found") {
+      setTestText("");
       setDests((d) => (d === null ? d : d.filter((x) => x.id !== c.id)));
       say(`Removed ${c.label}`);
       destH.current?.focus();
@@ -296,10 +329,77 @@ export function SettingsTab({
       if (confirm?.k === "reset") {
         setConfirm(null);
       }
+      setTestText("");
       setNtfyOpen(false);
       return;
     }
+    setTestText("");
     void onNtfy();
+  }
+
+  // One test at a time: the guard is held until the whole flow (including the stale reload) has finished.
+  async function onTest(target: "ntfy" | Destination) {
+    if (locked || testingRef.current) {
+      return;
+    }
+    testingRef.current = true;
+    try {
+      await runTest(target);
+    } finally {
+      testingRef.current = false;
+    }
+  }
+
+  async function runTest(target: "ntfy" | Destination) {
+    const id = target === "ntfy" ? null : target.id;
+    const name = target === "ntfy" ? "your phone" : target.label;
+    setTesting(target === "ntfy" ? "ntfy" : String(target.id));
+    setTestText("");
+    const res = await (target === "ntfy" ? postNtfyTest() : postDestinationTest(target.id));
+    if (res.kind === "ok") {
+      applyCounters(res.data.settings);
+    }
+    if (!live.current) {
+      return;
+    }
+    setTesting(null);
+    if (id !== null && removedRef.current.has(id)) {
+      return;
+    }
+    if (res.kind === "ok") {
+      sayTest(`Test sent to ${name}. It can take a few seconds to arrive.`, "ok");
+      return;
+    }
+    if (id !== null && res.kind === "not_found") {
+      removedRef.current.add(id);
+      addedRef.current = addedRef.current.filter((a) => a.id !== id);
+      setDests((d) => (d === null ? d : d.filter((x) => x.id !== id)));
+      sayTest("That destination is already gone.", "err");
+      destH.current?.focus();
+      return;
+    }
+    if (id !== null && res.kind === "destination_stale") {
+      sayTest(failureText("destination_stale"), "err");
+      const me = await getMe();
+      if (!live.current) {
+        return;
+      }
+      if (me.kind === "ok") {
+        applyCounters(me.data.settings);
+      } else if (onSessionFailure(me)) {
+        return;
+      }
+      pendingCheckFocus.current = id;
+      const applied = await loadDests();
+      if (!applied) {
+        pendingCheckFocus.current = null;
+      }
+      return;
+    }
+    if (!onSessionFailure(res)) {
+      const extra = id === null && res.kind === "ntfy_not_set_up" ? " Tap Show setup again to finish phone setup." : "";
+      sayTest(`${failureText(res.kind)}${extra}`, "err");
+    }
   }
 
   async function onCheck(d: Destination) {
@@ -518,17 +618,31 @@ export function SettingsTab({
               <strong>Phone notifications (ntfy)</strong>
               <div className="meta">{settings?.ntfy === true ? "Set up" : "Not set up yet"}</div>
             </div>
-            <button
-              className="secondary"
-              type="button"
-              data-trigger="ntfy-setup"
-              aria-disabled={ntfyBusy || locked || (confirm?.k === "reset" && confirmBusy) ? "true" : undefined}
-              aria-expanded={settings?.ntfy === true ? showSetup : undefined}
-              aria-controls={showSetup ? "ntfy-setup" : undefined}
-              onClick={onNtfyButton}
-            >
-              {settings?.ntfy !== true ? "Set up phone" : showSetup ? "Hide setup" : "Show setup again"}
-            </button>
+            <div className="actions">
+              {settings?.ntfy === true && (
+                <button
+                  className="secondary"
+                  type="button"
+                  data-trigger="ntfy-test"
+                  aria-disabled={testing === "ntfy" || locked ? "true" : undefined}
+                  aria-label={testing === "ntfy" ? "Sending…: your phone" : "Send test to your phone"}
+                  onClick={() => void onTest("ntfy")}
+                >
+                  {testing === "ntfy" ? "Sending…" : "Send test"}
+                </button>
+              )}
+              <button
+                className="secondary"
+                type="button"
+                data-trigger="ntfy-setup"
+                aria-disabled={ntfyBusy || locked || (confirm?.k === "reset" && confirmBusy) ? "true" : undefined}
+                aria-expanded={settings?.ntfy === true ? showSetup : undefined}
+                aria-controls={showSetup ? "ntfy-setup" : undefined}
+                onClick={onNtfyButton}
+              >
+                {settings?.ntfy !== true ? "Set up phone" : showSetup ? "Hide setup" : "Show setup again"}
+              </button>
+            </div>
             {showSetup && (
               <div className="ntfysetup" id="ntfy-setup" role="group" aria-labelledby="pw-h">
                 <h3 id="pw-h" tabIndex={-1} ref={setupH}>
@@ -574,29 +688,50 @@ export function SettingsTab({
                   {d.stale ? " · stale, not used for reminders" : ""}
                 </div>
               </div>
-              {d.stale && (
+              <div className="actions">
+                {d.stale ? (
+                  <button
+                    className="secondary"
+                    type="button"
+                    data-check={d.id}
+                    aria-disabled={checking === d.id ? "true" : undefined}
+                    aria-label={`${checking === d.id ? "Checking…" : "Check again"}: ${d.label}`}
+                    onClick={() => void onCheck(d)}
+                  >
+                    {checking === d.id ? "Checking…" : "Check again"}
+                  </button>
+                ) : (
+                  <button
+                    className="secondary"
+                    type="button"
+                    data-test={d.id}
+                    aria-disabled={testing === String(d.id) || locked ? "true" : undefined}
+                    aria-label={testing === String(d.id) ? `Sending…: ${d.label}` : `Send test to ${d.label}`}
+                    onClick={() => void onTest(d)}
+                  >
+                    {testing === String(d.id) ? "Sending…" : "Send test"}
+                  </button>
+                )}
                 <button
                   className="secondary"
                   type="button"
-                  aria-disabled={checking === d.id ? "true" : undefined}
-                  aria-label={`${checking === d.id ? "Checking…" : "Check again"}: ${d.label}`}
-                  onClick={() => void onCheck(d)}
+                  data-remove={d.id}
+                  aria-label={`Remove destination ${d.label}`}
+                  onClick={() => openConfirm({ k: "remove", id: d.id, label: d.label })}
                 >
-                  {checking === d.id ? "Checking…" : "Check again"}
+                  Remove
                 </button>
-              )}
-              <button
-                className="secondary"
-                type="button"
-                data-remove={d.id}
-                aria-label={`Remove destination ${d.label}`}
-                onClick={() => openConfirm({ k: "remove", id: d.id, label: d.label })}
-              >
-                Remove
-              </button>
+              </div>
             </li>
           ))}
         </ul>
+        <p
+          className={testText === "" ? "status" : testOk ? "status ok" : "status err"}
+          role="status"
+          data-testid="test-status"
+        >
+          {testText}
+        </p>
         {dests === null && loadErr === "" && <p className="loading">Loading destinations&hellip;</p>}
         {loadErr !== "" && (
           <div className="row">
