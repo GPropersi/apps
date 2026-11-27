@@ -285,7 +285,7 @@ if [[ "$out" =~ ([0-9]+)\ payload\(s\) ]] && [ "${BASH_REMATCH[1]}" -ge 2 ]; the
   mkdir -p "$real/platform/host"
   cp "$repo_root"/platform/host/*.sh "$real/platform/host/"
   mkdir -p "$real/platform/ingress/down-page"
-  cp "$repo_root/platform/ingress/compose.yaml" "$repo_root/platform/ingress/dynamic.yml" "$real/platform/ingress/"
+  cp "$repo_root/platform/ingress/compose.yaml" "$repo_root/platform/ingress/dynamic.yml" "$repo_root/platform/ingress/compose.host-network.yaml" "$real/platform/ingress/"
   cp "$repo_root/platform/ingress/down-page/index.html" "$real/platform/ingress/down-page/"
   # the data installer's payload sources (explicit list: a new payload source must be added here)
   mkdir -p "$real/platform/data" "$real/platform/registry"
@@ -353,6 +353,22 @@ if [[ "$out" =~ ([0-9]+)\ payload\(s\) ]] && [ "${BASH_REMATCH[1]}" -ge 2 ]; the
   expect_out_has "the altered embedded compose copy is named" "DRIFT platform/host/install-ingress.sh: platform/ingress/compose.yaml"
   run_cmd "$tool" --root "$real"
   expect_rc "regenerating after the altered ingress copy" 0
+
+  # the host-network cloudflared installer's payload is checked too (source drift, then an altered embedded copy)
+  run_cmd "$tool" --root "$real"
+  expect_rc "regenerating before the cloudflared host-network drift" 0
+  echo '# drift' >> "$real/platform/ingress/compose.host-network.yaml"
+  run_cmd "$tool" --check --root "$real"
+  expect_rc "a drifted host-network compose source fails the check" 1
+  expect_out_has "drift names the cloudflared host installer" "DRIFT platform/host/install-cloudflared-host.sh: platform/ingress/compose.host-network.yaml"
+  run_cmd "$tool" --root "$real"
+  expect_rc "regenerating after the host-network drift" 0
+  sed -i 's/^name: platform-cloudflared$/name: platform-cloudflared-x/' "$real/platform/host/install-cloudflared-host.sh"
+  run_cmd "$tool" --check --root "$real"
+  expect_rc "an altered embedded host-network compose copy fails the check" 1
+  expect_out_has "the altered embedded host-network copy is named" "DRIFT platform/host/install-cloudflared-host.sh: platform/ingress/compose.host-network.yaml"
+  run_cmd "$tool" --root "$real"
+  expect_rc "regenerating after the altered host-network copy" 0
 
   # the data installer's seven payloads are checked too (one mutation per payload)
   for src in data/compose.yaml data/pg_hba.conf data/redis-entrypoint.sh registry/reserved-names.txt data/new-db.sh data/notifs-key.sh data/rm-db.sh; do
