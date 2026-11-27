@@ -101,7 +101,8 @@ host_files="$host_files platform.sh login-shell.sh install-deploy-user.sh claude
 host_files="$host_files install-backup.sh restore.sh backup.sh platform-backup.service platform-backup.timer RUNBOOK.md "
 host_files="$host_files install-data.sh install-jobs.sh jobs-redis.password deploy.sh validate-app-yaml.sh new-db.sh notifs-key.sh rm-db.sh pg_hba.conf redis-entrypoint.sh postgres-admin.password redis-admin.password "
 host_files="$host_files verify-egress.sh verify-ingress.sh server-host-base.sh authorized_keys.d egress-deny.cidrs egress-allow.cidrs "
-host_files="$host_files check-unique-hosts.sh _hostname-claims.lock write-access-env.sh check-installer-stamps.sh check-workflows.sh test_gate_run.sh "
+host_files="$host_files write-access-env.sh check-installer-stamps.sh check-workflows.sh test_gate_run.sh "
+host_files="$host_files check-unique-hosts.sh _hostname-claims.lock "
 # The supervisor image's script path and the webhook file the supervisor connectors mount (exact tokens).
 host_files="$host_files cloudflared-supervisor.sh cloudflared.webhook "
 host_files="$host_files docker-user.rules.bak docker-user.rules docker-user-firewall.service "
