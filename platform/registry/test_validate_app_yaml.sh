@@ -95,6 +95,19 @@ for nv in true false; do
   run_cmd "$validator" "$cases/chores/app.yaml"
   expect_rc "notifs: $nv is valid" 0
 done
+rm -rf "${cases:?}/chores"
+mkdir -p "$cases/chores"
+sed -e "s/^access: family/access: family\nhostname: chores-web/" "$example" > "$cases/chores/app.yaml"
+run_cmd "$validator" "$cases/chores/app.yaml"
+expect_rc "hostname: chores-web is valid" 0
+for hv in Dates 1x a; do
+  mutate "hostname $hv bad shape" "hostname '$hv' must match" "s/^access: family/access: family\nhostname: $hv/"
+done
+for hv in www status; do
+  mutate "hostname $hv reserved" "hostname '$hv' is reserved" "s/^access: family/access: family\nhostname: $hv/"
+done
+mutate "hostname equals name" "hostname 'chores' equals name; omit hostname to serve at the name" 's/^access: family/access: family\nhostname: chores/'
+mutate "hostname empty" "hostname must not be empty" 's/^access: family/access: family\nhostname:/'
 mutate "owner as an email" "owner must be a short handle, not an email" "s/^owner: family/owner: bob${at}home/"
 mutate "owner bad shape" "owner 'Bob'" 's/^owner: family/owner: Bob/'
 mutate "duplicate job name" "duplicate job name 'daily-digest'" 's/name: send-reminder/name: daily-digest/'
@@ -377,5 +390,49 @@ run_cmd bash -c "cd '$repo' && '$tracked'"
 expect_rc "a tracked invalid app.yaml fails" 1
 expect_out_has "tracked invalid: reason" "unknown key 'colour'"
 expect_out_has "tracked invalid: names the file" "apps/x/app.yaml: "
+git -C "$repo" rm -q --cached apps/x/app.yaml
+rm -rf "${repo:?}/apps/x"
+
+for n in p1 p2; do
+  mkdir -p "$repo/apps/$n"
+  sed -e "s/^name: .*/name: $n/" "$example" > "$repo/apps/$n/app.yaml"
+  printf 'hostname: shared\n' >> "$repo/apps/$n/app.yaml"
+  git -C "$repo" add "apps/$n/app.yaml"
+done
+run_cmd bash -c "cd '$repo' && '$tracked'"
+expect_rc "two tracked apps sharing a hostname fail" 1
+expect_out_has "hostname clash: reason" "is also claimed by app 'p1' (apps/p1/app.yaml)"
+expect_out_has "hostname clash: names the file" "apps/p2/app.yaml: 'shared'"
+
+# A tracked app directory name containing a space is still validated (and fails: the name cannot match it).
+git -C "$repo" rm -q --cached apps/p1/app.yaml apps/p2/app.yaml
+rm -rf "${repo:?}/apps/p1" "${repo:?}/apps/p2"
+mkdir -p "$repo/apps/sp ace"
+sed -e "s/^name: .*/name: sp/" "$example" > "$repo/apps/sp ace/app.yaml"
+git -C "$repo" add "apps/sp ace/app.yaml"
+run_cmd bash -c "cd '$repo' && '$tracked'"
+expect_rc "a tracked app dir with a space is scanned and fails" 1
+expect_out_has "space dir: names the file" "apps/sp ace/app.yaml: "
+git -C "$repo" rm -q --cached "apps/sp ace/app.yaml"
+rm -rf "${repo:?}/apps/sp ace"
+
+# One invalid file plus a hostname clash elsewhere: rc 1 and both messages.
+for n in q1 q2; do
+  mkdir -p "$repo/apps/$n"
+  sed -e "s/^name: .*/name: $n/" "$example" > "$repo/apps/$n/app.yaml"
+  printf 'hostname: dup\n' >> "$repo/apps/$n/app.yaml"
+  git -C "$repo" add "apps/$n/app.yaml"
+done
+mkdir -p "$repo/apps/bad"
+printf 'schema_version: 1\nname: bad\ncolour: red\n' > "$repo/apps/bad/app.yaml"
+git -C "$repo" add apps/bad/app.yaml
+run_cmd bash -c "cd '$repo' && '$tracked'"
+expect_rc "an invalid file and a hostname clash together fail" 1
+expect_out_has "both failing: the invalid reason" "unknown key 'colour'"
+expect_out_has "both failing: the clash" "'dup' is also claimed by app 'q1'"
+
+mkdir -p "$T_TMP/notgit"
+run_cmd bash -c "cd '$T_TMP/notgit' && GIT_CEILING_DIRECTORIES='$T_TMP' '$tracked'"
+expect_rc "outside a git repo fails closed" 1
 
 t_finish

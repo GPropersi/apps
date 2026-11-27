@@ -32,6 +32,7 @@ here="$(cd "$(dirname "$0")" && pwd)"
 . "$here/../test/lib.sh"
 script="$here/deploy.sh"
 validator="$here/../registry/validate-app-yaml.sh"
+host_check="$here/../registry/check-unique-hosts.sh"
 
 # The same pin as the busybox image in platform/ingress/compose.yaml.
 base_image="docker.io/library/busybox:1.37.0@sha256:bdf57e528e45e4433820e045b29b4597825a1c9e38353532d90a01445013f82e"
@@ -88,6 +89,9 @@ trap 'exit 129' HUP
 docker network create "$net" >/dev/null || { echo "FAIL: cannot create the per-run network"; exit 1; }
 mkdir -p "$W/secrets/$app" "$W/jobs/$app" "$W/locks" "$W/dstate" "$W/reg" "$W/tmp" "$W/ctx"
 chmod 755 "$W" "$W/secrets" "$W/secrets/$app" "$W/jobs" "$W/jobs/$app"
+# The host claims lock, pre-created as install-data.sh does (deploy never creates it).
+: >"$W/locks/_hostname-claims.lock"
+chmod 666 "$W/locks/_hostname-claims.lock"
 printf 'x' >"$W/secrets/$app/db-password"
 printf 'x' >"$W/secrets/$app/redis-password"
 printf 'x' >"$W/jobs/$app/jobs-secret"
@@ -100,8 +104,9 @@ live_aud="$(printf 'cd%.0s' {1..32})"
 printf 'PLATFORM_DOMAIN=apps.example.test\n' >"$W/ingress.env"
 printf 'ACCESS_TEAM_DOMAIN=liveteam.cloudflareaccess.com\nACCESS_AUD=%s\n' "$live_aud" >"$W/access.env"
 chmod 644 "$W/ingress.env" "$W/access.env"
-export DEPLOY_ROUTES_DIR="$W/routes" DEPLOY_INGRESS_ENV="$W/ingress.env" DEPLOY_ACCESS_ENV="$W/access.env" DEPLOY_ENV_UID
+export DEPLOY_ROUTES_DIR="$W/routes" DEPLOY_INGRESS_ENV="$W/ingress.env" DEPLOY_ACCESS_ENV="$W/access.env" DEPLOY_ENV_UID DEPLOY_LOCK_UID
 DEPLOY_ENV_UID="$(id -u)"
+DEPLOY_LOCK_UID="$DEPLOY_ENV_UID"
 
 # build_image <tag> <healthy 1|0>: a busybox httpd on port 8080 as uid 1000; unhealthy serves no /healthz (a 404).
 build_image() {
@@ -139,14 +144,14 @@ deploy() { # <tag>
   rc=0
   out="$(env TMPDIR="$W/tmp" DEPLOY_NETWORK="$net" DEPLOY_SECRETS_ROOT="$W/secrets" DEPLOY_JOB_SECRETS_ROOT="$W/jobs" \
     DEPLOY_STATE_ROOT="$W/dstate" DEPLOY_REGISTRY_ROOT="$W/reg" DEPLOY_LOCK_DIR="$W/locks" DEPLOY_CONNECTION_ENV="$W/conn.env" \
-    DEPLOY_SKIP_REGISTRY=1 DEPLOY_VALIDATOR="$validator" DEPLOY_HEALTH_WAIT=8 "$script" deploy "$app" "$1" 2>&1 <"$W/input")" || rc=$?
+    DEPLOY_SKIP_REGISTRY=1 DEPLOY_VALIDATOR="$validator" DEPLOY_HOST_CHECK="$host_check" DEPLOY_HEALTH_WAIT=8 "$script" deploy "$app" "$1" 2>&1 <"$W/input")" || rc=$?
 }
 
 rollback() { # no stdin and no registry: DEPLOY_SKIP_REGISTRY is not even set
   rc=0
   out="$(env TMPDIR="$W/tmp" DEPLOY_NETWORK="$net" DEPLOY_SECRETS_ROOT="$W/secrets" DEPLOY_JOB_SECRETS_ROOT="$W/jobs" \
     DEPLOY_STATE_ROOT="$W/dstate" DEPLOY_REGISTRY_ROOT="$W/reg" DEPLOY_LOCK_DIR="$W/locks" DEPLOY_CONNECTION_ENV="$W/conn.env" \
-    DEPLOY_VALIDATOR="$validator" DEPLOY_HEALTH_WAIT=8 "$script" rollback "$app" 2>&1 </dev/null)" || rc=$?
+    DEPLOY_VALIDATOR="$validator" DEPLOY_HOST_CHECK="$host_check" DEPLOY_HEALTH_WAIT=8 "$script" rollback "$app" 2>&1 </dev/null)" || rc=$?
 }
 
 img_id() { docker image inspect --format '{{.Id}}' "$repo:$1" 2>/dev/null; }
@@ -167,6 +172,7 @@ probe() { # the container's /healthz over the per-run network, as the health pha
 deploy v1
 expect_rc "a first deploy succeeds against the real daemon" 0
 expect_eq "app container runs" "$(ctr_state "$ctr")" "running"
+expect_eq "the container gets the platform domain and the served hostname" "$(fmt '{{range .Config.Env}}{{println .}}{{end}}' | grep -E '^(PLATFORM_DOMAIN|APP_HOSTNAME)=' | sort | paste -sd' ' -)" "APP_HOSTNAME=$app PLATFORM_DOMAIN=apps.example.test"
 expect_eq "it runs the v1 image" "$(ctr_image "$ctr")" "$(img_id v1)"
 expect_eq "no app-old container exists" "$(ctr_exists "$ctr-old" && echo yes || echo no)" "no"
 expect_eq "the health path answers 200 (positive control for the probe)" "$(probe)" "200"

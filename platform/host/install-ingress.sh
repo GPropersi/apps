@@ -20,9 +20,15 @@
 # Traefik has no Docker provider and no Docker socket: routes come only from files in the dynamic/ directory. The
 # Docker socket's group id is still read with stat (never a docker call), only to refuse a token group that equals it.
 #
-# The three payload files (compose.yaml, dynamic.yml, down-page/index.html) are embedded below
+# The four payload files (compose.yaml, dynamic.yml, down-page/index.html, the reserved app names) are embedded below
 # (BEGIN-PAYLOAD/END-PAYLOAD) because the host has no checkout: `platform/lint/embed-payloads.sh` regenerates them
 # from the tracked sources (`make embed`) and `make lint` fails if they differ.
+#
+# Route files: verify checks every app-<name>.yml in dynamic/ against the exact shape deploy renders, with the Host rule
+# pinned to Host(`<label>.<PLATFORM_DOMAIN>`). The label may differ from the app name (an app.yaml `hostname:`) but must
+# not be a reserved name, and no two files may claim the same value. Side effect: a plain `verify` run while a live
+# test's route file (app-ingress-livetest*.yml) exists, i.e. during `--live`/`--hold`, fails on the reserved label, which
+# is correct (that file is a public route). The live path itself never runs this check.
 #
 # Usage: install-ingress.sh [install|status|verify] [--host ALIAS]
 #        install-ingress.sh verify --live [--hold] --host ALIAS
@@ -66,7 +72,7 @@ export LC_ALL=C
 # groupadd, getent and friends live in /usr/sbin, which a non-root ssh user's PATH lacks
 export PATH="$PATH:/usr/sbin:/sbin"
 
-readonly INSTALLER_STAMP=7272c8d8299c8657
+readonly INSTALLER_STAMP=58ca699691c4fedb
 # The dedicated token group. Fixed, chosen without knowledge of the host's group database; it must equal the numeric
 # group_add of cloudflared in compose.yaml (the test suite compares the two).
 readonly TOKEN_GID=64321
@@ -473,6 +479,42 @@ PLATFORM_PAYLOAD_EOF
 }
 # END-PAYLOAD platform/ingress/down-page/index.html
 
+# shellcheck disable=SC2329 # called only from chk_dynamic_files, which run_check invokes by name
+# BEGIN-PAYLOAD platform/registry/reserved-names.txt
+payload_reserved_names_txt() {
+  cat <<'PLATFORM_PAYLOAD_EOF'
+# App names the platform refuses (one per line; blank lines and # comments are ignored).
+# Read by validate-app-yaml.sh in the repo, and on the host by `platform new-db` through the copy that
+# install-data.sh installs.
+#
+# Rule beyond this list: an app's Postgres identifier is its name with "-" replaced by "_"; that identifier
+# must not start with pg_ or equal postgres, template0, template1 or public. Both the validator and new-db
+# apply it, so the two cannot diverge.
+postgres
+redis
+valkey
+pgbouncer
+traefik
+cloudflared
+socket-proxy
+down-page
+status
+platform
+runner
+jobs
+backup
+admin
+health
+default
+www
+ingress-livetest
+ingress-livetest-sibling
+ingress-livetest-curl
+ingress-livetest-hostile
+PLATFORM_PAYLOAD_EOF
+}
+# END-PAYLOAD platform/registry/reserved-names.txt
+
 # ---- host inputs: each chk_* prints one line per problem (never a file's content) and always returns 0 ----
 
 # file_meta <path>: "<uid>:<gid> <octal mode>".
@@ -639,12 +681,35 @@ chk_deploy_dir() {
 # or other key, only that app's own router and service. Prints one line per problem; never a file's content.
 # The check is deliberately a per-line allowlist, insensitive to order and count: a duplicated or misplaced key is
 # refused by Traefik's own parser, not by this guard.
+# The Host rule is pinned to Host(`<label>.<PLATFORM_DOMAIN>`): one label, the host's exact domain (read from the env file;
+# missing or invalid fails the whole check closed). The label may differ from the app name (an app.yaml `hostname:`) but
+# must not be in the embedded reserved list (every label, including one equal to the file's own app name) and must not
+# be claimed by another file: each file claims {app, label} and a value claimed by two files fails both. An empty or
+# missing embedded reserved list fails the check. The live-test fixtures (ingress-livetest*, all reserved) never reach
+# this function: only the plain verify path runs it.
 # shellcheck disable=SC2329 # invoked by name through run_check
 chk_dynamic_files() {
-  local d="$ROOT$INSTALL_DIR/dynamic" names f app body line ln
+  local d="$ROOT$INSTALL_DIR/dynamic" names f app body line ln dom esc host_re label l
   local name_re='^app-([a-z][a-z0-9-]{1,30})\.yml$'
-  local dom='[a-z0-9-]+(\.[a-z0-9-]+)+'
+  local bt='`' reserved_raw r
+  local -a reserved=() claim_val=() claim_file=() seen_lbl=()
+  local i j k
+  if ! dom="$(env_domain)" || ! valid_domain "$dom"; then
+    echo "cannot check Host rules: PLATFORM_DOMAIN is missing or invalid"
+    return 0
+  fi
+  reserved_raw="$(payload_reserved_names_txt 2>/dev/null)" || reserved_raw=""
+  while IFS= read -r r; do
+    [[ -z "$r" || "$r" == \#* ]] || reserved+=("$r")
+  done <<<"$reserved_raw"
+  if [ "${#reserved[@]}" -eq 0 ]; then
+    echo "cannot check Host rules: the embedded reserved-name list is missing or empty"
+    return 0
+  fi
+  esc="${dom//./\\.}"
+  host_re="^      rule: Host\\(${bt}([a-z][a-z0-9-]{1,30})\\.${esc}${bt}\\)\$"
   names="$(perm_run root find "$d" -mindepth 1 -maxdepth 1 -printf '%f\n' 2>/dev/null)" || { echo "cannot list $d"; return 0; }
+  names="$(sort <<<"$names")"
   while IFS= read -r f; do
     [ -n "$f" ] && [ "$f" != "dynamic.yml" ] || continue
     if ! [[ "$f" =~ $name_re ]]; then
@@ -653,6 +718,9 @@ chk_dynamic_files() {
     fi
     app="${BASH_REMATCH[1]}"
     body="$(perm_run root cat -- "$d/$f" 2>/dev/null)" || { echo "cannot read $f in the dynamic directory"; continue; }
+    claim_val+=("$app")
+    claim_file+=("$f")
+    seen_lbl=()
     ln=0
     while IFS= read -r line || [ -n "$line" ]; do
       ln=$((ln + 1))
@@ -662,9 +730,21 @@ chk_dynamic_files() {
           "  services:" | "      loadBalancer:" | "        servers:" | \
           "        healthCheck:" | "          interval: 5s" | "          timeout: 3s") continue ;;
       esac
+      # The Host rule is tested on its own so BASH_REMATCH is read before any later =~ overwrites it.
+      if [[ "$line" =~ $host_re ]]; then
+        label="${BASH_REMATCH[1]}"
+        if [[ " ${seen_lbl[*]:-} " != *" $label "* ]]; then
+          seen_lbl+=("$label")
+          claim_val+=("$label")
+          claim_file+=("$f")
+          for r in "${reserved[@]}"; do
+            if [ "$r" = "$label" ]; then echo "$f Host label '$label' is reserved"; break; fi
+          done
+        fi
+        continue
+      fi
       # The health path is the charset validate-app-yaml.sh allows for health_path (leading / then letters, digits . _ ~ / % -).
-      # shellcheck disable=SC2016 # the backticks are literal Traefik rule quoting
-      if [[ "$line" =~ ^\ \ \ \ \ \ rule:\ Host\(\`$app\.$dom\`\)$ || "$line" =~ ^\ \ \ \ \ \ \ \ \ \ -\ url:\ http://$app:[0-9]{1,5}$ \
+      if [[ "$line" =~ ^\ \ \ \ \ \ \ \ \ \ -\ url:\ http://$app:[0-9]{1,5}$ \
         || "$line" =~ ^\ \ \ \ \ \ \ \ \ \ path:\ /[A-Za-z0-9._~/%-]*$ ]]; then
         continue
       fi
@@ -672,6 +752,19 @@ chk_dynamic_files() {
       break
     done <<<"$body"
   done <<<"$names"
+  # Pass 2 (cross-file): one line per (file, value) that another file also claims. A file's own name and label are one
+  # claim by that file, so a file never clashes with itself. Values already reported for a file are not repeated.
+  local -a done_pair=()
+  for i in "${!claim_val[@]}"; do
+    l="${claim_val[$i]}"
+    for j in "${!claim_val[@]}"; do
+      [ "${claim_val[$j]}" = "$l" ] && [ "${claim_file[$j]}" != "${claim_file[$i]}" ] || continue
+      k="${claim_file[$i]}|$l"
+      [[ " ${done_pair[*]:-} " != *" $k "* ]] || continue
+      done_pair+=("$k")
+      echo "${claim_file[$i]} Host label '$l' is also claimed by ${claim_file[$j]}"
+    done
+  done
 }
 
 chk_token_group() {

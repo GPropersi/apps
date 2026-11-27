@@ -488,6 +488,12 @@ expect_eq "the sysctl drop-in holds exactly the overcommit setting" "$(cat "$SYS
 expect_eq "the sysctl drop-in is mode 644" "$(/usr/bin/stat -c '%a' "$SYSCTL_DROPIN")" "644"
 expect_out_has "the sysctl drop-in is reported" "changed: $SYSCTL_DROPIN"
 expect_out_has "a live overcommit value of 1 is left alone" "already: vm.overcommit_memory is 1"
+LOCKF="$R/var/lib/platform/locks/_hostname-claims.lock"
+expect_eq "the host claims lock is a regular file" "$([ -f "$LOCKF" ] && [ ! -L "$LOCKF" ] && echo yes || echo no)" "yes"
+expect_eq "the host claims lock has real mode 666" "$(/usr/bin/stat -c '%a' "$LOCKF")" "666"
+expect_eq "the host claims lock is empty" "$(/usr/bin/stat -c '%s' "$LOCKF")" "0"
+expect_out_has "the host claims lock is reported" "changed: $LOCKF"
+LOCK_BEFORE="$(/usr/bin/stat -c '%i %Y' "$LOCKF")"
 
 # the gid in the script equals the group_add of both services in compose.yaml
 if [ "$(grep -c '^      - "64322"$' "$here/../data/compose.yaml")" = "2" ]; then _pass; else _fail "compose.yaml group_add holds the admin gid for both services"; fi
@@ -505,9 +511,28 @@ expect_out_has "second install reports already: for the entrypoint" "already: $(
 expect_out_has "second install reports already: for new-db.sh" "already: $(D)/new-db.sh"
 expect_out_has "second install reports already: for rm-db.sh" "already: $(D)/rm-db.sh"
 expect_out_has "second install reports already: for the sysctl drop-in" "already: $SYSCTL_DROPIN"
+expect_out_has "second install reports already: for the host claims lock" "already: $LOCKF"
+expect_eq "second install leaves the host claims lock unchanged (same inode and mtime)" "$(/usr/bin/stat -c '%i %Y' "$LOCKF")" "$LOCK_BEFORE"
 expect_only_plain_up "second install makes no mutating docker call besides the plain up -d"
 expect_calls_has "second install runs a plain up -d (closes the stale-container window)" "up -d --remove-orphans"
 expect_calls_lacks "second install does not recreate" "--force-recreate"
+
+# a wrong-state host claims lock is refused, never repaired in place (root would follow a swapped-in symlink)
+chmod 644 "$LOCKF"
+ins install
+expect_rc "install refuses a host claims lock with the wrong mode" 1
+expect_out_has "the wrong-mode refusal names the lock and its state" "$LOCKF uid:gid/mode is '0:0 644', want '0:0 666'"
+expect_eq "the wrong-mode lock is left as found" "$(/usr/bin/stat -c '%a' "$LOCKF")" "644"
+chmod 666 "$LOCKF"
+rm -f "$LOCKF"
+ln -s /dev/null "$LOCKF"
+ins install
+expect_rc "install refuses a host claims lock that is a symlink" 1
+expect_out_has "the symlink refusal says so" "symlink or not a regular file"
+expect_eq "the symlink is left in place" "$([ -L "$LOCKF" ] && echo yes || echo no)" "yes"
+rm -f "$LOCKF"
+: >"$LOCKF"
+chmod 666 "$LOCKF"
 
 # a stopped container on an unchanged host: started without a forced recreate
 snap_restore
@@ -865,6 +890,16 @@ vcase "eviction policy changed" v_policy "Redis eviction policy is 'allkeys-lru'
 vcase "AOF off" v_aof "Redis appendonly is 'no'"
 vcase "PUBLIC CONNECT once an app database exists" v_pg_open_apps "PUBLIC still has CONNECT on: postgres"
 vcase "PUBLIC CONNECT on template1 once an app database exists" v_pg_open_t1 "PUBLIC still has CONNECT on: template1"
+v_lock_symlink() { rm -f "$LOCKF"; ln -s /dev/null "$LOCKF"; }
+v_lock_mode() { chmod 644 "$LOCKF"; }
+v_lock_owner() { setowner "$LOCKF" "1000:1000"; }
+v_lock_missing() { rm -f "$LOCKF"; }
+v_lock_dir() { rm -f "$LOCKF"; mkdir "$LOCKF"; }
+vcase "host claims lock replaced by a symlink" v_lock_symlink "$LOCKF is a symlink"
+vcase "host claims lock wrong mode (real chmod)" v_lock_mode "$LOCKF uid:gid/mode is '0:0 644', want '0:0 666'"
+vcase "host claims lock wrong owner" v_lock_owner "$LOCKF uid:gid/mode is '1000:1000 666', want '0:0 666'"
+vcase "host claims lock missing" v_lock_missing "$LOCKF is missing"
+vcase "host claims lock is not a regular file" v_lock_dir "$LOCKF is not a regular file"
 vcase "secrets root wrong owner" v_root_owner "uid:gid/mode is '1000:64323 2710'"
 vcase "secrets root wrong group" v_root_group "uid:gid/mode is '1001:1001 2710'"
 vcase "secrets root wrong mode" v_root_mode "uid:gid/mode is '1001:64323 750'"

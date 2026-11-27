@@ -19,6 +19,9 @@ here="$(cd "$(dirname "$0")" && pwd)"
 . "$here/../test/lib.sh"
 script="$here/deploy.sh"
 validator="$here/../registry/validate-app-yaml.sh"
+# The cross-app claim checker: exported once so every direct deploy.sh invocation below inherits it (stub cases override it
+# through XENV).
+export DEPLOY_HOST_CHECK="$here/../registry/check-unique-hosts.sh"
 REAL_MV="$(command -v mv)"
 export REAL_MV
 
@@ -36,8 +39,9 @@ AUD="$(printf 'ab%.0s' {1..32})"
 DOMAIN='apps.example.test'
 # The host files the deploy reads (ingress.env, access.env) and the Traefik routes dir are real temp paths reached through
 # the DEPLOY_* hooks; DEPLOY_ENV_UID is the test user's own uid because the files cannot be chowned to root here.
-export DEPLOY_ROUTES_DIR="$W/routes" DEPLOY_INGRESS_ENV="$W/ingress.env" DEPLOY_ACCESS_ENV="$W/access.env" DEPLOY_ENV_UID
+export DEPLOY_ROUTES_DIR="$W/routes" DEPLOY_INGRESS_ENV="$W/ingress.env" DEPLOY_ACCESS_ENV="$W/access.env" DEPLOY_ENV_UID DEPLOY_LOCK_UID
 DEPLOY_ENV_UID="$(id -u)"
+DEPLOY_LOCK_UID="$DEPLOY_ENV_UID"
 export STATE LOGGER_LOG IPADDR
 XENV=()
 
@@ -69,6 +73,13 @@ if [ -n "${MV_FAIL:-}" ] && [ ! -e "$STATE/mv_failed" ]; then
   # shellcheck disable=SC2254
   case "${@: -1}" in $MV_FAIL) : >"$STATE/mv_failed"; exit 1 ;; esac
 fi
+if [ -n "${CLAIMS_PROBE:-}" ]; then
+  # commit-time probe: the rename into the alpha current/ destination is the commit
+  case "${@: -1}" in */dstate/alpha/current)
+    flock -n "$CLAIMS_PROBE" true
+    printf 'commit %s\n' "$?" >>"$STATE/probes" ;;
+  esac
+fi
 if [ -n "${MV_HOLD:-}" ]; then
   # shellcheck disable=SC2254
   case "${@: -1}" in $MV_HOLD)
@@ -99,6 +110,13 @@ sub="$1"
 shift
 hex() { printf '%s' "$1" | sha256sum | cut -d' ' -f1; }
 failk() { [ -f "$S/fail_$1" ] || return 0; exit "$(cat "$S/fail_$1")"; }
+# probe <label>: with CLAIMS_PROBE set to the host claims lock path, record whether a second process can take the lock
+# (rc 0 = free, rc 1 = held) at this point of the deploy.
+probe() {
+  [ -n "${CLAIMS_PROBE:-}" ] || return 0
+  flock -n "$CLAIMS_PROBE" true
+  printf '%s %s\n' "$1" "$?" >>"$S/probes"
+}
 # The token must reach the stub only on stdin: look for it in the environment and in the script's temp tree.
 scan_token() {
   [ -f "$S/login.stdin" ] || return 0
@@ -119,6 +137,7 @@ case "$sub" in
     failk login
     ;;
   pull)
+    probe pull
     printf '%s' "$DOCKER_CONFIG" >"$S/pull.cfg"
     : >"$S/pull.started"
     [ ! -f "$DOCKER_CONFIG/config.json" ] || echo yes >"$S/pull.cfg.had"
@@ -132,6 +151,7 @@ case "$sub" in
     if [ -f "$S/daemon_arch" ]; then cat "$S/daemon_arch"; else echo amd64; fi
     ;;
   network)
+    probe preflight
     failk network
     ;;
   container)
@@ -208,6 +228,7 @@ case "$sub" in
     esac
     ;;
   run)
+    probe run
     printf '%s\n' "$@" >"$S/run.argv"
     scan_token
     name=""
@@ -236,6 +257,7 @@ case "$sub" in
     rm -f "$S/ctr/${*: -1}" "$S/ctr/${*: -1}.img"
     ;;
   rmi)
+    probe prune
     failk rmi
     printf '%s\n' "$1" >>"$S/rmi.log"
     if [ -f "$S/images" ]; then
@@ -261,6 +283,9 @@ reset() {
   printf '# comment\nPLATFORM_DOMAIN=%s\n' "$DOMAIN" >"$W/ingress.env"
   printf 'ACCESS_TEAM_DOMAIN=%s\nACCESS_AUD=%s\n' "$TEAM" "$AUD" >"$W/access.env"
   chmod 644 "$W/ingress.env" "$W/access.env"
+  # The host claims lock, pre-created as install-data.sh does (a plain file, mode 0666, like the per-app locks).
+  : >"$W/locks/_hostname-claims.lock"
+  chmod 666 "$W/locks/_hostname-claims.lock"
   local a
   for a in alpha beta my-app; do
     mkdir -p "$W/secrets/$a" "$W/jobs/$a"
@@ -375,8 +400,9 @@ for d in 'DEPLOY_NETWORK:-platform' 'DEPLOY_SECRETS_ROOT:-/var/lib/platform/secr
   'DEPLOY_STATE_ROOT:-/var/lib/platform/deploy' 'DEPLOY_REGISTRY_ROOT:-/var/lib/platform/registry' \
   'DEPLOY_LOCK_DIR:-/var/lib/platform/locks' 'DEPLOY_CONNECTION_ENV:-/opt/platform/data/connection.env' \
   'DEPLOY_ROUTES_DIR:-/opt/platform/ingress/dynamic' 'DEPLOY_INGRESS_ENV:-/etc/platform/ingress.env' \
-  'DEPLOY_ACCESS_ENV:-/etc/platform/access.env' 'DEPLOY_ENV_UID:-0' \
-  'DEPLOY_SKIP_REGISTRY:-0' 'DEPLOY_VALIDATOR:-/opt/platform/deploy/registry/validate-app-yaml.sh'; do
+  'DEPLOY_ACCESS_ENV:-/etc/platform/access.env' 'DEPLOY_ENV_UID:-0' 'DEPLOY_LOCK_UID:-0' \
+  'DEPLOY_SKIP_REGISTRY:-0' 'DEPLOY_VALIDATOR:-/opt/platform/deploy/registry/validate-app-yaml.sh' \
+  'DEPLOY_HOST_CHECK:-/opt/platform/deploy/registry/check-unique-hosts.sh'; do
   expect_out_has_text "$src" "\${$d}" "the hook default is the production value: $d"
 done
 
@@ -404,12 +430,12 @@ expect_eq "a first deploy creates no previous/" "$([ -e "$W/dstate/alpha/previou
 expect_eq "no stray state entries" "$(ls -A "$W/dstate/alpha")" "current"
 
 # The route file: byte-exact, mode 0644, nothing else left in the routes dir (no temp file).
-want_route() { # <app> <port> [domain] [health_path|-]: the exact route file content, written out line by line
+want_route() { # <app> <port> [domain] [health_path|-] [host label]: the exact route file content, written out line by line
   printf '%s\n' "# Generated by platform deploy for $1. Do not edit; removed by platform rm-db." \
     "http:" \
     "  routers:" \
     "    app-$1:" \
-    "      rule: Host(\`$1.${3:-$DOMAIN}\`)" \
+    "      rule: Host(\`${5:-$1}.${3:-$DOMAIN}\`)" \
     "      entryPoints: [web]" \
     "      service: app-$1" \
     "  services:" \
@@ -437,7 +463,8 @@ want+=" --pids-limit 256 --restart unless-stopped -v $W/secrets/alpha:/run/platf
 want+=" -v $W/jobs/alpha:/run/platform/job-secrets:ro -e DB_HOST=postgres -e DB_PORT=5432 -e DB_NAME=alpha -e DB_USER=alpha"
 want+=" -e DB_PASSWORD_FILE=/run/platform/secrets/db-password -e REDIS_HOST=redis -e REDIS_PORT=6379 -e REDIS_USER=alpha"
 want+=" -e REDIS_PASSWORD_FILE=/run/platform/secrets/redis-password -e REDIS_KEY_PREFIX=alpha:"
-want+=" -e JOBS_SECRET_FILE=/run/platform/job-secrets/jobs-secret -e ACCESS_TEAM_DOMAIN=$TEAM -e ACCESS_AUD=$AUD $REF1"
+want+=" -e JOBS_SECRET_FILE=/run/platform/job-secrets/jobs-secret -e ACCESS_TEAM_DOMAIN=$TEAM -e ACCESS_AUD=$AUD"
+want+=" -e PLATFORM_DOMAIN=$DOMAIN -e APP_HOSTNAME=alpha $REF1"
 expect_eq "the docker run argv is exactly the fixed contract" "$argv" "$want"
 expect_eq "exactly one --label" "$(grep -cx -- '--label' "$STATE/run.argv")" "1"
 expect_eq "the run image argument is the last argv entry" "$(tail -n 1 "$STATE/run.argv")" "$REF1"
@@ -746,9 +773,12 @@ snap_load
 flock "$W/locks/alpha.lock" /usr/bin/sleep 6 &
 holder=$!
 until ! flock -n "$W/locks/alpha.lock" true; do /usr/bin/sleep 0.05; done
+XENV=(DEPLOY_LOCK_WAIT=2 DEPLOY_CLAIMS_LOCK_WAIT=1)
 run_rollback alpha
+XENV=()
 expect_rc "a rollback under a held lock times out" 1
 expect_out_has "and names the lock phase" "phase 'lock' failed"
+expect_out_lacks "and it is the per-app lock, never the claims lock" "claims lock"
 expect_untouched "a rollback under a held lock"
 pkill -P "$holder" -x sleep 2>/dev/null
 wait "$holder" 2>/dev/null
@@ -1064,9 +1094,12 @@ snap_load
 flock "$W/locks/alpha.lock" /usr/bin/sleep 6 &
 holder=$!
 until ! flock -n "$W/locks/alpha.lock" true; do /usr/bin/sleep 0.05; done
+XENV=(DEPLOY_LOCK_WAIT=2 DEPLOY_CLAIMS_LOCK_WAIT=1)
 deploy_app alpha v3
+XENV=()
 expect_rc "a held lock times out" 1
 expect_out_has "and names the lock phase" "phase 'lock' failed"
+expect_out_lacks "and it is the per-app lock, never the claims lock" "claims lock"
 expect_untouched "a held lock"
 pkill -P "$holder" -x sleep 2>/dev/null
 wait "$holder" 2>/dev/null
@@ -1340,5 +1373,263 @@ expect_rc "a failed volume probe fails the deploy" 1
 expect_calls_lacks "a failed probe creates no volume" "docker volume create"
 expect_untouched "a failed volume probe"
 rm -f "$STATE/fail_volinspect"
+
+# ---- hostname: the served Host label, the container env and the cross-app claims ----
+
+mkyaml_host() { # <app> [hostname]: the standard app.yaml plus an optional hostname
+  mkyaml "$1"
+  [ -z "${2:-}" ] || printf 'hostname: %s\n' "$2" >>"$YAML"
+}
+deploy_host() { # <app> <tag> [hostname]
+  mkyaml_host "$1" "${3:-}"
+  mkinput "$TOKEN" "$YAML"
+  run_deploy deploy "$1" "$2"
+}
+seed_reg() { # <app> [hostname]: another app's registry entry on the host
+  mkdir -p "$W/reg/$1"
+  {
+    printf 'name: %s\n' "$1"
+    [ -z "${2:-}" ] || printf 'hostname: %s\n' "$2"
+  } >"$W/reg/$1/app.yaml"
+}
+has_probe() { grep -qxF -- "$1" "$STATE/probes" 2>/dev/null && echo yes || echo no; }
+hold_claims() { # a second process holds the host claims lock for a few seconds
+  flock "$W/locks/_hostname-claims.lock" /usr/bin/sleep 6 &
+  holder=$!
+  until ! flock -n "$W/locks/_hostname-claims.lock" true; do /usr/bin/sleep 0.05; done
+}
+release_claims() {
+  pkill -P "$holder" -x sleep 2>/dev/null
+  wait "$holder" 2>/dev/null
+}
+
+# A counting checker: passes through to the real one on its 1st call (preflight), reports a clash on the 2nd and later
+# (under the claims lock). CHK_RM, when set, is a file it removes on its 1st call (the lock file vanishing after preflight).
+cat >"$T_TMP/chk-count.sh" <<'EOF'
+#!/usr/bin/env bash
+n=0
+[ ! -f "$STATE/chk.count" ] || n="$(cat "$STATE/chk.count")"
+n=$((n + 1))
+echo "$n" >"$STATE/chk.count"
+if [ "$n" -ge 2 ]; then
+  echo "$1: 'late' is also claimed by app 'other' (other/app.yaml)"
+  exit 1
+fi
+[ -z "${CHK_RM:-}" ] || rm -f "$CHK_RM"
+exec "$REAL_CHECK" "$@"
+EOF
+chmod +x "$T_TMP/chk-count.sh"
+REAL_CHECK_PATH="$here/../registry/check-unique-hosts.sh"
+
+# A hostname deploy: only the Host label moves; router, service, upstream and file name stay on the app name.
+reset
+deploy_host alpha v1 alpha-web
+expect_rc "a deploy with a hostname succeeds" 0
+expect_eq "the route serves the hostname and nothing else changes" "$(cmp -s "$W/routes/app-alpha.yml" <(want_route alpha 8080 "" /healthz alpha-web) && echo same)" "same"
+expect_eq "the route file name stays on the app name" "$(lsa "$W/routes")" "app-alpha.yml"
+argv="$(paste -sd' ' "$STATE/run.argv")"
+expect_out_has_text "$argv" "-e ACCESS_AUD=$AUD -e PLATFORM_DOMAIN=$DOMAIN -e APP_HOSTNAME=alpha-web $(ref_of alpha v1)" "the container gets the domain and the served hostname after ACCESS_AUD"
+expect_eq "the registry entry is the deployed app.yaml" "$(rd "$W/reg/alpha/app.yaml")" "$(cat "$YAML")"
+expect_calls_has "the container keeps the app name" "docker run -d --name app-alpha --label platform.app=alpha"
+expect_calls_has "the health probe is unchanged" "http://$IPADDR:8080/healthz"
+deploy_host alpha v2 alpha-web
+expect_rc "a redeploy keeping its own hostname passes (the own entry is excluded)" 0
+deploy_host alpha v3
+expect_rc "a redeploy dropping the hostname succeeds" 0
+expect_eq "without a hostname the route is the app name again" "$(cmp -s "$W/routes/app-alpha.yml" <(want_route alpha 8080) && echo same)" "same"
+expect_out_has_text "$(paste -sd' ' "$STATE/run.argv")" "-e APP_HOSTNAME=alpha " "without a hostname APP_HOSTNAME is the app name"
+snap_save
+run_rollback alpha
+expect_rc "a rollback to a hostname deploy succeeds" 0
+expect_eq "the rollback re-renders the previous hostname" "$(cmp -s "$W/routes/app-alpha.yml" <(want_route alpha 8080 "" /healthz alpha-web) && echo same)" "same"
+expect_out_has_text "$(paste -sd' ' "$STATE/run.argv")" "-e APP_HOSTNAME=alpha-web " "the rollback passes the previous hostname"
+
+# A rollback whose previous hostname another app now claims is refused at preflight with nothing changed.
+snap_load
+seed_reg beta alpha-web
+run_rollback alpha
+expect_rc "a rollback onto a hostname another app claims exits 1" 1
+expect_out_has "and names the preflight phase" "phase 'preflight' failed"
+expect_out_has "and names the clash" "'alpha-web' is also claimed by app"
+expect_untouched "a rollback onto a claimed hostname"
+expect_calls_lacks "and creates no volume" "docker volume create"
+expect_eq "the route is untouched" "$(cmp -s "$W/routes/app-alpha.yml" <(want_route alpha 8080) && echo same)" "same"
+expect_eq "the registry entry is untouched" "$(rd "$W/reg/alpha/app.yaml")" "$(rd "$T_TMP/snap/reg/alpha/app.yaml")"
+expect_eq "the deploy state is untouched" "$(rd "$W/dstate/alpha/current/tag"):$(rd "$W/dstate/alpha/previous/tag")" "v3:v2"
+
+# Refusals from the live v1 snapshot (refuse() restores it; the helpers rewrite app.yaml themselves).
+reset
+deploy_app alpha v1
+snap_save
+OLD_IMG="$(ref_of alpha v1)"
+s_hn_name() { mkyaml_host alpha beta; mkinput "$TOKEN" "$YAML"; seed_reg beta; }
+s_hn_host() { mkyaml_host alpha shared; mkinput "$TOKEN" "$YAML"; seed_reg beta shared; }
+s_hn_nochecker() { XENV=(DEPLOY_HOST_CHECK="$W/no-such-checker"); }
+s_hn_noexec() { : >"$W/checker"; XENV=(DEPLOY_HOST_CHECK="$W/checker"); }
+s_hn_reserved() { mkyaml_host alpha traefik; mkinput "$TOKEN" "$YAML"; }
+s_hn_badre() { mkyaml_host alpha Bad_Host; mkinput "$TOKEN" "$YAML"; }
+s_hn_equal() { mkyaml_host alpha alpha; mkinput "$TOKEN" "$YAML"; }
+s_corrupt_nameless() { mkdir -p "$W/reg/beta"; printf 'owner: nobody\n' >"$W/reg/beta/app.yaml"; }
+s_corrupt_empty() { mkdir -p "$W/reg/beta"; : >"$W/reg/beta/app.yaml"; }
+s_corrupt_dangling() { mkdir -p "$W/reg/beta"; ln -s "$W/no-such-target" "$W/reg/beta/app.yaml"; }
+s_nolock() { rm -f "$W/locks/_hostname-claims.lock"; }
+s_locklink() { rm -f "$W/locks/_hostname-claims.lock"; ln -s /dev/null "$W/locks/_hostname-claims.lock"; }
+s_lockdir() { rm -f "$W/locks/_hostname-claims.lock"; mkdir "$W/locks/_hostname-claims.lock"; }
+refuse "a hostname equal to another app's name" preflight s_hn_name "'beta' is also claimed by app 'alpha'"
+refuse "a hostname another app already serves" preflight s_hn_host "'shared' is also claimed by app 'alpha'"
+refuse "a hostname refusal names the remedy" preflight s_hn_host "pick another hostname, or remove the other app first"
+refuse "a missing claim checker" preflight s_hn_nochecker "make host-deploy-user"
+refuse "a non-executable claim checker" preflight s_hn_noexec "make host-deploy-user"
+refuse "a reserved hostname" validate s_hn_reserved
+refuse "a malformed hostname" validate s_hn_badre
+refuse "a hostname equal to the app's own name" validate s_hn_equal
+refuse "a name-less registry entry of another app" preflight s_corrupt_nameless "reg/beta/app.yaml: cannot read name"
+refuse "an empty registry entry of another app" preflight s_corrupt_empty "reg/beta/app.yaml: cannot read name"
+refuse "a dangling registry entry of another app" preflight s_corrupt_dangling "reg/beta/app.yaml: cannot read name"
+refuse "a corrupt entry names the remedy" preflight s_corrupt_nameless "repair or remove that registry entry, then redeploy"
+s_lockowner() { XENV=(DEPLOY_LOCK_UID=$(($(id -u) + 1))); }
+s_lockro() { chmod 000 "$W/locks/_hostname-claims.lock"; }
+for fn in s_nolock s_locklink s_lockdir s_lockowner s_lockro; do
+  # An unreadable lock cannot be exercised as root (root opens any file).
+  if [ "$fn" = s_lockro ] && [ "$(id -u)" = 0 ]; then continue; fi
+  refuse "a host without a usable claims lock file ($fn)" preflight "$fn" "make host-data"
+  expect_calls_lacks "($fn) the claims lock file is refused before the pull" "docker pull"
+done
+snap_load
+s_nolock
+mkyaml alpha
+mkinput "$TOKEN" "$YAML"
+run_deploy deploy alpha v9
+expect_eq "deploy never creates the claims lock file" "$([ -e "$W/locks/_hostname-claims.lock" ] && echo yes || echo no)" "no"
+
+# A held host claims lock: a deploy of a different app and a rollback fail at phase lock, per-app lock taken first.
+snap_load
+hold_claims
+XENV=(DEPLOY_CLAIMS_LOCK_WAIT=2)
+deploy_app beta v1
+XENV=()
+expect_rc "a deploy under a held claims lock times out" 1
+expect_out_has "and names the lock phase" "phase 'lock' failed"
+expect_out_has "and the message" "another deploy holds the host claims lock"
+expect_untouched "a held claims lock"
+expect_eq "the per-app lock was waited on first, the claims lock second" "$(grep -n -E 'phase=lock start wait=(1|2)s' <<<"$out" | cut -d: -f2- | sed -E 's/^.*wait=([0-9]+)s.*$/\1/' | paste -sd, -)" "1,2"
+expect_eq "no route was written for beta" "$([ -e "$W/routes/app-beta.yml" ] && echo yes || echo no)" "no"
+expect_eq "no registry entry was written for beta" "$([ -e "$W/reg/beta" ] && echo yes || echo no)" "no"
+release_claims
+
+# The same wait, for a rollback (from a v2-live state).
+reset
+deploy_app alpha v1
+deploy_app alpha v2
+snap_save
+: >"$CALL_LOG"
+hold_claims
+XENV=(DEPLOY_CLAIMS_LOCK_WAIT=1)
+run_rollback alpha
+XENV=()
+expect_rc "a rollback under a held claims lock times out" 1
+expect_out_has "and names the lock phase" "phase 'lock' failed"
+expect_out_has "and the message" "another deploy holds the host claims lock"
+expect_untouched "a rollback under a held claims lock"
+expect_eq "the registry entry is untouched" "$(rd "$W/reg/alpha/app.yaml")" "$(rd "$T_TMP/snap/reg/alpha/app.yaml")"
+release_claims
+
+# A clash that appears only after preflight (a counting checker: pass, then clash) refuses before swap with nothing changed.
+snap_load
+mkimages v0 v1 v2 v3
+XENV=(DEPLOY_HOST_CHECK="$T_TMP/chk-count.sh" REAL_CHECK="$REAL_CHECK_PATH")
+deploy_app alpha v3
+expect_rc "a clash found under the claims lock exits 1" 1
+expect_out_has "and names the claims phase" "phase 'claims' failed"
+expect_out_has "and quotes the checker" "'late' is also claimed by app 'other'"
+expect_eq "the checker ran twice (preflight, then under the lock)" "$(rd "$STATE/chk.count")" "2"
+for c in "docker run" "docker stop" "docker rename" "docker rm -f" "docker start"; do
+  expect_calls_lacks "a clash under the claims lock: no '$c' (the image prune's rmi is expected)" "$c"
+done
+expect_calls_lacks "and no volume was created" "docker volume create"
+expect_eq "the just-pulled image is pruned" "$(rmis)" "$REPO:v3"
+expect_eq "the registry entry is untouched" "$(rd "$W/reg/alpha/app.yaml")" "$(rd "$T_TMP/snap/reg/alpha/app.yaml")"
+expect_eq "the route is untouched" "$(cmp -s "$W/routes/app-alpha.yml" <(want_route alpha 8080) && echo same)" "same"
+expect_eq "the deploy state is untouched" "$(rd "$W/dstate/alpha/current/tag"):$(rd "$W/dstate/alpha/previous/tag")" "v2:v1"
+XENV=()
+
+# The same under a rollback.
+snap_load
+XENV=(DEPLOY_HOST_CHECK="$T_TMP/chk-count.sh" REAL_CHECK="$REAL_CHECK_PATH")
+run_rollback alpha
+expect_rc "a rollback clash under the claims lock exits 1" 1
+expect_out_has "and names the claims phase" "phase 'claims' failed"
+expect_untouched "a rollback clash under the claims lock"
+XENV=()
+
+# The lock file vanishing after preflight is caught by take_claims_lock itself.
+snap_load
+XENV=(DEPLOY_HOST_CHECK="$T_TMP/chk-count.sh" REAL_CHECK="$REAL_CHECK_PATH" CHK_RM="$W/locks/_hostname-claims.lock")
+deploy_app alpha v3
+expect_rc "a lock file that vanishes after preflight exits 1" 1
+expect_out_has "and names the lock phase" "phase 'lock' failed"
+expect_out_has "and the remedy" "make host-data"
+expect_untouched "a vanished claims lock file"
+expect_eq "the checker ran once (the guard fired before the re-check)" "$(rd "$STATE/chk.count")" "1"
+XENV=()
+
+# The claims lock is held exactly from before swap to right after commit: never during preflight, pull or the image prune.
+snap_load
+mkimages v0 v1 v2 v3
+XENV=(CLAIMS_PROBE="$W/locks/_hostname-claims.lock")
+deploy_app alpha v3
+expect_rc "a probed deploy succeeds" 0
+expect_eq "not held during preflight" "$(has_probe 'preflight 0')" "yes"
+expect_eq "not held during the pull" "$(has_probe 'pull 0')" "yes"
+expect_eq "held at docker run" "$(has_probe 'run 1')" "yes"
+expect_eq "held at the commit rename" "$(has_probe 'commit 1')" "yes"
+expect_eq "not held during the image prune" "$(has_probe 'prune 0')" "yes"
+expect_eq "never free at docker run, commit; never held at the others" "$(has_probe 'run 0')$(has_probe 'commit 0')$(has_probe 'preflight 1')$(has_probe 'pull 1')$(has_probe 'prune 1')" "nonononono"
+expect_eq "the lock is free after the deploy" "$(flock -n "$W/locks/_hostname-claims.lock" true && echo free)" "free"
+snap_load
+mkimages v0 v1 v2
+XENV=(CLAIMS_PROBE="$W/locks/_hostname-claims.lock")
+run_rollback alpha
+expect_rc "a probed rollback succeeds" 0
+expect_eq "rollback: not held during preflight" "$(has_probe 'preflight 0')" "yes"
+expect_eq "rollback: held at docker run" "$(has_probe 'run 1')" "yes"
+expect_eq "rollback: held at the commit rename" "$(has_probe 'commit 1')" "yes"
+expect_eq "rollback: not held during the image prune" "$(has_probe 'prune 0')" "yes"
+expect_eq "rollback: no pull" "$(has_probe 'pull 0')$(has_probe 'pull 1')" "nono"
+expect_eq "rollback: never free at docker run or commit" "$(has_probe 'run 0')$(has_probe 'commit 0')" "nono"
+XENV=()
+
+# DEPLOY_CLAIMS_LOCK_WAIT: validated, and its default is the sum of the holder's phases plus 30 s.
+reset
+XENV=(DEPLOY_CLAIMS_LOCK_WAIT=abc)
+deploy_app alpha v1
+expect_rc "a non-numeric DEPLOY_CLAIMS_LOCK_WAIT is a usage error" 2
+expect_out_has "and says so" "DEPLOY_CLAIMS_LOCK_WAIT is not a whole number"
+expect_no_docker "a bad DEPLOY_CLAIMS_LOCK_WAIT"
+XENV=(DEPLOY_HEALTH_WAIT=abc)
+deploy_app alpha v1
+expect_rc "DEPLOY_HEALTH_WAIT=abc still exits 2" 2
+expect_out_has "with the whole-number message" "is not a whole number of seconds"
+XENV=(DEPLOY_HEALTH_WAIT=08)
+deploy_app alpha v1
+expect_rc "DEPLOY_HEALTH_WAIT=08 deploys cleanly" 0
+expect_out_lacks "with no arithmetic error" "value too great"
+expect_out_has "and a decimal default (30 + 8 + 10 + 30)" "phase=lock start wait=78s"
+reset
+XENV=(DEPLOY_HEALTH_WAIT=60)
+deploy_app alpha v1
+expect_rc "a deploy with the default waits succeeds" 0
+expect_out_has "the default claims wait is 130 s" "phase=lock start wait=130s"
+reset
+XENV=(DEPLOY_STOP_TIMEOUT=5 DEPLOY_HEALTH_WAIT=7 DEPLOY_NOPATH_WAIT=3)
+deploy_app alpha v1
+expect_rc "a deploy with overridden waits succeeds" 0
+expect_out_has "the claims wait is the sum of the inputs plus 30 (5 + 7 + 3 + 30)" "phase=lock start wait=45s"
+reset
+XENV=(DEPLOY_CLAIMS_LOCK_WAIT=9)
+deploy_app alpha v1
+expect_rc "an explicit DEPLOY_CLAIMS_LOCK_WAIT deploy succeeds" 0
+expect_out_has "an explicit value wins" "phase=lock start wait=9s"
+XENV=()
 
 t_finish

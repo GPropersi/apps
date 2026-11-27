@@ -6,6 +6,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"gopkg.in/yaml.v3"
 )
 
 const base = `schema_version: 1
@@ -64,6 +66,69 @@ func TestNotifsKeyIsAccepted(t *testing.T) {
 	}
 }
 
+func TestHostnameKeyIsAccepted(t *testing.T) {
+	if _, err := parse(t, base+"hostname: chores-web\n"); err != nil {
+		t.Fatalf("hostname: chores-web rejected: %v", err)
+	}
+}
+
+func TestHostnameRejectMessages(t *testing.T) {
+	for _, c := range [][2]string{
+		{"www", "hostname 'www' is reserved"},
+		{"status", "hostname 'status' is reserved"},
+		{"chores", "hostname 'chores' equals name; omit hostname to serve at the name"},
+		{"Dates", "hostname 'Dates' must match"},
+	} {
+		_, err := parse(t, base+"hostname: "+c[0]+"\n")
+		if err == nil || !strings.Contains(err.Error(), c[1]) {
+			t.Errorf("hostname %s: err = %v, want substring %q", c[0], err, c[1])
+		}
+	}
+}
+
+func TestScalarKeyUnknownKeyFailsClosed(t *testing.T) {
+	v := &validator{}
+	v.scalarKey("chores", "bogus", &yaml.Node{Kind: yaml.ScalarNode, Value: "x"}, &App{})
+	if len(v.problems) != 1 || !strings.Contains(v.problems[0], "internal: no rule for key bogus") {
+		t.Fatalf("problems = %v", v.problems)
+	}
+}
+
+func TestEveryTopKeyHasARule(t *testing.T) {
+	for _, k := range topKeys {
+		if k == "jobs" || k == "volumes" {
+			continue
+		}
+		v := &validator{}
+		v.scalarKey("chores", k, &yaml.Node{Kind: yaml.ScalarNode, Value: "x"}, &App{})
+		for _, p := range v.problems {
+			if strings.Contains(p, "no rule for key") {
+				t.Errorf("%s has no rule: %v", k, v.problems)
+			}
+		}
+	}
+}
+
+func TestLoadAcceptsHostnameApp(t *testing.T) {
+	root := t.TempDir()
+	writeApp(t, root, "chores", base+"hostname: chores-web\njobs:\n  - name: a\n    timeout: 5s\n")
+	writeApp(t, root, "notes", strings.Replace(base, "name: chores", "name: notes", 1))
+	entries, err := Load(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range entries {
+		if e.Err != nil {
+			t.Errorf("%s: %v", e.Dir, e.Err)
+		}
+	}
+	for _, e := range entries {
+		if e.Dir == "chores" && (e.App == nil || len(e.App.Jobs) != 1) {
+			t.Errorf("chores jobs missing: %+v", e.App)
+		}
+	}
+}
+
 func TestInvalidFilesAreRejected(t *testing.T) {
 	jobs := func(body string) string { return base + "jobs:\n" + body }
 	cases := map[string]string{
@@ -73,6 +138,12 @@ func TestInvalidFilesAreRejected(t *testing.T) {
 		"quoted notifs":           base + "notifs: \"true\"\n",
 		"single-quoted notifs":    base + "notifs: 'true'\n",
 		"empty notifs":            base + "notifs:\n",
+		"hostname bad shape":      base + "hostname: Dates\n",
+		"hostname too short":      base + "hostname: a\n",
+		"hostname digit first":    base + "hostname: 1x\n",
+		"hostname reserved":       base + "hostname: www\n",
+		"hostname equals name":    base + "hostname: chores\n",
+		"hostname empty":          base + "hostname:\n",
 		"unknown job key":         jobs("  - name: a\n    timeout: 5s\n    retries: 3\n"),
 		"quoted catch_up":         jobs("  - name: a\n    timeout: 5s\n    catch_up: \"true\"\n"),
 		"catch_up not a bool":     jobs("  - name: a\n    timeout: 5s\n    catch_up: yes\n"),

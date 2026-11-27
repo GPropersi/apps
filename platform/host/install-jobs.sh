@@ -60,7 +60,7 @@ export LC_ALL=C
 # getent and friends live in /usr/sbin, which a non-root ssh user's PATH lacks
 export PATH="$PATH:/usr/sbin:/sbin"
 
-readonly INSTALLER_STAMP=3af0fff35ca4c71a
+readonly INSTALLER_STAMP=a7200a6bc4685eb1
 readonly JOBS_GID=64324
 readonly RUNNER_UID=65532
 readonly PROJECT="platform-jobs"
@@ -4092,7 +4092,7 @@ var (
 	memCapRE   = regexp.MustCompile(`^[1-9][0-9]{0,2}m$`)
 	portRE     = regexp.MustCompile(`^[1-9][0-9]{0,4}$`)
 	healthRE   = regexp.MustCompile(`^/[A-Za-z0-9._~/%-]*$`)
-	topKeys    = []string{"schema_version", "name", "owner", "purpose", "template", "memory_cap", "port", "health_path", "access", "notifs", "jobs", "volumes"}
+	topKeys    = []string{"schema_version", "name", "owner", "purpose", "template", "memory_cap", "port", "health_path", "access", "notifs", "hostname", "jobs", "volumes"}
 	topReqd    = []string{"schema_version", "name", "owner", "purpose", "template", "memory_cap", "port"}
 	jobKeys    = []string{"name", "schedule", "timeout", "catch_up"}
 	volKeys    = []string{"name", "path"}
@@ -4426,6 +4426,17 @@ func (v *validator) scalarKey(dir, k string, n *yaml.Node, app *App) {
 		if !contains(accessVals, val) {
 			v.errf("access '%s' must be family, public or restricted", val)
 		}
+	case "hostname":
+		switch {
+		case !appRE.MatchString(val):
+			v.errf("hostname '%s' must match %s", val, appRE)
+		case reservedNames()[val]:
+			v.errf("hostname '%s' is reserved", val)
+		case val == dir:
+			v.errf("hostname '%s' equals name; omit hostname to serve at the name", val)
+		}
+	default:
+		v.errf("internal: no rule for key %s", k)
 	}
 }
 

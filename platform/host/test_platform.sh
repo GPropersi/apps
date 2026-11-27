@@ -224,8 +224,9 @@ run_copy "notifs-key myapp extra"
 expect_rc "notifs-key with an extra argument is rejected" 2
 if [ -e "$NK_REC" ]; then _fail "a rejected notifs-key never reaches the helper"; else _pass; fi
 
-# deploy and rollback: stdin reaches the helper unchanged, and no DEPLOY_* variable does, hook by hook. DEPLOY_VALIDATOR
-# and DEPLOY_SKIP_REGISTRY would let a caller swap the validator or skip the registry login, so each is asserted alone.
+# deploy and rollback: stdin reaches the helper unchanged, and no DEPLOY_* variable does, hook by hook. DEPLOY_VALIDATOR,
+# DEPLOY_HOST_CHECK and DEPLOY_SKIP_REGISTRY would let a caller swap the validator or claim checker or skip the registry
+# login, so each is asserted alone.
 t_reset_calls
 rm -f "$DEPLOY_REC"
 run_cmd feed_stdin LC_ALL=en_US.UTF-8 SSH_ORIGINAL_COMMAND="deploy myapp v1" bash "$copy"
@@ -233,7 +234,8 @@ printf 'tok-ZQXD1\nname: demo\n\n' > "$T_TMP/stdin.expected"
 if cmp -s "$T_TMP/stdin.expected" "$DEPLOY_REC.stdin"; then _pass; else _fail "deploy passes stdin through byte for byte (token line, yaml, trailing blank line)"; fi
 hooks=(DEPLOY_NETWORK DEPLOY_SECRETS_ROOT DEPLOY_JOB_SECRETS_ROOT DEPLOY_STATE_ROOT DEPLOY_REGISTRY_ROOT DEPLOY_LOCK_DIR
   DEPLOY_CONNECTION_ENV DEPLOY_SKIP_REGISTRY DEPLOY_VALIDATOR DEPLOY_LOCK_WAIT DEPLOY_EXEC_TIMEOUT DEPLOY_PULL_TIMEOUT
-  DEPLOY_STOP_TIMEOUT DEPLOY_HEALTH_WAIT DEPLOY_NOPATH_WAIT DEPLOY_POLL_INTERVAL DEPLOY_HELPER DEPLOY_STATE_DIR)
+  DEPLOY_STOP_TIMEOUT DEPLOY_HEALTH_WAIT DEPLOY_NOPATH_WAIT DEPLOY_POLL_INTERVAL DEPLOY_HELPER DEPLOY_STATE_DIR
+  DEPLOY_HOST_CHECK DEPLOY_CLAIMS_LOCK_WAIT)
 for hook in "${hooks[@]}"; do
   rm -f "$DEPLOY_REC"
   run_cmd feed_stdin "$hook=/caller/chosen-ZQXD2" LC_ALL=en_US.UTF-8 SSH_ORIGINAL_COMMAND="deploy myapp v1" bash "$copy"

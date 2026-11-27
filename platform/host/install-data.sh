@@ -67,7 +67,7 @@ export LC_ALL=C
 # groupadd, getent and friends live in /usr/sbin, which a non-root ssh user's PATH lacks
 export PATH="$PATH:/usr/sbin:/sbin"
 
-readonly INSTALLER_STAMP=807bce7f598e204d
+readonly INSTALLER_STAMP=32fd242071c25ffd
 # Fixed, chosen without knowledge of the host's group database. ADMIN_GID must equal the numeric group_add of both
 # services in compose.yaml (the stack test compares them); SECRETS_GID is the app-secrets group named in data/README.md.
 readonly ADMIN_GID=64322
@@ -1614,6 +1614,14 @@ chk_secrets_dirs() {
   if [ ! -d "$LOCK_DIR" ] || [ -L "$LOCK_DIR" ]; then echo "$LOCK_DIR is missing or not a directory"; return 0; fi
   meta="$(file_meta "$LOCK_DIR")" || meta="unreadable"
   [ "$meta" = "0:0 1777" ] || echo "$LOCK_DIR uid:gid/mode is '$meta', want '0:0 1777' (root-owned sticky lock directory)"
+  local cl="$LOCK_DIR/_hostname-claims.lock"
+  if [ -L "$cl" ]; then echo "$cl is a symlink"
+  elif [ ! -e "$cl" ]; then echo "$cl is missing: run \`make host-data HOST=<alias> ARGS=install\`"
+  elif [ ! -f "$cl" ]; then echo "$cl is not a regular file"
+  else
+    meta="$(file_meta "$cl")" || meta="unreadable"
+    [ "$meta" = "0:0 666" ] || echo "$cl uid:gid/mode is '$meta', want '0:0 666' (root-owned host claims lock the deploy user opens for append)"
+  fi
 }
 
 print_instructions() {
@@ -1739,6 +1747,32 @@ install_overcommit() {
   CHANGED=1
 }
 
+# ensure_claims_lock: the host-wide hostname-claims lock deploy.sh flocks (root-owned, mode 0666: the deploy user opens it
+# for append, which is all flock needs, and the sticky lock directory stops it deleting or replacing root's file). Created
+# with noclobber (O_EXCL, never follows a symlink); an existing correct file is left alone; a wrong owner or mode, a
+# symlink or a non-regular file is refused (never repaired in place: root would follow a swapped-in symlink).
+ensure_claims_lock() {
+  local f="$LOCK_DIR/_hostname-claims.lock" meta
+  if priv test -L "$f" || { priv test -e "$f" && ! priv test -f "$f"; }; then
+    die "$f is a symlink or not a regular file: remove it by hand, then run this installer again"
+  fi
+  if ! priv test -e "$f"; then
+    # shellcheck disable=SC2016 # $1 is expanded by the inner sh, not here
+    priv sh -c 'umask 0111 && set -o noclobber && : >"$1"' sh "$f" || die "cannot create $f"
+    info "changed: $f"
+    CHANGED=1
+    return 0
+  fi
+  meta="$(file_meta "$f")" || die "cannot examine $f"
+  if [ "$meta" = "0:0 666" ]; then
+    info "already: $f"
+    return 0
+  fi
+  # never repair in place: a wrong owner means someone else owns the file and could swap it for a symlink between the
+  # test above and a chown/chmod run as root
+  die "$f uid:gid/mode is '$meta', want '0:0 666': remove it by hand, then run this installer again"
+}
+
 do_install() {
   local problems line uid stopped
   require_privilege
@@ -1787,6 +1821,7 @@ do_install() {
   # The per-app lock files (new-db.sh as deploy, restore.sh as root) live in this root-owned sticky directory, never in the
   # deploy-owned secrets root, so root never creates or follows a path the deploy user controls.
   ensure_dir "$LOCK_DIR" 0 0 1777
+  ensure_claims_lock
   install_overcommit
 
   # Always run `up -d`: it is a no-op on a converged stack, and it closes the window where an earlier run placed new files

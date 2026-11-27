@@ -224,6 +224,7 @@ run_app() {
     -e "REDIS_PASSWORD_FILE=/run/platform/secrets/redis-password" -e "REDIS_KEY_PREFIX=$app:" \
     -e "JOBS_SECRET_FILE=/run/platform/job-secrets/jobs-secret" \
     -e "ACCESS_TEAM_DOMAIN=placeholder.cloudflareaccess.com" \
+    -e "PLATFORM_DOMAIN=apps.example.test" -e "APP_HOSTNAME=$app" \
     "${extra[@]+"${extra[@]}"}" "$@" "$IMG"
 }
 

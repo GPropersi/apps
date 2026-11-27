@@ -29,6 +29,7 @@ The file is written in the small YAML subset read by `platform/lib/yaml-subset.s
 | `health_path` | no | Starts with `/`; only letters, digits and `. _ ~ / % -` after it. Also gates routing: keep it cheap, unauthenticated and answering 2xx or 3xx within 3s, because Traefik probes it every 5s and a failing or slow response drops the app to the down page until it recovers. |
 | `access` | no | `family` (default when absent), `public` or `restricted`. Records intent only: no email lists belong in the file. |
 | `notifs` | no | `true` or `false` (default `false`), unquoted. `true` opts the app in to 4irl-notifs: only then does `platform notifs-key <app>` accept a key for it (see `../data/README.md`). The jobs runner accepts and ignores it. Anything else (`yes`, `1`, a quoted value) is an error. |
+| `hostname` | no | Public web address label: the app is served at `Host(<hostname>.<domain>)`. Must match `^[a-z][a-z0-9-]{1,30}$`, not be reserved, and not equal the app's own `name` (omit the key to serve at the name). Unique across apps and not another app's name, enforced by `make lint` and deploy. Absent = served at `name`. Internal ids (router, service, container, DB, registry dir) stay on `name`. Rollout order: the host installers are re-run before any app sets it. |
 | `jobs` | no | A non-empty list of maps (below). |
 | `volumes` | no | A non-empty list of 1 to 4 maps (below). |
 
@@ -85,6 +86,11 @@ range. A step is at least 1 and at most the field's maximum minus its minimum (5
   `catch_up`, a fire inside the backup window (or whose timeout would cross its start) is skipped and logged.
 
 ## Host registry
+
+Rollout order: `deploy.sh` hard-requires the host claims lock (`make host-data ... install`) and
+`/opt/platform/deploy/registry/check-unique-hosts.sh` (`make host-deploy-user ... install`). This gates every app's
+deploy and rollback, not only apps that set `hostname:`. On a host that already runs the platform, re-run
+`host-data`, then `host-deploy-user`, then `host-ingress` (in that order) before the next app deploy.
 
 The runner reads `/var/lib/platform/registry/<app>/app.yaml` and reloads when it changes. Step 10's deploy writes
 that file atomically (temp file, then rename) and removes the directory when an app is removed. The file must pass
