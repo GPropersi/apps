@@ -16,11 +16,18 @@
 # Default mode regenerates every region from its source (idempotent). --check rewrites nothing: it prints
 # `DRIFT <installer>: <source path>` per differing payload and exits 1.
 #
+# Installer stamp (opt-in per installer): an installer carrying exactly one line `readonly INSTALLER_STAMP=` (empty
+# value, input form) or `readonly INSTALLER_STAMP=<16 lowercase hex>` gets that value set to the first 16 hex of
+# sha256 over the installer's bytes with the stamp line normalised to `readonly INSTALLER_STAMP=` (computed last,
+# after the payload regions). After embed the value is always 16 hex. --check treats an empty or stale value as
+# `DRIFT <installer>: stamp`. Installers without the line are untouched. Two stamp lines, a malformed one, or a
+# `^readonly INSTALLER_STAMP=` line in any other platform/**/*.sh (same scope as the marker scan) exit 2.
+#
 # Usage: embed-payloads.sh [--check] [--root DIR]
 # Exit: 0 in sync (or regenerated) | 1 drift found (--check) | 2 usage error, bad marker, or unusable source
 #       (missing, no trailing newline, contains the heredoc delimiter or a marker line, path outside the repo),
 #       an installer with no region, an orphan heredoc delimiter line, a marker pair outside the installers,
-#       or two payloads in one installer that would define the same function
+#       or two payloads in one installer that would define the same function, or a bad/duplicate/misplaced stamp line
 # Installer header prose must not start a line with "# BEGIN-PAYLOAD " or "# END-PAYLOAD ".
 set -euo pipefail
 
@@ -45,6 +52,9 @@ cd "$root"
 drift=0
 total_regions=0
 marker_re='^# (BEGIN|END)-PAYLOAD( |$)'
+stamp_prefix='readonly INSTALLER_STAMP='
+stamp_any_re='^readonly INSTALLER_STAMP='
+stamp_in_re='^readonly INSTALLER_STAMP=([0-9a-f]{16})?$'
 
 die() { echo "embed-payloads: $1" >&2; exit 2; }
 
@@ -71,6 +81,7 @@ render() {
 # process <installer>: rewrites (or checks) every payload region in the file.
 process() {
   local file="$1" out line src="" orig="" in=0 changed=0 count=0 seen=" " begin_re='^# BEGIN-PAYLOAD (.+)$'
+  local stamps=0 stamp_cur="" stamp_pos=0
   out=""
   while IFS= read -r line || [ -n "$line" ]; do
     if [ "$in" -eq 0 ]; then
@@ -80,7 +91,16 @@ process() {
         in=1
       else
         [ "$line" != "$DELIM" ] || die "$file: a $DELIM heredoc line outside any BEGIN-PAYLOAD region"
-        out+="$line"$'\n'
+        if [[ "$line" =~ $stamp_any_re ]]; then
+          [ "$stamps" -eq 0 ] || die "$file: more than one INSTALLER_STAMP line"
+          [[ "$line" =~ $stamp_in_re ]] || die "$file: malformed INSTALLER_STAMP line (want empty or 16 lowercase hex)"
+          stamps=1
+          stamp_cur="${BASH_REMATCH[1]}"
+          stamp_pos=${#out}
+          out+="$stamp_prefix"$'\n'
+        else
+          out+="$line"$'\n'
+        fi
       fi
     else
       orig+="$line"$'\n'
@@ -104,6 +124,17 @@ process() {
   [ "$in" -eq 0 ] || die "$file: BEGIN-PAYLOAD $src has no END-PAYLOAD"
   [ "$count" -gt 0 ] || die "$file: no payload region found (a deleted or misspelled marker would silently stop the check)"
   total_regions=$((total_regions + count))
+  # The stamp is computed last, over the final bytes (payload regions already rewritten in $out).
+  if [ "$stamps" -eq 1 ]; then
+    local want
+    want="$(printf '%s' "$out" | sha256sum | cut -c1-16)"
+    if [ "$want" != "$stamp_cur" ]; then
+      [ "$check" -eq 0 ] || echo "DRIFT $file: stamp"
+      drift=1
+      changed=1
+    fi
+    out="${out:0:stamp_pos}${stamp_prefix}${want}${out:$((stamp_pos + ${#stamp_prefix}))}"
+  fi
   # Writes are deferred until every installer parsed cleanly, so a bad input rewrites nothing.
   if [ "$check" -eq 0 ] && [ "$changed" -eq 1 ]; then
     pending_files+=("$file")
@@ -120,6 +151,7 @@ installers=(platform/host/install-*.sh)
 if [ -d platform ]; then
   while IFS= read -r f; do
     if grep -qE "$marker_re" "$f"; then die "payload marker outside platform/host/install-*.sh: $f"; fi
+    if grep -qE "$stamp_any_re" "$f"; then die "INSTALLER_STAMP line outside platform/host/install-*.sh: $f"; fi
   done < <(find platform -type f -name '*.sh' ! -path 'platform/host/install-*.sh' ! -name 'test_*.sh' ! -path 'platform/lint/embed-payloads.sh' | sort)
 fi
 

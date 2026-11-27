@@ -635,6 +635,112 @@ ins install
 expect_rc "a failed compose up fails the install" 1
 expect_out_has "the compose failure is named" "docker compose up failed"
 
+# ---- 3b. installer stamp ----
+STAMP_PATH="$R/opt/platform/stamps/data"
+STAMP_VALUE="$(sed -n 's/^readonly INSTALLER_STAMP=//p' "$script")"
+fresh
+ins install
+expect_rc "stamp: fresh install succeeds" 0
+if [[ "$STAMP_VALUE" =~ ^[0-9a-f]{16}$ ]]; then _pass; else _fail "the installer carries a 16-hex stamp" "$STAMP_VALUE"; fi
+expect_eq "stamp file holds the installer stamp and a newline" "$(od -An -c "$STAMP_PATH" | tr -d ' \n')" "$(printf '%s\n' "$STAMP_VALUE" | od -An -c | tr -d ' \n')"
+expect_eq "stamp file mode" "$(/usr/bin/stat -c '%a' "$STAMP_PATH")" "644"
+expect_eq "stamps dir mode" "$(/usr/bin/stat -c '%a' "$(dirname "$STAMP_PATH")")" "755"
+expect_calls_has "stamp is installed root-owned 644 in one step" "$STAMP_PATH.new"
+expect_calls_lacks "stamp is never chowned after the copy" "chown root:root $STAMP_PATH.new"
+expect_calls_has "stamps directory is created root-owned 755" "install -d -m 0755 -o root -g root $(dirname "$STAMP_PATH")"
+# the stamp is written after every other placed file: its mv is the last mv in the call log
+last_mv="$(grep -n '^fakesudo mv -f' "$CALL_LOG" | tail -n1 | cut -d: -f2-)"
+expect_eq "the stamp is the last file placed" "$last_mv" "fakesudo mv -f -- $STAMP_PATH.new $STAMP_PATH"
+# second install: already, nothing changes
+t_reset_calls
+ins install
+expect_out_has "stamp: second install reports already" "already: $STAMP_PATH"
+expect_out_has "stamp: second install reports the stamps directory already" "already: $(dirname "$STAMP_PATH")/"
+expect_out_lacks "stamp: second install changes nothing" "changed:"
+# every payload matches but the stamp is missing: the no-op path still writes it, without recreating the stack
+rm -f "$STAMP_PATH"
+t_reset_calls
+ins install
+expect_rc "stamp: install with only the stamp missing succeeds" 0
+expect_out_has "stamp: the missing stamp is written" "changed: $STAMP_PATH"
+expect_eq "stamp: rewritten stamp content" "$(cat "$STAMP_PATH")" "$STAMP_VALUE"
+expect_calls_lacks "stamp: a missing stamp does not force-recreate the stack" "--force-recreate"
+expect_out_lacks "stamp: a missing stamp does not report a changed stack" "changed: stack"
+# a stamp with different content is replaced
+printf 'ffffffffffffffff\n' > "$STAMP_PATH"
+ins install
+expect_out_has "stamp: a different stamp is replaced" "changed: $STAMP_PATH"
+expect_eq "stamp: replaced stamp content" "$(cat "$STAMP_PATH")" "$STAMP_VALUE"
+# verify: passes when it matches, FAILs for a wrong, padded or missing stamp
+ins verify
+expect_rc "stamp: verify passes with a matching stamp" 0
+expect_out_has "stamp: verify reports the matching stamp" "PASS: installer stamp matches this installer"
+printf '%s\n\n' "$STAMP_VALUE" > "$STAMP_PATH"
+ins verify
+expect_rc "stamp: verify fails for a stamp with an extra trailing blank line" 1
+expect_out_has "stamp: verify names the padded stamp" "stamp $STAMP_PATH differs from this installer (run install)"
+printf '%s' "$STAMP_VALUE" > "$STAMP_PATH"
+ins verify
+expect_rc "stamp: verify fails for a stamp without its newline" 1
+printf 'ffffffffffffffff\n' > "$STAMP_PATH"
+ins verify
+expect_rc "stamp: verify fails for a wrong stamp" 1
+expect_out_has "stamp: verify names the wrong stamp" "stamp $STAMP_PATH differs from this installer (run install)"
+rm -f "$STAMP_PATH"
+ins verify
+expect_rc "stamp: verify fails for a missing stamp" 1
+expect_out_has "stamp: verify names the missing stamp" "stamp $STAMP_PATH differs from this installer (run install)"
+# a symlinked stamps directory is replaced (the link only): nothing is chowned, chmodded or written through it
+fresh
+LINK_TARGET="$T_TMP/stamps-link-target"
+mkdir -p "$LINK_TARGET" "$(dirname "$STAMP_PATH")"
+chmod 700 "$LINK_TARGET"
+rmdir "$(dirname "$STAMP_PATH")"
+ln -s "$LINK_TARGET" "$(dirname "$STAMP_PATH")"
+ins install
+expect_rc "stamp: install with a symlinked stamps directory succeeds" 0
+if [ -d "$(dirname "$STAMP_PATH")" ] && [ ! -L "$(dirname "$STAMP_PATH")" ]; then _pass; else _fail "stamp: the symlinked stamps directory is replaced by a real directory"; fi
+expect_eq "stamp: the link target is left empty" "$(ls -A "$LINK_TARGET")" ""
+expect_eq "stamp: the link target mode is untouched" "$(/usr/bin/stat -c '%a' "$LINK_TARGET")" "700"
+if [ ! -e "$STATE/owner/${LINK_TARGET//\//_}" ]; then _pass; else _fail "stamp: the link target is never chowned"; fi
+expect_eq "stamp: the stamp is written in the real directory" "$(cat "$STAMP_PATH")" "$STAMP_VALUE"
+# a failed install (compose up fails) leaves the previous stamp untouched
+fresh
+mkdir -p "$(dirname "$STAMP_PATH")"
+printf 'ffffffffffffffff\n' > "$STAMP_PATH"
+touch "$STATE/up_fail"
+ins install
+expect_rc "stamp: failed install exits non-zero" 1
+expect_eq "stamp: a failed install leaves the old stamp" "$(cat "$STAMP_PATH")" "ffffffffffffffff"
+fresh
+touch "$STATE/up_fail"
+ins install
+if [ -e "$STAMP_PATH" ]; then _fail "a failed first install writes no stamp"; else _pass; fi
+# the stamp is written only after wait_healthy: an unhealthy stack leaves the old stamp, or none
+fresh
+mkdir -p "$(dirname "$STAMP_PATH")"
+printf 'ffffffffffffffff\n' > "$STAMP_PATH"
+echo "running|starting" > "$STATE/state_$RDC"
+ins install
+expect_rc "stamp: an unhealthy stack fails the install" 1
+expect_out_has "stamp: the unhealthy container is named" "$RDC is starting"
+expect_eq "stamp: an unhealthy install leaves the old stamp" "$(cat "$STAMP_PATH")" "ffffffffffffffff"
+fresh
+echo "running|starting" > "$STATE/state_$RDC"
+ins install
+expect_rc "stamp: an unhealthy first install fails" 1
+if [ -e "$STAMP_PATH" ]; then _fail "an unhealthy first install writes no stamp"; else _pass; fi
+# verify: a symlink to a file with the correct content is not a valid stamp
+fresh
+ins install
+expect_rc "stamp: install before the symlink case succeeds" 0
+printf '%s\n' "$STAMP_VALUE" > "$R/stamp-real"
+rm -f "$STAMP_PATH"
+ln -s "$R/stamp-real" "$STAMP_PATH"
+ins verify
+expect_rc "stamp: verify fails for a symlinked stamp with the right content" 1
+expect_out_has "stamp: verify names the symlinked stamp" "stamp $STAMP_PATH differs from this installer (run install)"
+
 # ---- 4. verify on the converged host ----
 
 snap_restore

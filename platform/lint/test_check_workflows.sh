@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # Tests for check-workflows.sh against scratch git repos: action pinning, pull_request_target, and the main-only guard
 # on environment jobs.
+# SC2016: the gate-mutation sed scripts are literal text; their $ are sed anchors or workflow text, not shell expansions.
+# shellcheck disable=SC2016
 set -euo pipefail
 
 here="$(cd "$(dirname "$0")" && pwd)"
@@ -14,7 +16,7 @@ failed=0
 
 # new_root: an empty git repo in $root.
 new_root() {
-  root="$tmp/root-$RANDOM"
+  root="$(mktemp -d "$tmp/root-XXXXXX")"
   mkdir -p "$root/.github/workflows"
   git -C "$root" init -q
 }
@@ -350,6 +352,56 @@ expect_fail "deploy without the main guard" "job deploy has environment: but no 
 
 real_root; mut app-deploy-one.yml "s#run: make test-app APP=\"[\$]APP\"#run: make test-app APP=\${{ inputs.app }}#"; run_check
 expect_fail "the real test step interpolating the app" "interpolates an inputs, matrix or needs output"
+
+# Rule 14: the host installer gate in app-deploy-one.yml. The real file passes (the real chain case above); each violation
+# fails, and a commented `# || true` in the gate run: is ignored.
+gate_range='/^      - name: Check host installers$/,/check-installer-stamps\.sh/'
+gate_pat="the host installer gate"
+
+real_root; mut app-deploy-one.yml "${gate_range}d"; run_check
+expect_fail "gate step missing" "has no step whose run: calls check-installer-stamps\\.sh"
+
+real_root; mut app-deploy-one.yml "${gate_range}{H;d};\${G}"; run_check
+expect_fail "gate step after new-db and deploy" "$gate_pat must come before the step running new-db"
+expect_fail "gate step after deploy" "$gate_pat must come before the step running deploy"
+
+real_root; mut app-deploy-one.yml '/name: Check host installers$/{n;d}'; run_check
+expect_fail "gate step with no if:" "$gate_pat step needs exactly if: steps\\.live\\.outputs\\.go == 'true'"
+
+real_root; mut app-deploy-one.yml '/name: Check host installers$/{n;s#.*#        if: always()#}'; run_check
+expect_fail "gate step with if: always()" "$gate_pat step needs exactly if:"
+
+real_root; mut app-deploy-one.yml "/name: Check host installers\$/{n;s#.*#        if: steps.live.outputs.go != 'false'#}"; run_check
+expect_fail "gate step with a weakened if:" "$gate_pat step needs exactly if:"
+
+real_root; mut app-deploy-one.yml '/name: Check host installers$/{n;s#$#\n        continue-on-error: true#}'; run_check
+expect_fail "gate step with continue-on-error" "$gate_pat step must not set continue-on-error"
+
+real_root; mut app-deploy-one.yml "${gate_range}"'s#(check-installer-stamps\.sh "\$rc" "\$out")#\1 || true#'; run_check
+expect_fail "gate run with || true" "$gate_pat run: must not hold \\|\\| true"
+
+real_root; mut app-deploy-one.yml "${gate_range}"'s#(check-installer-stamps\.sh "\$rc" "\$out")#\1 || :#'; run_check
+expect_fail "gate run with || :" "$gate_pat run: must not hold \\|\\| true"
+
+for tail in 'exit 0' 'rc=0' 'echo x'; do
+  real_root; mut app-deploy-one.yml "${gate_range}"'s#(check-installer-stamps\.sh "\$rc" "\$out")#\1 || '"$tail"'#'; run_check
+  expect_fail "gate call line with || $tail" "$gate_pat run: the check-installer-stamps\\.sh call line must not hold any \\|\\|"
+done
+
+real_root; mut app-deploy-one.yml "${gate_range}"'s#^( *)rc=0$#\1set +e\n\1rc=0#'; run_check
+expect_fail "gate run with set +e" "$gate_pat run: must not hold \\|\\| true"
+
+real_root; mut app-deploy-one.yml "${gate_range}"'s#"\$rc" "\$out"#"$out" "$rc"#'; run_check
+expect_fail "gate run without the rc/out invocation" "$gate_pat run: must call check-installer-stamps\\.sh \"[\$]rc\" \"[\$]out\""
+
+real_root; mut app-deploy-one.yml "${gate_range}"'s# \|\| rc=\$\?##'; run_check
+expect_fail "gate run without the rc capture" "$gate_pat run: must capture the ssh status with \\|\\| rc=[\$]\\?"
+
+real_root; mut app-deploy-one.yml '/name: Provision the database$/,/new-db/s#new-db "\$APP"#new-db "$APP"; echo check-installer-stamps.sh#'; run_check
+expect_fail "a second step mentioning the gate script" "more than one deploy step mentions check-installer-stamps"
+
+real_root; mut app-deploy-one.yml "${gate_range}"'{/< \/dev\/null/s@$@\n          # || true@}'; run_check
+expect_pass "gate run with a commented # || true line"
 
 # Rule 13: the Go cache. The real ci.yml passes (the first real_root case above); each violation fails.
 save_cond_pat="needs exactly if: github.event_name == 'push' && github.ref == 'refs/heads/main'"

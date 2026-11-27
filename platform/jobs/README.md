@@ -37,6 +37,10 @@ place: `sudo chown root:64324 <file> && sudo chmod 0640 <file>`.
 single-file mounts read once at runner start, so a change to either needs `make host-jobs HOST=<alias> ARGS=install`,
 which recreates the container (`verify` fails until you do).
 
+Re-run `make host-jobs HOST=<alias> ARGS=install` after any merge that changes the runner sources, `compose.yaml` or
+`install-jobs.sh` itself. The installer writes `/opt/platform/stamps/jobs` only after the new runner is healthy, so
+a failed runner upgrade leaves the old stamp and the deploy gate keeps refusing until a later `install` succeeds.
+
 State lives in bind mounts, never named volumes: `/var/lib/platform/jobs-status` and `/var/lib/platform/jobs-state`
 (`65532:65532`), `/opt/platform/jobs` (installer inputs record). Offline: the Pi cannot rebuild the image without the
 image registry and the Go module proxy (the `install` precondition checks them when a build is needed); with the image
