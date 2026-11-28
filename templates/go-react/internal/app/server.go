@@ -92,6 +92,11 @@ func (s *Server) Handler() http.Handler {
 			writeError(w, http.StatusMethodNotAllowed, "method_not_allowed")
 		})
 		if s.NotifsEnabled { // fail closed: without the flag these paths fall to the JSON 404
+			api.Get("/notify/destinations", s.handleListDestinations)
+			api.With(s.stateChanging).Post("/notify/destinations", s.handleDestinationCreate)
+			api.With(s.stateChanging).Post("/notify/destinations/{id}/check", s.handleDestinationCheck)
+			api.With(s.stateChanging).Post("/notify/destinations/{id}/test", s.handleDestinationTest)
+			api.With(s.stateChanging).Delete("/notify/destinations/{id}", s.handleDestinationDelete)
 			api.With(s.stateChanging).Post("/notify/ntfy", s.handleNtfy)
 			api.With(s.stateChanging).Post("/notify/ntfy/reset", s.handleNtfyReset)
 			api.With(s.stateChanging).Post("/notify/ntfy/test", s.handleNtfyTest)

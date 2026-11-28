@@ -22,14 +22,14 @@ var notifyRoutes = []struct {
 	method, path string
 	wired        bool
 }{
-	{"GET", "/api/notify/destinations", false},
+	{"GET", "/api/notify/destinations", true},
 	{"POST", "/api/notify/ntfy", true},
 	{"POST", "/api/notify/ntfy/reset", true},
 	{"POST", "/api/notify/ntfy/test", true},
-	{"POST", "/api/notify/destinations", false},
-	{"POST", "/api/notify/destinations/1/check", false},
-	{"POST", "/api/notify/destinations/1/test", false},
-	{"DELETE", "/api/notify/destinations/1", false},
+	{"POST", "/api/notify/destinations", true},
+	{"POST", "/api/notify/destinations/1/check", true},
+	{"POST", "/api/notify/destinations/1/test", true},
+	{"DELETE", "/api/notify/destinations/1", true},
 }
 
 func notifsOn(s *Server) { s.NotifsEnabled, s.NotifsName = true, "demo" }
