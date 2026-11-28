@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# test-class: heavy
 # Tests for app-new.sh and `make app-new` on a scratch copy of the repo (the scripts it calls, the real go-react
 # template, the Makefile). Mocked: network and host tools are stubs that fail and log, git is a logging wrapper.
 # Proves: the happy path yields a valid app with no placeholder left (also for a hyphenated name and a Go-keyword
@@ -227,6 +228,24 @@ cp -- "$T_TMP/jobs.go.orig" "$tpl/internal/platform/jobs.go"
 # The template is intact again: one more scaffold passes.
 run_cmd "$app_new" restored --purpose "x"
 expect_rc "template restored: scaffold passes" 0
+
+# ---- a scaffold with `notifs: true` builds and passes the Go tests (hyphenated and keyword names too) ----
+# The flag only turns on the phone-notification routes; the secret key is host-side, so this proves build and Go tests
+# only. go-env.sh pins the toolchain (GOTOOLCHAIN) exactly as test_go.sh does.
+. "$root/platform/jobs/go-env.sh" || { echo "test_app_new: FAIL: the pinned Go toolchain is not usable"; exit 1; }
+printf '\nnotifs: true\n' >> "$tpl/app.yaml"
+for nn in notifs-demo map; do
+  run_cmd "$app_new" "$nn" --purpose "Notifs on"
+  expect_rc "notifs: true scaffold '$nn'" 0
+  expect_eq "notifs: true scaffold '$nn' keeps the flag" "$(sed -n 's/^notifs: //p' "$S/apps/$nn/app.yaml")" "true"
+  if (cd "$S/apps/$nn" && CGO_ENABLED=0 go test -count=1 ./...) > "$T_TMP/go-notifs-$nn.txt" 2>&1; then
+    _pass
+  else
+    _fail "notifs: true scaffold '$nn': go test ./... passes" "$(tail -n 40 "$T_TMP/go-notifs-$nn.txt")"
+  fi
+  rm -r "$S/apps/$nn"
+done
+cp -- "$T_TMP/app.yaml.orig" "$tpl/app.yaml"
 
 # ---- make app-new ----
 before="$(snap)"

@@ -54,15 +54,18 @@ RDC="$rid-redis"
 APPC="$rid-app"
 NOAUDC="$rid-noaud"
 IMG="$rid-img"
+FLAGC="$rid-app-flag"
+FLAGIMG="$rid-img-flag"
 vol="$rid-redis-data"
 sec="$(mktemp -d)"
+flagdir="$(mktemp -d)"
 
 cleanup() {
-  docker rm -fv "$APPC" "$NOAUDC" "$PGC" "$RDC" "$rid-extract" > /dev/null 2>&1
+  docker rm -fv "$APPC" "$FLAGC" "$NOAUDC" "$PGC" "$RDC" "$rid-extract" > /dev/null 2>&1
   docker network rm "$NET" > /dev/null 2>&1
   docker volume rm -f "$vol" > /dev/null 2>&1
-  docker image rm -f "$IMG" > /dev/null 2>&1
-  rm -rf -- "$sec"
+  docker image rm -f "$IMG" "$FLAGIMG" > /dev/null 2>&1
+  rm -rf -- "$sec" "$flagdir"
   t_cleanup
 }
 trap cleanup EXIT
@@ -267,6 +270,12 @@ if grep -qi '<!doctype html' "$body" && grep -q '/assets/' "$body"; then _pass; 
 expect_eq "GET /favicon.svg is 200" "$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 "$base/favicon.svg")" 200
 
 expect_eq "GET /api/me without a JWT is 401" "$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 "$base/api/me")" 401
+# notifs absent in app.yaml and no notifs secret files mounted: the app is healthy (above) and Auth still gates the
+# notify path with 401. Auth precedes routing, so this proves gating only; route absence is covered by TestWiredNotifyRoutesDoNotExistWithNotifsOff.
+expect_eq "POST /api/notify/ntfy without a JWT is 401 (flag absent, no notifs secrets)" \
+  "$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 -X POST -H 'Content-Type: application/json' -d '{}' "$base/api/notify/ntfy")" 401
+expect_eq "the phone-notifications migration ran (notifs_users and destinations exist)" \
+  "$(pgsql -d "$pgrole" -c "select count(*) from information_schema.tables where table_schema = 'public' and table_name in ('notifs_users', 'destinations')" < /dev/null)" 2
 
 job_body() { # <queue_id>
   printf '{"v":1,"run_id":"run-%s","job":"add-note","trigger":"queue","attempt":1,"scheduled_for":null,"queue_id":"%s","enqueued_at":null,"payload":{}}' "$1" "$1"
@@ -306,6 +315,51 @@ if grep -q -- '--- SKIP' "$T_TMP/go-live.txt"; then _fail "a live test was skipp
 live_passed="$(grep -c -E '^--- PASS: TestLive' "$T_TMP/go-live.txt")"
 echo "test_image: $live_passed live tests passed"
 if [ "$live_passed" -ge 4 ]; then _pass; else _fail "fewer than 4 live tests passed ($live_passed): the live tests did not really run"; fi
+
+# ---- flag-on mode: `notifs: true` with no notifs secret files ----
+# A second image from a temp copy of the template whose app.yaml sets notifs: true (this adds a second docker build,
+# up to the same 900 s timeout). Both containers use the app role (CONNECTION LIMIT 3), so the default-mode container
+# is removed first and the two never share the role's connection budget. The 500 notify_unavailable answer for an
+# authenticated request is proved by the run.go unit test; the image has no JWT minting, so only the 401 is asserted.
+
+docker rm -fv "$APPC" > /dev/null 2>&1
+mkdir -p "$flagdir"
+tar -C "$here" --exclude=node_modules --exclude=./web/dist -cf - . | tar -C "$flagdir" -xf - || { echo "FAIL: copying the template for the flag-on image"; exit 1; }
+printf '\nnotifs: true\n' >> "$flagdir/app.yaml"
+echo "test_image: docker build (flag-on, notifs: true)"
+if timeout 900 docker build --tag "$FLAGIMG" "$flagdir" > "$T_TMP/build-flag.txt" 2>&1; then
+  _pass
+else
+  echo "FAIL: docker build of the flag-on image"
+  tail -n 60 "$T_TMP/build-flag.txt"
+  exit 1
+fi
+IMG_DEFAULT="$IMG"
+IMG="$FLAGIMG"
+if ! run_app "$FLAGC" yes -e "ACCESS_AUD=$fake_aud" > "$T_TMP/run-flag-out" 2>&1; then
+  IMG="$IMG_DEFAULT"
+  echo "FAIL: docker run of the flag-on app"; cat "$T_TMP/run-flag-out"; exit 1
+fi
+IMG="$IMG_DEFAULT"
+flaghost="$(docker port "$FLAGC" "$port/tcp" | head -n 1)"
+[ -n "$flaghost" ] || { echo "FAIL: no published port for the flag-on container"; exit 1; }
+flagbase="http://$flaghost"
+started=$SECONDS
+healthy=0
+while [ $((SECONDS - started)) -lt 60 ]; do
+  if [ "$(curl -s -o /dev/null -w '%{http_code}' --max-time 2 "$flagbase/healthz")" = 200 ]; then healthy=1; break; fi
+  if [ "$(docker inspect --format '{{.State.Status}}' "$FLAGC" 2> /dev/null)" != running ]; then break; fi
+  sleep 1
+done
+if [ "$healthy" -eq 1 ]; then
+  _pass
+else
+  _fail "the flag-on container (notifs: true, no secret files) is healthy within 60 s" "state: $(docker inspect --format '{{.State.Status}} exit={{.State.ExitCode}}' "$FLAGC" 2>&1); $(docker logs "$FLAGC" 2>&1 | tail -n 20)"
+fi
+expect_eq "POST /api/notify/ntfy without a JWT is 401 (flag on, no notifs secrets)" \
+  "$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 -X POST -H 'Content-Type: application/json' -d '{}' "$flagbase/api/notify/ntfy")" 401
+expect_eq "GET /api/me without a JWT is 401 (flag on)" "$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 "$flagbase/api/me")" 401
+docker rm -fv "$FLAGC" > /dev/null 2>&1
 
 # ---- missing Access settings make the container exit, not serve ----
 
