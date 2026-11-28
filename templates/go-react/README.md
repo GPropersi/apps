@@ -49,3 +49,20 @@ Never use `-tags dev` in the Dockerfile or any deploy build. Tests: `make test-a
 
 `GET /healthz` needs no sign-in. `/api/*` needs a Cloudflare Access identity. The server never answers 502, 503 or 504
 itself, because the edge replaces those bodies with the platform down page. The listener port is 8080.
+
+## Phone notifications
+
+Set `notifs: true` in `app.yaml` to enable `/api/notify/*` (otherwise those paths are the JSON 404). `GET /api/me` returns `{email, notifs, phone?}`, and every `/api` response of the template carries `Cache-Control: no-store`. The ntfy routes are
+`POST /api/notify/ntfy` (set up; the password is returned once, a repeat returns `password: null`), `/ntfy/reset` (new
+password) and `/ntfy/test` (30 s cooldown per person). If a first setup provisions remotely but the local write then
+fails, the answer is 500 and the one-time password is lost: tap Set up again (it returns `password: null` and writes
+the missing row), then Generate for a new password.
+
+Destinations (Discord or webhook): `GET /api/notify/destinations`, `POST` (add; at most 10 per person, enforced under a
+per-person lock, and a webhook's `signing_secret` is returned once in the 201 and never stored or logged),
+`POST /destinations/{id}/check` (clears `stale` when delivery-api says the destination is deliverable again),
+`POST /destinations/{id}/test` (30 s cooldown per destination; a rejected send confirmed undeliverable marks the row
+stale and answers 409 `destination_stale`) and `DELETE /destinations/{id}`. Delete removes the remote destination
+first, then the local row: a failed remote delete answers 500 `notify_unavailable` and keeps the row so you can retry;
+a remote 404 counts as already gone, so if the local delete then fails (500) the retry succeeds. `destinations.notifs_id`
+deliberately has no foreign key and no UNIQUE, since delivery-api owns the remote id.

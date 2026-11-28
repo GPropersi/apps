@@ -55,6 +55,9 @@ treats `volumes` as unknown and may drop job scheduling, and an older ingress ha
 declaring `template: go-react` carries a byte-identical copy of the template's `internal/platform/` (a lint enforces
 it) and uses `access` absent or `family` only.
 
+A scaffold also carries the phone-notification flow (setup, test sends, Discord and webhook destinations), switched on
+by `notifs: true` in `app.yaml`; see "Reaching 4irl-notifs" in [`templates/README.md`](../templates/README.md).
+
 An app adds no `Push gate` row and no CI file: `make test` discovers `apps/<name>/test_*.sh` on disk, and the catch-all
 row of the `Push gate` runs it.
 

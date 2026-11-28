@@ -37,6 +37,10 @@ the sample, and these starter files carry assumptions about it:
   the `/api/me` probe.
 - `web/src/` pages and tests, `web/index.html`'s title, and `web/public/favicon.svg` (the placeholder icon).
 
+- `app.yaml` `notifs`: absent (false) in the template. Set `notifs: true` to turn on the phone-notification routes and
+  the "Phone notifications" section of the web page (see "Reaching 4irl-notifs"); with it absent the routes answer 404
+  and the section is hidden.
+
 `internal/platform/` is not rewritten: it is shared and byte-identical (see below).
 
 ## Reaching 4irl-notifs (`notifs: true`)
@@ -52,6 +56,39 @@ Use `platform.NewNotifsClient(platform.NotifsSecretsDir, appID)` with `appID` fr
 freely, and call `Configured()` (no network) only where a missing key should fail the run, such as a scheduled scan,
 before queueing work. Errors are `ErrNotifsUnconfigured`, `ErrNotifsRetryable` (network or 5xx) and `*NotifsError`
 (`Status`, delivery-api's message); it logs the operation, status and duration, never a key, email or URL.
+
+### The phone-notification flow (`notifs: true`)
+
+With `notifs: true` the template also ships a ready phone and destinations flow, so a new app needs no notifs code of
+its own. `platform.DeclaredApp(appYAML)` reads `name` and `notifs` from the embedded `app.yaml` (an unparsable file is
+logged and treated as false: fail closed). The routes below are registered only when the flag is true; otherwise the
+router answers the standard JSON 404. `GET /api/me` reports `{email, notifs, phone?}`, and the web page shows the
+section only when `notifs` is true. Every `/api` response of the template (including 401s, and whether or not `notifs` is true) is `Cache-Control: no-store`.
+
+| Route | Purpose |
+|---|---|
+| `GET /api/notify/destinations` | the person's Discord and webhook destinations (never the URL) |
+| `POST /api/notify/ntfy` | set up the phone: setup link plus a one-time password |
+| `POST /api/notify/ntfy/reset` | generate a new password (409 `ntfy_not_set_up` before setup) |
+| `POST /api/notify/ntfy/test` | send a test to the phone (30 s cooldown, 429 `rate_limited`) |
+| `POST /api/notify/destinations` | add a destination (max 10; a webhook signing secret is shown once) |
+| `POST /api/notify/destinations/{id}/check`, `/test` | re-check or test one destination (`destination_stale` when it was rejected) |
+| `DELETE /api/notify/destinations/{id}` | remove a destination |
+
+The pure helpers live in `internal/platform/` (`notifs_flow.go`: `Notifier`, `NotifsSetupURL`, `TestLimiter`,
+`TestMessage`, `SendWithPublisher`; `notifs_destination.go`: `ValidDestination`, `DestinationHint`; `declared_app.go`:
+`DeclaredApp`), so they stay byte-identical across apps. The handlers, SQL and wire shapes are the app's own
+(`internal/app/`). Per-person state lives in `notifs_users` (the person's ntfy user id, keyed by lowercase email) and
+`destinations` (kind, label, hint, stale flag; scoped by email), created by migration `00002_phone_notifications.sql`.
+The table exists in every scaffold; it is only used when the flag is on.
+
+If provisioning succeeds but the local write fails, the route answers 500 and the one-time password is lost: tap
+"Set up phone" again, then "Generate a new password".
+
+`notifs: true` alone is not enough in production: the host-side notifs key must exist first (the manual notifs-exchange
+flow, see `platform/ci/notifs-apps.sh` and `apps/README.md`). Until then the app stays healthy and the notify routes
+answer 500 `notify_unavailable`. The scaffold test (`platform/scaffold/test_app_new.sh`) only proves that a `notifs: true`
+scaffold builds and passes its Go tests; it does not exercise the key.
 
 Other helpers a scheduled job needs: `Jobs.Queue` (the app's queue client, set by `Run`) with `EnqueueUnique(ctx, job,
 key, payload, ttl)` to queue at most one job per key (key matches `[A-Za-z0-9._:-]{1,128}`, ttl 1s to 7 days, else
