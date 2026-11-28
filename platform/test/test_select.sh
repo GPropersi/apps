@@ -108,7 +108,7 @@ case_sel "platform/backup row" "platform/backup/b.txt" platform/backup/test_back
   platform/data/test_data.sh platform/lint/test_lint.sh "${APPS[@]}"
 case_sel "platform/ingress row" "platform/ingress/i.txt" platform/ingress/test_ingress.sh platform/host/test_host.sh \
   platform/lint/test_lint.sh platform/test/test_t.sh "${APPS[@]}"
-case_sel "platform/host row" "platform/host/h.txt" platform/host/test_host.sh platform/data/test_data.sh \
+case_sel "platform/host row" "platform/host/h.txt" platform/ingress/test_ingress.sh platform/host/test_host.sh platform/data/test_data.sh \
   platform/backup/test_backup.sh platform/jobs/test_jobs.sh platform/lint/test_lint.sh platform/ci/test_ci.sh "${APPS[@]}"
 case_sel "platform/lint row: lint, ci and scaffold" "platform/lint/l.txt" platform/lint/test_lint.sh platform/ci/test_ci.sh platform/scaffold/test_scaffold.sh
 case_sel "templates row: scaffold, the template tests, lint and registry (the shared notifs fixture test), not the full suite" "templates/go-react/main.txt" platform/scaffold/test_scaffold.sh platform/lint/test_lint.sh platform/registry/test_registry.sh
