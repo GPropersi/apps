@@ -1,19 +1,21 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import type { Dispatch, FormEvent, SetStateAction } from "react";
-import { flushSync } from "react-dom";
+import type { FormEvent } from "react";
 import { getItems, getMe, postItem, postTask } from "./api";
-import type { Failure, Item } from "./api";
+import type { Failure, Item, Phone } from "./api";
 import { APP_NAME } from "./appName";
+import { MSG_BUSY, MSG_GENERIC, MSG_UNAVAILABLE, announce } from "./messages";
+import { PhoneNotifications } from "./PhoneNotifications";
 
 const MAX_NOTES = 50;
-const MSG_UNAVAILABLE = "Can't reach the app right now. Try again in a minute.";
-const MSG_GENERIC = "Something went wrong on our side. Try again in a minute.";
-const MSG_BUSY = "Too many background tasks are waiting. Try again in a few minutes.";
 const MSG_INVALID = "Write something first (up to 200 characters).";
 const MSG_QUEUED = "Queued. It will show up in your notes in a few seconds.";
 
 type Page = "normal" | "expired" | "noidentity";
-type Me = { s: "loading" } | { s: "ok"; email: string } | { s: "unavailable" } | { s: "none" };
+type Me =
+  | { s: "loading" }
+  | { s: "ok"; email: string; notifs: boolean; phone: Phone | null }
+  | { s: "unavailable" }
+  | { s: "none" };
 type ListAlert = "unavailable" | "generic" | null;
 
 function failureText(kind: Failure["kind"]): string {
@@ -25,12 +27,6 @@ function failureText(kind: Failure["kind"]): string {
     default:
       return MSG_GENERIC;
   }
-}
-
-// Clear, then set, so a repeated identical message is announced again by a screen reader.
-function announce(set: Dispatch<SetStateAction<string>>, message: string): void {
-  flushSync(() => set(""));
-  set(message);
 }
 
 function formatTime(iso: string): string {
@@ -64,6 +60,8 @@ export function App() {
   const addingRef = useRef(false);
   const taskingRef = useRef(false);
   const refreshingRef = useRef(false);
+  // Filled by PhoneNotifications: clears its guards, sequence counter and open confirm after a page-level failure.
+  const phoneResetRef = useRef<(() => void) | null>(null);
 
   // Page-level states win over section states: an expired or unconfirmed sign-in disables the form and hides the task.
   const sessionFailure = useCallback((f: Failure | { kind: "ok" }): boolean => {
@@ -81,6 +79,7 @@ export function App() {
     addingRef.current = false;
     taskingRef.current = false;
     refreshingRef.current = false;
+    phoneResetRef.current?.();
     return true;
   }, []);
 
@@ -112,7 +111,7 @@ export function App() {
         return;
       }
       if (res.kind === "ok") {
-        setMe({ s: "ok", email: res.data.email });
+        setMe({ s: "ok", email: res.data.email, notifs: res.data.notifs, phone: res.data.phone });
       } else if (!sessionFailure(res)) {
         setMe({ s: "unavailable" });
       }
@@ -384,6 +383,15 @@ export function App() {
           </div>
           {renderList()}
         </section>
+
+        {me.s === "ok" && me.notifs && (
+          <PhoneNotifications
+            initialPhone={me.phone}
+            pageDown={pageDown}
+            onSessionFailure={sessionFailure}
+            resetRef={phoneResetRef}
+          />
+        )}
 
         {!pageDown && (
           <section aria-labelledby="task-h">
