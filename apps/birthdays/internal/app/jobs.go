@@ -20,12 +20,10 @@ import (
 )
 
 const (
-	scanWindowDays   = 2               // a reminder missed this many days ago is still sent
-	maxScanEnqueues  = 900             // one scan queues at most this many sends
-	scanDedupeTTL    = 20 * time.Hour  // shorter than the daily scan period, so the next scan can re-enqueue an unsent reminder
-	jobSendReminder  = "send-reminder" // the queued job's name in app.yaml
-	msgNoPublisher   = "app has no ntfy publisher"
-	msgNoPersonalDst = "personal destination not available for recipient"
+	scanWindowDays  = 2               // a reminder missed this many days ago is still sent
+	maxScanEnqueues = 900             // one scan queues at most this many sends
+	scanDedupeTTL   = 20 * time.Hour  // shorter than the daily scan period, so the next scan can re-enqueue an unsent reminder
+	jobSendReminder = "send-reminder" // the queued job's name in app.yaml
 )
 
 // Transactor runs fn inside one database transaction: commit when fn returns nil, roll back otherwise.
@@ -272,7 +270,7 @@ func (j *Jobs) SendReminder(ctx context.Context, req platform.JobRequest) error 
 	}
 	// failed records a rejection a retry cannot fix.
 	failed := func(err error) error {
-		return j.record(ctx, req, p, occ, "failed", "status_"+strconv.Itoa(notifsStatus(err)), logf)
+		return j.record(ctx, req, p, occ, "failed", "status_"+strconv.Itoa(platform.NotifsStatus(err)), logf)
 	}
 
 	err = send(personal)
@@ -280,27 +278,27 @@ func (j *Jobs) SendReminder(ctx context.Context, req platform.JobRequest) error 
 		return j.record(ctx, req, p, occ, "sent", "", logf)
 	}
 	switch {
-	case isNotifsMsg(err, msgNoPublisher):
+	case platform.IsNotifsMsg(err, platform.MsgNoPublisher):
 		if perr := j.Notifs.EnsurePublisher(ctx); perr != nil {
-			logf("error", "step", "ensure_publisher", "status", notifsStatus(perr))
+			logf("error", "step", "ensure_publisher", "status", platform.NotifsStatus(perr))
 			return perr
 		}
 		err = send(personal)
 		if err == nil {
 			return j.record(ctx, req, p, occ, "sent", "", logf)
 		}
-		if isNotifsMsg(err, msgNoPersonalDst) {
+		if platform.IsNotifsMsg(err, platform.MsgNoPersonalDst) {
 			// Call four is the lookup; no retry after a mint. Settle the staling, then error for the runner's retry.
 			if len(personal) > 0 {
 				if _, _, lerr := j.staleUndeliverable(ctx, rc.Email, p.UserID, personal, localByNotifs); lerr != nil {
 					return lerr
 				}
 			}
-			logf("error", "step", "resend_after_mint", "status", notifsStatus(err))
+			logf("error", "step", "resend_after_mint", "status", platform.NotifsStatus(err))
 			return err
 		}
 		return j.classify(err, failed, logf)
-	case isNotifsMsg(err, msgNoPersonalDst):
+	case platform.IsNotifsMsg(err, platform.MsgNoPersonalDst):
 		if len(personal) == 0 {
 			return failed(err) // nothing of ours to stale, the 422 is unexplained
 		}
@@ -319,7 +317,7 @@ func (j *Jobs) SendReminder(ctx context.Context, req platform.JobRequest) error 
 		switch {
 		case err == nil:
 			return j.record(ctx, req, p, occ, "sent", "", logf)
-		case isNotifsMsg(err, msgNoPersonalDst):
+		case platform.IsNotifsMsg(err, platform.MsgNoPersonalDst):
 			return failed(err)
 		}
 		return j.classify(err, failed, logf)
@@ -335,16 +333,11 @@ func (j *Jobs) classify(err error, failed func(error) error, logf func(string, .
 	if errors.As(err, &ne) && ne.Status >= 400 && ne.Status < 500 &&
 		ne.Status != http.StatusUnauthorized && ne.Status != http.StatusForbidden && ne.Status != http.StatusTooManyRequests &&
 		ne.Status != http.StatusRequestTimeout && ne.Status != http.StatusTooEarly &&
-		!strings.Contains(ne.Message, msgNoPublisher) {
+		!strings.Contains(ne.Message, platform.MsgNoPublisher) {
 		return failed(err)
 	}
-	logf("error", "status", notifsStatus(err))
+	logf("error", "status", platform.NotifsStatus(err))
 	return err
-}
-
-func isNotifsMsg(err error, msg string) bool {
-	var ne *platform.NotifsError
-	return errors.As(err, &ne) && ne.Status == http.StatusUnprocessableEntity && strings.Contains(ne.Message, msg)
 }
 
 func viaOf(ntfy, personal bool) string {
@@ -375,7 +368,7 @@ func whenText(days int) string {
 func (j *Jobs) staleUndeliverable(ctx context.Context, email string, userID int64, ids []int64, local map[int64]int64) (int, []int64, error) {
 	ok, err := j.Notifs.LookupPersonalDestinations(ctx, email, ids)
 	if err != nil {
-		j.log().Error("send-reminder: destination lookup failed", "status", notifsStatus(err))
+		j.log().Error("send-reminder: destination lookup failed", "status", platform.NotifsStatus(err))
 		return 0, nil, err
 	}
 	var bad, survivors []int64

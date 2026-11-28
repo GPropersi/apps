@@ -98,7 +98,7 @@ func TestNtfyTestSendErrorMapping(t *testing.T) {
 		want int
 		code string
 	}{
-		{"no destination matched", nerr(422, msgNoDestMatched), 409, "ntfy_not_set_up"},
+		{"no destination matched", nerr(422, platform.MsgNoDestMatched), 409, "ntfy_not_set_up"},
 		{"delivery 429", nerr(429, "slow down"), 429, "rate_limited"},
 		{"503", nerr(503, "down"), 500, "notify_unavailable"},
 		{"unconfigured", platform.ErrNotifsUnconfigured, 500, "notify_unavailable"},
@@ -119,8 +119,22 @@ func TestNtfyTestSendErrorMapping(t *testing.T) {
 	}
 }
 
+func TestNtfyTestFailureLogsTheSingleStepLabel(t *testing.T) {
+	hn := newHarness(t)
+	phoneReady(hn)
+	hn.notifs.sendErrs = []error{nerr(503, "down")}
+	hn.wantStatus(hn.as(alice, "POST", ntfyTestPath, `{}`), 500, "notify_unavailable")
+	logs := hn.logs.String()
+	if !strings.Contains(logs, `step="ntfy test"`) {
+		t.Fatalf("the log has no step label ntfy test:\n%s", logs)
+	}
+	if strings.Contains(logs, "ntfy test publisher") {
+		t.Fatalf("the log carries the retired step label ntfy test publisher:\n%s", logs)
+	}
+}
+
 func TestNtfyTestNoPublisherPath(t *testing.T) {
-	noPub := nerr(422, msgNoPublisher)
+	noPub := nerr(422, platform.MsgNoPublisher)
 	cases := []struct {
 		name       string
 		sendErrs   []error
@@ -133,7 +147,7 @@ func TestNtfyTestNoPublisherPath(t *testing.T) {
 		{"mint then resend succeeds", []error{noPub, nil}, nil, 200, "", 2, 1},
 		{"ensure 429", []error{noPub}, nerr(429, "x"), 429, "rate_limited", 1, 1},
 		{"ensure 503", []error{noPub}, nerr(503, "x"), 500, "notify_unavailable", 1, 1},
-		{"resend no match", []error{noPub, nerr(422, msgNoDestMatched)}, nil, 409, "ntfy_not_set_up", 2, 1},
+		{"resend no match", []error{noPub, nerr(422, platform.MsgNoDestMatched)}, nil, 409, "ntfy_not_set_up", 2, 1},
 		{"resend 429", []error{noPub, nerr(429, "x")}, nil, 429, "rate_limited", 2, 1},
 		{"second no publisher", []error{noPub, noPub}, nil, 500, "notify_unavailable", 2, 1},
 		{"resend 503", []error{noPub, nerr(503, "x")}, nil, 500, "notify_unavailable", 2, 1},
@@ -221,7 +235,7 @@ func TestDestinationTestSendErrorMapping(t *testing.T) {
 	}{
 		{"429", nerr(429, "x"), 429, "rate_limited", false},
 		{"503", nerr(503, "x"), 500, "notify_unavailable", false},
-		{"no destination matched", nerr(422, msgNoDestMatched), 500, "notify_unavailable", false},
+		{"no destination matched", nerr(422, platform.MsgNoDestMatched), 500, "notify_unavailable", false},
 		{"409", nerr(409, "destination disabled"), 500, "notify_unavailable", false},
 		{"unconfigured", platform.ErrNotifsUnconfigured, 500, "notify_unavailable", false},
 	}
@@ -239,7 +253,7 @@ func TestDestinationTestSendErrorMapping(t *testing.T) {
 }
 
 func TestDestinationTestPersonalUnavailable(t *testing.T) {
-	unavailable := nerr(422, msgNoPersonalDst)
+	unavailable := nerr(422, platform.MsgNoPersonalDst)
 
 	t.Run("confirmed undeliverable marks it stale", func(t *testing.T) {
 		hn := newHarness(t)
@@ -333,21 +347,7 @@ func TestTestCooldown(t *testing.T) {
 			t.Fatalf("sends = %d", len(hn.notifs.sends))
 		}
 	})
-	t.Run("expired entries are pruned", func(t *testing.T) {
-		hn := newHarness(t)
-		now := useClock(hn)
-		phoneReady(hn)
-		hn.wantStatus(hn.as(alice, "POST", ntfyTestPath, `{}`), 200, "")
-		*now = now.Add(testCooldown)
-		hn.wantStatus(hn.as(bob, "POST", "/api/notify/ntfy", `{}`), 200, "")
-		hn.wantStatus(hn.as(bob, "POST", ntfyTestPath, `{}`), 200, "")
-		hn.srv.testMu.Lock()
-		n := len(hn.srv.testSeen)
-		hn.srv.testMu.Unlock()
-		if n != 1 {
-			t.Fatalf("limiter holds %d entries, want 1 (alice's expired entry pruned)", n)
-		}
-	})
+	// Pruning of expired entries is covered by platform.TestTestLimiterPrunesExpired.
 	t.Run("targets and people are independent", func(t *testing.T) {
 		hn := newHarness(t)
 		useClock(hn)
@@ -403,7 +403,7 @@ func TestTestRoutesFailuresAreLoggedWithoutSecrets(t *testing.T) {
 	hn.notifs.sendErrs = []error{nerr(503, echoed), nerr(503, echoed)}
 	hn.wantStatus(hn.as(alice, "POST", ntfyTestPath, `{}`), 500, "notify_unavailable")
 	hn.wantStatus(hn.as(alice, "POST", destTestPath(d.Destination.ID), `{}`), 500, "notify_unavailable")
-	hn.notifs.sendErrs = []error{nerr(422, msgNoPersonalDst+" "+echoed)}
+	hn.notifs.sendErrs = []error{nerr(422, platform.MsgNoPersonalDst+" "+echoed)}
 	hn.notifs.lookupErr = nerr(503, echoed)
 	hn.srv.Now = func() time.Time { return time.Date(2027, 1, 1, 0, 0, 0, 0, time.UTC) }
 	hn.wantStatus(hn.as(alice, "POST", destTestPath(d.Destination.ID), `{}`), 500, "notify_unavailable")

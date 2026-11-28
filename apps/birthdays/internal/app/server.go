@@ -19,6 +19,7 @@ import (
 	"github.com/go-chi/chi/v5/middleware"
 
 	"github.com/gpropersi/apps/apps/birthdays/internal/app/db"
+	"github.com/gpropersi/apps/apps/birthdays/internal/platform"
 )
 
 const (
@@ -53,8 +54,8 @@ type Server struct {
 	// Now is the clock for the test-send cooldown (nil means time.Now).
 	Now func() time.Time
 
-	testMu   sync.Mutex
-	testSeen map[string]time.Time // cooldown start per person+target, see allowTest
+	limiterOnce sync.Once
+	testLimiter *platform.TestLimiter // test-send cooldown per person+target, see limiter()
 }
 
 // Handler builds the router. Security headers and request logging wrap every response, including 401, 404, 405 and 413.

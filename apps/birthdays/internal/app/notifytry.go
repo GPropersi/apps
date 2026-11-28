@@ -18,9 +18,8 @@ const (
 	// testCooldown is the minimum gap between two test sends to the same target for the same person.
 	testCooldown = 30 * time.Second
 
-	msgNoDestMatched = "no destination matched"
-	testTitle        = "Birthdays test notification"
-	testBody         = "Reminders will reach you here."
+	testTitle = "Birthdays test notification"
+	testBody  = "Reminders will reach you here."
 )
 
 func (s *Server) now() time.Time {
@@ -30,26 +29,13 @@ func (s *Server) now() time.Time {
 	return time.Now()
 }
 
-// allowTest is the test-send limiter. Lookup and record are one locked step so concurrent requests on one target cannot
-// both pass. It is in-process (reset by a restart, not shared across replicas), which is accepted for a 30 s anti-spam
-// guard. When refused it returns how long until the target may be tested again.
-func (s *Server) allowTest(key string) (retryAfter time.Duration, ok bool) {
-	now := s.now()
-	s.testMu.Lock()
-	defer s.testMu.Unlock()
-	for k, started := range s.testSeen {
-		if !now.Before(started.Add(testCooldown)) {
-			delete(s.testSeen, k)
-		}
-	}
-	if started, seen := s.testSeen[key]; seen {
-		return started.Add(testCooldown).Sub(now), false
-	}
-	if s.testSeen == nil {
-		s.testSeen = map[string]time.Time{}
-	}
-	s.testSeen[key] = now
-	return 0, true
+// limiter is the test-send limiter, created on first use so a Server built as a struct literal works. Its clock is
+// late-bound: a test that swaps Server.Now after construction is honoured.
+func (s *Server) limiter() *platform.TestLimiter {
+	s.limiterOnce.Do(func() {
+		s.testLimiter = platform.NewTestLimiter(testCooldown, func() time.Time { return s.now() })
+	})
+	return s.testLimiter
 }
 
 func (s *Server) testRateLimited(w http.ResponseWriter, retryAfter time.Duration) {
@@ -60,15 +46,8 @@ func (s *Server) testRateLimited(w http.ResponseWriter, retryAfter time.Duration
 
 // testMessage is the one-off message both test routes send, through the same Send the reminder job uses.
 func testMessage(email, target string, userID int64, now time.Time, via string, ids []int64) platform.Message {
-	return platform.Message{
-		Channel:                "all",
-		IdempotencyKey:         fmt.Sprintf("test-%s-%d-%d", target, userID, now.UnixNano()), // unique per click: a fixed key would dedupe
-		Recipient:              email,
-		Via:                    via,
-		PersonalDestinationIDs: ids,
-		Title:                  testTitle,
-		Body:                   testBody,
-	}
+	// key keeps the idempotency key test-<target>-<userID>-<unixnano>.
+	return platform.TestMessage(testTitle, testBody, email, via, fmt.Sprintf("%s-%d", target, userID), ids, now)
 }
 
 func (s *Server) handleNtfyTest(w http.ResponseWriter, r *http.Request) {
@@ -84,29 +63,18 @@ func (s *Server) handleNtfyTest(w http.ResponseWriter, r *http.Request) {
 		s.notifyUnavailable(w, r, "ntfy test", nil)
 		return
 	}
-	if wait, ok := s.allowTest(fmt.Sprintf("%d|ntfy", v.user.ID)); !ok {
+	if wait, ok := s.limiter().Allow(fmt.Sprintf("%d|ntfy", v.user.ID)); !ok {
 		s.testRateLimited(w, wait)
 		return
 	}
 	ctx := r.Context()
 	m := testMessage(v.email, "ntfy", v.user.ID, s.now(), "ntfy", nil)
-	_, err := s.Notifs.Send(ctx, m)
-	if isNotifsMsg(err, msgNoPublisher) {
-		if perr := s.Notifs.EnsurePublisher(ctx); perr != nil {
-			if notifsStatus(perr) == http.StatusTooManyRequests {
-				writeError(w, http.StatusTooManyRequests, "rate_limited")
-				return
-			}
-			s.notifyUnavailable(w, r, "ntfy test publisher", perr)
-			return
-		}
-		_, err = s.Notifs.Send(ctx, m) // same key; a second missing publisher falls through to 500, no loop
-	}
+	_, err := platform.SendWithPublisher(ctx, s.Notifs, m)
 	if err != nil {
 		switch {
-		case isNotifsMsg(err, msgNoDestMatched):
+		case platform.IsNotifsMsg(err, platform.MsgNoDestMatched):
 			writeError(w, http.StatusConflict, "ntfy_not_set_up")
-		case notifsStatus(err) == http.StatusTooManyRequests:
+		case platform.NotifsStatus(err) == http.StatusTooManyRequests:
 			writeError(w, http.StatusTooManyRequests, "rate_limited")
 		default:
 			s.notifyUnavailable(w, r, "ntfy test", err)
@@ -144,7 +112,7 @@ func (s *Server) handleDestinationTest(w http.ResponseWriter, r *http.Request) {
 		s.notifyUnavailable(w, r, "destination test", nil)
 		return
 	}
-	if wait, ok := s.allowTest(fmt.Sprintf("%d|dst-%d", v.user.ID, d.ID)); !ok {
+	if wait, ok := s.limiter().Allow(fmt.Sprintf("%d|dst-%d", v.user.ID, d.ID)); !ok {
 		s.testRateLimited(w, wait)
 		return
 	}
@@ -152,9 +120,9 @@ func (s *Server) handleDestinationTest(w http.ResponseWriter, r *http.Request) {
 	_, err = s.Notifs.Send(ctx, m)
 	if err != nil {
 		switch {
-		case isNotifsMsg(err, msgNoPersonalDst):
+		case platform.IsNotifsMsg(err, platform.MsgNoPersonalDst):
 			s.staleAfterRejectedTest(w, r, v, d)
-		case notifsStatus(err) == http.StatusTooManyRequests:
+		case platform.NotifsStatus(err) == http.StatusTooManyRequests:
 			writeError(w, http.StatusTooManyRequests, "rate_limited")
 		default:
 			// Any other 422 and every 409 land here: a delivery-api config problem must not stale a good destination.
