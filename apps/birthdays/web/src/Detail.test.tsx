@@ -118,6 +118,54 @@ afterEach(() => {
   window.sessionStorage.clear();
 });
 
+describe("date line", () => {
+  const MAR5 = bd(4, "Mar Five", 3, 5);
+  const LEAP = bd(5, "Leap Day", 2, 29);
+
+  async function dateLine(b: Birthday) {
+    go(`#/b/${b.id}`);
+    mount({ [`GET /api/birthdays/${b.id}`]: () => json({ birthday: b, shares: [], gifts: [] }) });
+    await screen.findByRole("heading", { level: 2, name: b.name });
+    const meta = document.querySelector(".dhead p.meta");
+    const chip = document.querySelector(".dhead .chip");
+    expect(meta).not.toBeNull();
+    expect(chip).not.toBeNull();
+    return { text: meta?.textContent ?? "", chipText: chip?.textContent ?? "", chipCls: chip?.className ?? "" };
+  }
+
+  it("shows the next occurrence with its year and age, today", async () => {
+    const r = await dateLine(SAM);
+    expect(r.text).toBe("Monday, November 16, 2026 · turns 36");
+    expect(r.text).not.toContain("born Feb 29");
+    expect(r.chipText).toBe("Today");
+    expect(r.chipCls).toBe("chip today");
+  });
+
+  it("shows no turns text without a birth year", async () => {
+    const r = await dateLine(ADA);
+    expect(r.text).toBe("Tuesday, November 17, 2026");
+    expect(r.text).not.toContain("turns");
+    expect(r.text).not.toContain("born Feb 29");
+    expect(r.chipText).toBe("Tomorrow");
+    expect(r.chipCls).toBe("chip soon");
+  });
+
+  it("shows next year's date and weekday together when the day has passed", async () => {
+    const r = await dateLine(MAR5);
+    expect(r.text).toBe("Friday, March 5, 2027");
+    expect(r.text).not.toContain("born Feb 29");
+    expect(r.chipText).toBe("4 months");
+    expect(r.chipCls).toBe("chip");
+  });
+
+  it("shows a Feb 29 birthday on Feb 28 in a common year, with the born cue", async () => {
+    const r = await dateLine(LEAP);
+    expect(r.text).toBe("Sunday, February 28, 2027 · born Feb 29");
+    expect(r.chipText).toBe("3 months");
+    expect(r.chipCls).toBe("chip");
+  });
+});
+
 describe("owner and recipient controls", () => {
   it("shows the owner every control", async () => {
     go("#/b/1");

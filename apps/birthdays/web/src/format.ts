@@ -1,5 +1,5 @@
 import type { Birthday, Settings } from "./api";
-import { MONTHS, daysUntil, observedDay, occurrence, parseDate, shortDate, turning, weekdayShort } from "./dates";
+import { daysUntil, observedDay, occurrence, parseDate, shortDate, turning, weekdayShort } from "./dates";
 
 export type Dated = { b: Birthday; occ: string; days: number };
 
@@ -69,10 +69,6 @@ export function metaText(d: Dated): string {
     parts.push(`from ${ownerName(d.b)}`);
   }
   return parts.join(" · ");
-}
-
-export function monthName(month: number): string {
-  return MONTHS[month - 1] ?? "";
 }
 
 // "Added Sam - Nov 14, in 5 days."

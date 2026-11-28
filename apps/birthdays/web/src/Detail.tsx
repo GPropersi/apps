@@ -2,10 +2,10 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { FormEvent, MouseEvent } from "react";
 import { deleteBirthday, deleteShare, getBirthday, postShare } from "./api";
 import type { Birthday, BirthdayDetail, Failure, Gift, Settings } from "./api";
-import { turning, weekday, WDL } from "./dates";
+import { longDate, turning } from "./dates";
 import type { EditDraft } from "./draft";
 import { EditForm } from "./EditForm";
-import { monthName, withDates } from "./format";
+import { isObservedEarly, withDates } from "./format";
 import { MSG_GENERIC, MSG_UNAVAILABLE, failureText } from "./messages";
 import { Avatar, Chip, ConfirmPrompt } from "./parts";
 import { MyGifts, OthersGifts, Reminders } from "./DetailSections";
@@ -278,8 +278,9 @@ export function Detail({
             </h2>
             {b !== null && dated !== undefined && dated !== null && (
               <p className="meta">
-                {WDL[weekday(dated.occ)]}, {monthName(b.month)} {b.day}
+                {longDate(dated.occ)}
                 {age !== null && ` · turns ${age}`}
+                {isObservedEarly(b, dated.occ) && " · born Feb 29"}
               </p>
             )}
           </div>

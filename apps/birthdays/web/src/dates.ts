@@ -113,6 +113,12 @@ export function shortDate(s: string): string {
   return `${MON[m - 1]} ${d}`;
 }
 
+// "Saturday, November 27, 2027": the weekday, month, day and year all come from the one date.
+export function longDate(s: string): string {
+  const { y, m, d } = parseDate(s);
+  return `${WDL[weekday(s)]}, ${MONTHS[m - 1]} ${d}, ${y}`;
+}
+
 export function weekdayShort(s: string): string {
   return WD[weekday(s)] ?? "";
 }
