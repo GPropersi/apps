@@ -8,6 +8,17 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+type Destination struct {
+	ID        int64
+	Email     string
+	NotifsID  int64
+	Kind      string
+	Label     string
+	Hint      string
+	Stale     bool
+	CreatedAt pgtype.Timestamptz
+}
+
 type Item struct {
 	ID        int64
 	Text      string
@@ -20,4 +31,10 @@ type JobRun struct {
 	IdempotencyKey string
 	Job            string
 	DoneAt         pgtype.Timestamptz
+}
+
+type NotifsUser struct {
+	Email      string
+	NtfyUserID string
+	CreatedAt  pgtype.Timestamptz
 }

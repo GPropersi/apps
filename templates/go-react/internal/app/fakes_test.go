@@ -24,17 +24,42 @@ const (
 	testEmail = "user@example.test"
 )
 
-// fakeStore is an in-memory db.Querier. State changes made inside InTx are kept only when fn returns nil, like a
-// transaction.
+// fakeStore is an in-memory db.Querier. Its InTx (fakes_tx_test.go) shares the live state and keeps an undo log, so a
+// failed or cancelled transaction rolls back like a real one. mu guards one query call at a time and is never held
+// across a transaction body. The model is read-uncommitted (other callers see a transaction's writes before it ends), so
+// tests assert serialisation, caps, cancellation and rollback, never "invisible until commit". A transaction locks one
+// email only.
 type fakeStore struct {
-	mu        sync.Mutex
-	items     []db.Item
-	jobRuns   map[string]string
-	failItems error // CreateItem returns this when set
-	failList  error
+	mu          sync.Mutex
+	items       []db.Item
+	nextItemID  int64
+	jobRuns     map[string]string
+	ntfyUsers   map[string]string // email -> ntfy user id (notifs_users)
+	dests       []destRow         // ordered by id
+	nextDestID  int64
+	failItems   error // CreateItem returns this when set
+	failList    error
+	failPhone   error // GetNtfyUserID and GetDestinationCounts return this when set
+	failCounts  error // only GetDestinationCounts returns this (a phone read that fails after the mutation)
+	failDelete  error // DeleteOwnDestination returns this when set (a local delete failing after the remote one)
+	failInsert  error // InsertDestination returns this when set (a local insert failing after the remote create)
+	failSetNtfy error // the next SetNtfyUserID in a transaction returns this once (a local write failing after a remote provision)
+
+	lockMu sync.Mutex
+	locks  map[string]chan struct{} // per-email transaction locks (LockNotifsEmail)
 }
 
-func newFakeStore() *fakeStore { return &fakeStore{jobRuns: map[string]string{}} }
+// destRow is one destinations row.
+type destRow struct {
+	id, notifsID int64
+	email, kind  string
+	label, hint  string
+	stale        bool
+}
+
+func newFakeStore() *fakeStore {
+	return &fakeStore{jobRuns: map[string]string{}, ntfyUsers: map[string]string{}, locks: map[string]chan struct{}{}}
+}
 
 func (s *fakeStore) ListItems(context.Context) ([]db.Item, error) {
 	s.mu.Lock()
@@ -53,11 +78,18 @@ func (s *fakeStore) ListItems(context.Context) ([]db.Item, error) {
 }
 
 func (s *fakeStore) CreateItem(_ context.Context, arg db.CreateItemParams) (db.Item, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.createItemLocked(arg)
+}
+
+func (s *fakeStore) createItemLocked(arg db.CreateItemParams) (db.Item, error) {
 	if s.failItems != nil {
 		return db.Item{}, s.failItems
 	}
+	s.nextItemID++
 	it := db.Item{
-		ID: int64(len(s.items) + 1), Text: arg.Text, CreatedBy: arg.CreatedBy, Source: arg.Source,
+		ID: s.nextItemID, Text: arg.Text, CreatedBy: arg.CreatedBy, Source: arg.Source,
 		CreatedAt: pgtype.Timestamptz{Time: time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC), Valid: true},
 	}
 	s.items = append(s.items, it)
@@ -65,26 +97,13 @@ func (s *fakeStore) CreateItem(_ context.Context, arg db.CreateItemParams) (db.I
 }
 
 func (s *fakeStore) InsertJobRun(_ context.Context, arg db.InsertJobRunParams) (int64, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	if _, ok := s.jobRuns[arg.IdempotencyKey]; ok {
 		return 0, nil
 	}
 	s.jobRuns[arg.IdempotencyKey] = arg.Job
 	return 1, nil
-}
-
-// InTx runs fn against a copy and keeps the changes only on success.
-func (s *fakeStore) InTx(_ context.Context, fn func(db.Querier) error) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	cp := &fakeStore{items: append([]db.Item(nil), s.items...), jobRuns: map[string]string{}, failItems: s.failItems}
-	for k, v := range s.jobRuns {
-		cp.jobRuns[k] = v
-	}
-	if err := fn(cp); err != nil {
-		return err
-	}
-	s.items, s.jobRuns = cp.items, cp.jobRuns
-	return nil
 }
 
 func (s *fakeStore) count() int {
@@ -157,10 +176,15 @@ type harness struct {
 	t     *testing.T
 	store *fakeStore
 	queue *fakeQueue
+	srv   *Server
 	h     http.Handler
 }
 
-func newHarness(t *testing.T) *harness {
+func newHarness(t *testing.T) *harness { return newHarnessWith(t, nil) }
+
+// newHarnessWith builds the harness and lets the test adjust the Server (flags, clock, notifier) before its router is
+// built.
+func newHarnessWith(t *testing.T, tweak func(*Server)) *harness {
 	t.Helper()
 	store := newFakeStore()
 	queue := &fakeQueue{}
@@ -169,8 +193,11 @@ func newHarness(t *testing.T) *harness {
 		w.WriteHeader(http.StatusTeapot) // proves /_jobs/* reaches the jobs handler
 	})
 	srv := &Server{Store: store, Queue: queue, Jobs: jobs, Static: testStatic, Logger: logger,
-		Auth: fakeAuth.Middleware, EmailOf: fakeAuth.EmailOf}
-	return &harness{t: t, store: store, queue: queue, h: srv.Handler()}
+		Auth: fakeAuth.Middleware, EmailOf: fakeAuth.EmailOf, Tx: store}
+	if tweak != nil {
+		tweak(srv)
+	}
+	return &harness{t: t, store: store, queue: queue, srv: srv, h: srv.Handler()}
 }
 
 type req struct {
@@ -180,12 +207,20 @@ type req struct {
 	header map[string]string
 	noAuth bool
 	json   bool // sets Content-Type: application/json
+	chunk  bool // the body has no known length (ContentLength -1), like a chunked upload
+	ctx    context.Context
 }
 
 func (hn *harness) do(r req) *httptest.ResponseRecorder {
 	hn.t.Helper()
 	hr := httptest.NewRequest(r.method, r.path, strings.NewReader(r.body))
 	hr.Host = testHost
+	if r.chunk {
+		hr.ContentLength = -1
+	}
+	if r.ctx != nil {
+		hr = hr.WithContext(r.ctx)
+	}
 	if !r.noAuth {
 		hr.Header.Set("X-Test-Email", testEmail)
 	}

@@ -9,6 +9,17 @@ import (
 	"context"
 )
 
+const countDestinations = `-- name: CountDestinations :one
+SELECT count(*)::bigint FROM destinations WHERE email = $1
+`
+
+func (q *Queries) CountDestinations(ctx context.Context, email string) (int64, error) {
+	row := q.db.QueryRow(ctx, countDestinations, email)
+	var column_1 int64
+	err := row.Scan(&column_1)
+	return column_1, err
+}
+
 const createItem = `-- name: CreateItem :one
 INSERT INTO items (text, created_by, source)
 VALUES ($1, $2, $3)
@@ -34,6 +45,129 @@ func (q *Queries) CreateItem(ctx context.Context, arg CreateItemParams) (Item, e
 	return i, err
 }
 
+const deleteOwnDestination = `-- name: DeleteOwnDestination :execrows
+DELETE FROM destinations WHERE id = $1 AND email = $2
+`
+
+type DeleteOwnDestinationParams struct {
+	DestinationID int64
+	Email         string
+}
+
+func (q *Queries) DeleteOwnDestination(ctx context.Context, arg DeleteOwnDestinationParams) (int64, error) {
+	result, err := q.db.Exec(ctx, deleteOwnDestination, arg.DestinationID, arg.Email)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
+const getDestinationCounts = `-- name: GetDestinationCounts :one
+SELECT count(*)::bigint AS total, (count(*) FILTER (WHERE stale))::bigint AS stale
+FROM destinations
+WHERE email = $1
+`
+
+type GetDestinationCountsRow struct {
+	Total int64
+	Stale int64
+}
+
+func (q *Queries) GetDestinationCounts(ctx context.Context, email string) (GetDestinationCountsRow, error) {
+	row := q.db.QueryRow(ctx, getDestinationCounts, email)
+	var i GetDestinationCountsRow
+	err := row.Scan(&i.Total, &i.Stale)
+	return i, err
+}
+
+const getNtfyUserID = `-- name: GetNtfyUserID :one
+SELECT ntfy_user_id FROM notifs_users WHERE email = $1
+`
+
+func (q *Queries) GetNtfyUserID(ctx context.Context, email string) (string, error) {
+	row := q.db.QueryRow(ctx, getNtfyUserID, email)
+	var ntfy_user_id string
+	err := row.Scan(&ntfy_user_id)
+	return ntfy_user_id, err
+}
+
+const getOwnDestination = `-- name: GetOwnDestination :one
+SELECT id, notifs_id, kind, label, hint, stale
+FROM destinations
+WHERE id = $1 AND email = $2
+`
+
+type GetOwnDestinationParams struct {
+	DestinationID int64
+	Email         string
+}
+
+type GetOwnDestinationRow struct {
+	ID       int64
+	NotifsID int64
+	Kind     string
+	Label    string
+	Hint     string
+	Stale    bool
+}
+
+func (q *Queries) GetOwnDestination(ctx context.Context, arg GetOwnDestinationParams) (GetOwnDestinationRow, error) {
+	row := q.db.QueryRow(ctx, getOwnDestination, arg.DestinationID, arg.Email)
+	var i GetOwnDestinationRow
+	err := row.Scan(
+		&i.ID,
+		&i.NotifsID,
+		&i.Kind,
+		&i.Label,
+		&i.Hint,
+		&i.Stale,
+	)
+	return i, err
+}
+
+const insertDestination = `-- name: InsertDestination :one
+INSERT INTO destinations (email, notifs_id, kind, label, hint)
+VALUES ($1, $2, $3, $4, $5)
+RETURNING id, notifs_id, kind, label, hint, stale
+`
+
+type InsertDestinationParams struct {
+	Email    string
+	NotifsID int64
+	Kind     string
+	Label    string
+	Hint     string
+}
+
+type InsertDestinationRow struct {
+	ID       int64
+	NotifsID int64
+	Kind     string
+	Label    string
+	Hint     string
+	Stale    bool
+}
+
+func (q *Queries) InsertDestination(ctx context.Context, arg InsertDestinationParams) (InsertDestinationRow, error) {
+	row := q.db.QueryRow(ctx, insertDestination,
+		arg.Email,
+		arg.NotifsID,
+		arg.Kind,
+		arg.Label,
+		arg.Hint,
+	)
+	var i InsertDestinationRow
+	err := row.Scan(
+		&i.ID,
+		&i.NotifsID,
+		&i.Kind,
+		&i.Label,
+		&i.Hint,
+		&i.Stale,
+	)
+	return i, err
+}
+
 const insertJobRun = `-- name: InsertJobRun :execrows
 INSERT INTO job_runs (idempotency_key, job)
 VALUES ($1, $2)
@@ -51,6 +185,49 @@ func (q *Queries) InsertJobRun(ctx context.Context, arg InsertJobRunParams) (int
 		return 0, err
 	}
 	return result.RowsAffected(), nil
+}
+
+const listDestinations = `-- name: ListDestinations :many
+SELECT id, notifs_id, kind, label, hint, stale
+FROM destinations
+WHERE email = $1
+ORDER BY id
+`
+
+type ListDestinationsRow struct {
+	ID       int64
+	NotifsID int64
+	Kind     string
+	Label    string
+	Hint     string
+	Stale    bool
+}
+
+func (q *Queries) ListDestinations(ctx context.Context, email string) ([]ListDestinationsRow, error) {
+	rows, err := q.db.Query(ctx, listDestinations, email)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListDestinationsRow
+	for rows.Next() {
+		var i ListDestinationsRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.NotifsID,
+			&i.Kind,
+			&i.Label,
+			&i.Hint,
+			&i.Stale,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }
 
 const listItems = `-- name: ListItems :many
@@ -84,4 +261,52 @@ func (q *Queries) ListItems(ctx context.Context) ([]Item, error) {
 		return nil, err
 	}
 	return items, nil
+}
+
+const lockNotifsEmail = `-- name: LockNotifsEmail :exec
+
+SELECT pg_advisory_xact_lock(hashtext($1::text))
+`
+
+// ---------------------------------------------------------------- phone notifications (per person, keyed by email)
+// Per-person transaction-scoped advisory lock taken first in every read-then-write of a person's notify rows, so two
+// concurrent first calls provision once and the destination cap holds.
+func (q *Queries) LockNotifsEmail(ctx context.Context, email string) error {
+	_, err := q.db.Exec(ctx, lockNotifsEmail, email)
+	return err
+}
+
+const setNtfyUserID = `-- name: SetNtfyUserID :exec
+INSERT INTO notifs_users (email, ntfy_user_id)
+VALUES ($1, $2)
+ON CONFLICT DO NOTHING
+`
+
+type SetNtfyUserIDParams struct {
+	Email      string
+	NtfyUserID string
+}
+
+func (q *Queries) SetNtfyUserID(ctx context.Context, arg SetNtfyUserIDParams) error {
+	_, err := q.db.Exec(ctx, setNtfyUserID, arg.Email, arg.NtfyUserID)
+	return err
+}
+
+const setOwnDestinationStale = `-- name: SetOwnDestinationStale :execrows
+UPDATE destinations SET stale = $1
+WHERE id = $2 AND email = $3
+`
+
+type SetOwnDestinationStaleParams struct {
+	Stale         bool
+	DestinationID int64
+	Email         string
+}
+
+func (q *Queries) SetOwnDestinationStale(ctx context.Context, arg SetOwnDestinationStaleParams) (int64, error) {
+	result, err := q.db.Exec(ctx, setOwnDestinationStale, arg.Stale, arg.DestinationID, arg.Email)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
 }

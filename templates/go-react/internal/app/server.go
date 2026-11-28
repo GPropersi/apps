@@ -12,6 +12,7 @@ import (
 	"mime"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 	"unicode/utf8"
 
@@ -48,6 +49,18 @@ type Server struct {
 	Logger  *slog.Logger
 	Auth    func(http.Handler) http.Handler // answers 401 unless the request carries a valid identity
 	EmailOf func(*http.Request) (string, bool)
+
+	// Phone notifications. The notify routes exist only when NotifsEnabled (app.yaml `notifs: true`); Notifs nil means
+	// every notify call answers notify_unavailable.
+	Tx            Transactor
+	Notifs        platform.Notifier
+	NotifsAppID   string
+	NotifsEnabled bool
+	NotifsName    string           // the app name from app.yaml, shown on the setup page
+	Now           func() time.Time // nil means time.Now; read only through now()
+
+	limiterOnce sync.Once
+	limiter     *platform.TestLimiter
 }
 
 type itemJSON struct {
@@ -73,7 +86,7 @@ func (s *Server) Handler() http.Handler {
 	r.Handle("/_jobs/*", s.Jobs)
 
 	r.Route("/api", func(api chi.Router) {
-		api.Use(s.Auth)
+		api.Use(noStore, s.Auth)
 		api.NotFound(func(w http.ResponseWriter, _ *http.Request) { writeError(w, http.StatusNotFound, "not_found") })
 		api.MethodNotAllowed(func(w http.ResponseWriter, _ *http.Request) {
 			writeError(w, http.StatusMethodNotAllowed, "method_not_allowed")
@@ -175,7 +188,18 @@ func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]string{"email": email})
+	me := meJSON{Email: email, Notifs: s.NotifsEnabled}
+	if s.NotifsEnabled {
+		// The phone section is optional: a failed read never fails the app load; the web reads a missing phone as
+		// "status unavailable".
+		normal := strings.ToLower(strings.TrimSpace(email))
+		if p, err := s.phoneState(r.Context(), normal); err != nil {
+			s.Logger.Error("phone state read failed", "step", "me", "class", errClass(err))
+		} else {
+			me.Phone = &p
+		}
+	}
+	writeJSON(w, http.StatusOK, me)
 }
 
 func (s *Server) handleListItems(w http.ResponseWriter, r *http.Request) {
