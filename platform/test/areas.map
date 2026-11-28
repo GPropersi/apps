@@ -22,6 +22,7 @@
 #     and ingress compose files and the jobs Dockerfiles, and test_areas_map.sh mentions ../data/, ../lib/ and ../registry/.
 #   platform/host/** and platform/lint/** also list ci: platform/ci/test_check_installer_stamps.sh reads ../host/install-*.sh
 #     and depends on ../lint/embed-payloads.sh's stamp normalisation.
+#   platform/host/** also lists ingress: platform/ingress/test_cloudflared_host_stack.sh reads ../host/install-cloudflared-host.sh.
 #   platform/lib/** also lists ci: platform/ci/notifs-exchange-name.sh sources platform/lib/notifs-app-id.sh.
 #   templates (templates/<name>/test_*.sh: unit, web, sqlc and image tests, run by run.sh, not under platform/) is listed
 #     wherever scaffold is, because those tests read the same inputs as the scaffold tests; a templates/** change selects
@@ -44,7 +45,7 @@ platform/data/**	data,host,backup,jobs,scaffold,templates,lint,deploy,apps,test
 platform/jobs/**	jobs,host,lint,scaffold,templates,apps,test
 platform/backup/**	backup,host,data,lint,apps
 platform/ingress/**	ingress,host,lint,apps,test
-platform/host/**	host,data,backup,jobs,lint,apps,ci
+platform/host/**	host,data,backup,jobs,lint,apps,ci,ingress
 platform/deploy/**	deploy,host,lint,data,scaffold,templates
 platform/lint/**	lint,ci,scaffold,templates
 platform/scaffold/**	scaffold,templates,lint
