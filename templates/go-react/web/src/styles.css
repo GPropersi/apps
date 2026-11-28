@@ -52,4 +52,31 @@ main > .alert { margin-top: 0; }
 .alert strong { color: var(--error); }
 .row { display: flex; gap: 0.5rem; flex-wrap: wrap; align-items: center; }
 .desc { margin: 0 0 0.75rem; color: var(--muted); font-size: 0.9375rem; }
+.status:empty { min-height: 0; }
+.status.ok { color: var(--ok); }
+.sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+.secretval { font-family: ui-monospace, monospace; font-size: 1rem; overflow-wrap: anywhere; }
+section.secret { border: 1px solid var(--text); border-radius: 0.5rem; padding: 0.75rem; display: grid; gap: 0.5rem; }
+section.secret p { margin: 0; }
+.secret h2 { margin: 0; }
+button.danger { min-height: 2.75rem; min-width: 2.75rem; font: inherit; font-weight: 600; padding: 0 1rem; border-radius: 0.375rem; border: 1px solid var(--error); background: var(--surface); color: var(--error); cursor: pointer; }
+.alert.confirm { margin: 0.75rem 0 0; }
+.alert.confirm .row { margin-top: 0.25rem; }
+/* Phone notifications: the rules are scoped to ul.items.dests so the Notes list and form are unchanged. */
+ul.items.dests > li { display: flex; flex-wrap: wrap; align-items: center; gap: 0.5rem 0.75rem; }
+ul.items.dests .pinfo { flex: 1 1 10rem; min-width: 0; overflow-wrap: anywhere; }
+ul.items.dests .actions { display: flex; flex-wrap: wrap; gap: 0.5rem; }
+ul.items.dests .actions button { flex: none; }
+.ntfysetup { flex: 1 1 100%; display: grid; gap: 0.5rem; padding: 0.75rem; border-radius: 0.5rem; background: var(--bg); border: 1px solid var(--border); }
+.ntfysetup p, .ntfysetup h3 { margin: 0; }
+ul.items.dests .destform { flex: 1 1 100%; display: grid; gap: 0.75rem; }
+ul.items.dests .destform h3 { margin: 0; font-size: 1rem; }
+ul.items.dests .destform .fields { display: flex; flex-wrap: wrap; gap: 0.75rem; align-items: flex-start; }
+ul.items.dests .destform .field { display: grid; gap: 0.25rem; flex: 1 1 9rem; min-width: 0; align-content: start; }
+ul.items.dests .destform .field:last-child { flex: 1 1 100%; }
+ul.items.dests .destform label { flex-basis: auto; }
+ul.items.dests .destform .hint, ul.items.dests .destform .fielderr { margin: 0; }
+ul.items.dests .destform .fielderr:empty { display: none; }
+ul.items.dests input[type=text], ul.items.dests input[type=url], ul.items.dests select { width: 100%; min-width: 0; min-height: 2.75rem; font: inherit; font-size: 1rem; padding: 0.5rem 0.75rem; border: 1px solid var(--border); border-radius: 0.375rem; background: var(--bg); color: var(--text); }
+ul.items.dests .destform > button { justify-self: start; }
 @media (min-width: 992px) { main, .bar { max-width: 44rem; } }

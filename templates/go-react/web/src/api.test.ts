@@ -1,5 +1,18 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { getItems, getMe, postItem, postTask } from "./api";
+import {
+  checkDestination,
+  deleteDestination,
+  getDestinations,
+  getItems,
+  getMe,
+  postDestination,
+  postDestinationTest,
+  postItem,
+  postNtfy,
+  postNtfyReset,
+  postNtfyTest,
+  postTask,
+} from "./api";
 
 const HTML = { "Content-Type": "text/html; charset=utf-8" };
 const JSON_CT = { "Content-Type": "application/json" };
@@ -127,7 +140,7 @@ describe("api result mapping", () => {
 
   it("returns typed payloads for OK responses", async () => {
     respond('{"email":"a@example.com"}', 200, JSON_CT);
-    expect(await getMe()).toEqual({ kind: "ok", data: { email: "a@example.com" } });
+    expect(await getMe()).toEqual({ kind: "ok", data: { email: "a@example.com", notifs: false, phone: null } });
     respond(JSON.stringify(ITEM), 201, JSON_CT);
     expect(await postItem("hi")).toEqual({ kind: "ok", data: ITEM });
     respond('{"id":"01ABC"}', 202, JSON_CT);
@@ -197,5 +210,128 @@ describe("api requests", () => {
     expect(init.method).toBe("POST");
     expect(init.headers).toMatchObject({ "Content-Type": "application/json" });
     expect(init.body).toBe("{}");
+  });
+});
+
+const P = { ntfy: true, destinations: 1, stale_destinations: 0 };
+const D = { id: 7, kind: "webhook", label: "Hook", hint: "ends 123", stale: false };
+// Built at runtime so no secret-shaped literal sits in the source.
+const PW = ["pw", "one", "time"].join("-");
+const SIG = ["sig", "one", "time"].join("-");
+
+describe("me payload", () => {
+  it("treats a missing or non-true notifs as false and drops phone", async () => {
+    respond(JSON.stringify({ email: "a@example.com", phone: P }), 200, JSON_CT);
+    expect(await getMe()).toEqual({ kind: "ok", data: { email: "a@example.com", notifs: false, phone: null } });
+    respond(JSON.stringify({ email: "a@example.com", notifs: "yes", phone: P }), 200, JSON_CT);
+    expect(await getMe()).toEqual({ kind: "ok", data: { email: "a@example.com", notifs: false, phone: null } });
+  });
+
+  it("accepts notifs with an optional phone", async () => {
+    respond(JSON.stringify({ email: "a@example.com", notifs: true, phone: P }), 200, JSON_CT);
+    expect(await getMe()).toEqual({ kind: "ok", data: { email: "a@example.com", notifs: true, phone: P } });
+    respond(JSON.stringify({ email: "a@example.com", notifs: true }), 200, JSON_CT);
+    expect(await getMe()).toEqual({ kind: "ok", data: { email: "a@example.com", notifs: true, phone: null } });
+  });
+});
+
+describe("notify calls", () => {
+  it("posts the setup, reset and test routes with a JSON body", async () => {
+    let f = respond(JSON.stringify({ user_id: "u", setup_url: "https://x.test/", password: PW, phone: P }), 200, JSON_CT);
+    expect(await postNtfy()).toEqual({ kind: "ok", data: { setup_url: "https://x.test/", password: PW, phone: P } });
+    expect(f.mock.calls[0][0]).toBe("/api/notify/ntfy");
+    f = respond(JSON.stringify({ setup_url: "https://x.test/", password: PW, phone: P }), 200, JSON_CT);
+    expect(await postNtfyReset()).toEqual({ kind: "ok", data: { setup_url: "https://x.test/", password: PW, phone: P } });
+    expect(f.mock.calls[0][0]).toBe("/api/notify/ntfy/reset");
+    f = respond(JSON.stringify({ phone: P }), 200, JSON_CT);
+    expect(await postNtfyTest()).toEqual({ kind: "ok", data: { phone: P } });
+    expect(f.mock.calls[0][0]).toBe("/api/notify/ntfy/test");
+    expect(f.mock.calls[0][1]).toMatchObject({ method: "POST", body: "{}" });
+  });
+
+  it("maps a repeat setup call with password null", async () => {
+    respond(JSON.stringify({ user_id: "u", setup_url: "https://x.test/", password: null, phone: P }), 200, JSON_CT);
+    expect(await postNtfy()).toMatchObject({ kind: "ok", data: { password: null } });
+  });
+
+  it("lists, creates, checks and tests destinations", async () => {
+    let f = respond(JSON.stringify({ destinations: [D] }), 200, JSON_CT);
+    expect(await getDestinations()).toEqual({ kind: "ok", data: [D] });
+    expect(f.mock.calls[0][0]).toBe("/api/notify/destinations");
+    f = respond(JSON.stringify({ destination: D, phone: P, signing_secret: SIG }), 201, JSON_CT);
+    expect(await postDestination({ kind: "webhook", label: "Hook", url: "https://h.test/x" })).toEqual({
+      kind: "ok",
+      data: { destination: D, phone: P, signing_secret: SIG },
+    });
+    expect(JSON.parse((f.mock.calls[0][1] as RequestInit).body as string)).toEqual({
+      kind: "webhook",
+      label: "Hook",
+      url: "https://h.test/x",
+    });
+    respond(JSON.stringify({ destination: D, phone: P }), 201, JSON_CT);
+    expect(await postDestination({ kind: "discord", label: "D", url: "https://h.test/x" })).toMatchObject({
+      data: { signing_secret: null },
+    });
+    f = respond(JSON.stringify({ destination: D, phone: P }), 200, JSON_CT);
+    expect(await checkDestination(7)).toEqual({ kind: "ok", data: { destination: D, phone: P } });
+    expect(f.mock.calls[0][0]).toBe("/api/notify/destinations/7/check");
+    f = respond(JSON.stringify({ phone: P }), 200, JSON_CT);
+    expect(await postDestinationTest(7)).toEqual({ kind: "ok", data: { phone: P } });
+    expect(f.mock.calls[0][0]).toBe("/api/notify/destinations/7/test");
+  });
+
+  it("sends Content-Type application/json and body {} on the destination DELETE", async () => {
+    const f = respond(JSON.stringify({ phone: P }), 200, JSON_CT);
+    expect(await deleteDestination(7)).toEqual({ kind: "ok", data: { phone: P } });
+    expect(f.mock.calls[0][0]).toBe("/api/notify/destinations/7");
+    const init = f.mock.calls[0][1] as RequestInit;
+    expect(init.method).toBe("DELETE");
+    expect(init.headers).toMatchObject({ "Content-Type": "application/json" });
+    expect(init.body).toBe("{}");
+  });
+
+  it.each([
+    [429, "rate_limited"],
+    [409, "ntfy_not_set_up"],
+    [500, "notify_unavailable"],
+    [409, "destination_stale"],
+    [404, "not_found"],
+    [409, "too_many_destinations"],
+    [400, "invalid_label"],
+    [400, "invalid_url"],
+    [400, "url_not_public"],
+  ])("maps %i %s to its own kind", async (status, code) => {
+    respond(JSON.stringify({ error: code }), status, JSON_CT);
+    expect(await postDestinationTest(1)).toEqual({ kind: code });
+  });
+
+  it("maps an unknown error code to generic", async () => {
+    respond('{"error":"nope"}', 400, JSON_CT);
+    expect(await postNtfy()).toEqual({ kind: "generic" });
+  });
+});
+
+describe("write responses without phone", () => {
+  it("never throws and still returns one-time secrets", async () => {
+    respond(JSON.stringify({ setup_url: "https://x.test/", password: PW }), 200, JSON_CT);
+    expect(await postNtfy()).toEqual({ kind: "ok", data: { setup_url: "https://x.test/", password: PW, phone: null } });
+    respond(JSON.stringify({ setup_url: "https://x.test/", password: PW }), 200, JSON_CT);
+    expect(await postNtfyReset()).toEqual({
+      kind: "ok",
+      data: { setup_url: "https://x.test/", password: PW, phone: null },
+    });
+    respond("{}", 200, JSON_CT);
+    expect(await postNtfyTest()).toEqual({ kind: "ok", data: { phone: null } });
+    respond(JSON.stringify({ destination: D, signing_secret: SIG }), 201, JSON_CT);
+    expect(await postDestination({ kind: "webhook", label: "Hook", url: "https://h.test/x" })).toEqual({
+      kind: "ok",
+      data: { destination: D, signing_secret: SIG, phone: null },
+    });
+    respond(JSON.stringify({ destination: D }), 200, JSON_CT);
+    expect(await checkDestination(7)).toEqual({ kind: "ok", data: { destination: D, phone: null } });
+    respond("{}", 200, JSON_CT);
+    expect(await postDestinationTest(7)).toEqual({ kind: "ok", data: { phone: null } });
+    respond("{}", 200, JSON_CT);
+    expect(await deleteDestination(7)).toEqual({ kind: "ok", data: { phone: null } });
   });
 });
