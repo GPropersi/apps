@@ -6,13 +6,8 @@ import (
 	"encoding/base64"
 	"errors"
 	"net/http"
-	"net/netip"
-	"net/url"
-	"slices"
 	"strings"
 	"time"
-	"unicode"
-	"unicode/utf8"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
@@ -23,26 +18,14 @@ import (
 
 const (
 	maxDestinations  = 10
-	maxLabelRunes    = 50
-	hintLen          = 3
-	notifsSetupBase  = "https://notifs-setup.4irl.app/"
 	notifsSetupName  = "Birthdays"
 	cleanupTimeout   = 5 * time.Second
 	signingSecretLen = 32
-	maxURLLen        = 2048
 )
 
 // Notifier is the part of the 4irl-notifs client the notification settings routes use; *platform.NotifsClient
 // satisfies it and tests fake it. A nil Notifier answers every notify call 500 notify_unavailable.
-type Notifier interface {
-	Provision(ctx context.Context, email string) (platform.Provisioned, error)
-	ResetPassword(ctx context.Context, email string) (platform.PasswordReset, error)
-	CreatePersonalDestination(ctx context.Context, email string, in platform.PersonalDestinationInput) (int64, error)
-	DeletePersonalDestination(ctx context.Context, email string, id int64) error
-	LookupPersonalDestinations(ctx context.Context, email string, ids []int64) (map[int64]bool, error)
-	Send(ctx context.Context, m platform.Message) (platform.Result, error)
-	EnsurePublisher(ctx context.Context) error
-}
+type Notifier = platform.Notifier
 
 // destinationJSON is D from the HTTP API contract. It never carries the URL.
 type destinationJSON struct {
@@ -62,14 +45,7 @@ func noStore(next http.Handler) http.Handler {
 }
 
 func (s *Server) setupURL(userID string) string {
-	return notifsSetupBase + "?app=" + url.QueryEscape(s.NotifsAppID) + "&user=" + url.QueryEscape(userID) +
-		"&name=" + url.QueryEscape(notifsSetupName)
-}
-
-// isNotifsErr reports whether err came from the notifs client (as opposed to the database).
-func isNotifsErr(err error) bool {
-	var ne *platform.NotifsError
-	return errors.As(err, &ne) || errors.Is(err, platform.ErrNotifsUnconfigured) || errors.Is(err, platform.ErrNotifsRetryable)
+	return platform.NotifsSetupURL(s.NotifsAppID, userID, notifsSetupName)
 }
 
 // notifyUnavailable answers 500 notify_unavailable and logs the step and the status code only: never the error text
@@ -89,14 +65,6 @@ func (s *Server) notifyUnavailable(w http.ResponseWriter, r *http.Request, op st
 	}
 	s.Logger.Error("notify failed", attrs...)
 	writeError(w, http.StatusInternalServerError, "notify_unavailable")
-}
-
-func notifsStatus(err error) int {
-	var ne *platform.NotifsError
-	if errors.As(err, &ne) {
-		return ne.Status
-	}
-	return 0
 }
 
 func destJSON(id int64, kind, label, hint string, stale bool) destinationJSON {
@@ -143,7 +111,7 @@ func (s *Server) handleNtfy(w http.ResponseWriter, r *http.Request) {
 		return nil
 	})
 	if err != nil {
-		if isNotifsErr(err) {
+		if platform.IsNotifsErr(err) {
 			s.notifyUnavailable(w, r, "ntfy provision", err)
 			return
 		}
@@ -178,7 +146,7 @@ func (s *Server) handleNtfyReset(w http.ResponseWriter, r *http.Request) {
 	}
 	res, err := s.Notifs.ResetPassword(r.Context(), v.email)
 	if err != nil {
-		switch notifsStatus(err) {
+		switch platform.NotifsStatus(err) {
 		case http.StatusNotFound:
 			writeError(w, http.StatusConflict, "ntfy_not_set_up")
 		case http.StatusTooManyRequests:
@@ -222,64 +190,17 @@ func (s *Server) handleListDestinations(w http.ResponseWriter, r *http.Request) 
 	writeJSON(w, http.StatusOK, map[string]any{"destinations": out})
 }
 
-// validDestination checks the kind, label and URL. The Discord kind accepts only Discord's own webhook host and path;
-// both need https. It returns the 400 code on failure.
+// validDestination checks the kind, label and URL through the shared rules and returns the 400 code on failure.
 func validDestination(kind, label, rawURL string) (cleanLabel, code string) {
-	label = strings.TrimSpace(label)
-	if n := utf8.RuneCountInString(label); n < 1 || n > maxLabelRunes || strings.IndexFunc(label, unicode.IsControl) >= 0 {
+	clean, err := platform.ValidDestination(kind, label, rawURL)
+	switch {
+	case err == nil:
+		return clean, ""
+	case errors.Is(err, platform.ErrInvalidLabel):
 		return "", "invalid_label"
-	}
-	if len(rawURL) > maxURLLen {
+	default: // ErrInvalidURL and anything unforeseen: fail closed
 		return "", "invalid_url"
 	}
-	u, err := url.Parse(rawURL)
-	if err != nil || u.Scheme != "https" || u.Hostname() == "" || u.User != nil || strings.ContainsAny(rawURL, " \t\r\n\x00") {
-		return "", "invalid_url"
-	}
-	// Defence in depth: delivery-api's public-address check is the real SSRF control, this only refuses the obvious.
-	host := strings.TrimSuffix(strings.ToLower(u.Hostname()), ".")
-	if host == "localhost" || strings.HasSuffix(host, ".localhost") || strings.HasSuffix(host, ".local") || strings.HasSuffix(host, ".internal") {
-		return "", "invalid_url"
-	}
-	if ip, perr := netip.ParseAddr(host); perr == nil {
-		ip = ip.Unmap()
-		if ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsMulticast() || ip.IsUnspecified() {
-			return "", "invalid_url"
-		}
-	}
-	if slices.Contains(strings.Split(u.Path, "/"), "..") {
-		return "", "invalid_url"
-	}
-	if kind == "discord" {
-		if (host != "discord.com" && host != "discordapp.com") || !strings.HasPrefix(u.Path, "/api/webhooks/") ||
-			(u.Port() != "" && u.Port() != "443") {
-			return "", "invalid_url"
-		}
-	}
-	return label, ""
-}
-
-// hintOf is the 3-char display hint: the end of the URL path's last segment (query and fragment never count), or of
-// the whole URL when the path has no segment.
-func hintOf(rawURL string) string {
-	if u, err := url.Parse(rawURL); err == nil {
-		seg := strings.TrimRight(u.Path, "/")
-		if i := strings.LastIndex(seg, "/"); i >= 0 {
-			seg = seg[i+1:]
-		}
-		if seg != "" {
-			return lastN(seg, hintLen)
-		}
-	}
-	return lastN(rawURL, hintLen)
-}
-
-func lastN(s string, n int) string {
-	r := []rune(s)
-	if len(r) > n {
-		r = r[len(r)-n:]
-	}
-	return string(r)
 }
 
 func (s *Server) handlePostDestination(w http.ResponseWriter, r *http.Request) {
@@ -364,7 +285,7 @@ func (s *Server) handlePostDestination(w http.ResponseWriter, r *http.Request) {
 			return nil
 		}
 		row, err = q.InsertDestination(ctx, db.InsertDestinationParams{UserID: v.user.ID, NotifsID: notifsID, Kind: body.Kind,
-			Label: label, Hint: hintOf(body.URL)})
+			Label: label, Hint: platform.DestinationHint(body.URL)})
 		return err
 	})
 	if err != nil || full {
@@ -372,7 +293,7 @@ func (s *Server) handlePostDestination(w http.ResponseWriter, r *http.Request) {
 		cctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), cleanupTimeout)
 		defer cancel()
 		if derr := s.Notifs.DeletePersonalDestination(cctx, v.email, notifsID); derr != nil {
-			s.Logger.Warn("notify cleanup failed", "step", "delete orphan destination", "status", notifsStatus(derr))
+			s.Logger.Warn("notify cleanup failed", "step", "delete orphan destination", "status", platform.NotifsStatus(derr))
 		}
 		if full {
 			writeError(w, http.StatusConflict, "too_many_destinations")
@@ -470,7 +391,7 @@ func (s *Server) handleDeleteDestination(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	// A delivery-api 404 means it is already gone there, so the local row still goes; any other failure keeps the row.
-	if err := s.Notifs.DeletePersonalDestination(ctx, v.email, d.NotifsID); err != nil && notifsStatus(err) != http.StatusNotFound {
+	if err := s.Notifs.DeletePersonalDestination(ctx, v.email, d.NotifsID); err != nil && platform.NotifsStatus(err) != http.StatusNotFound {
 		s.notifyUnavailable(w, r, "delete destination", err)
 		return
 	}

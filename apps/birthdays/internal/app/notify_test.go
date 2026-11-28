@@ -548,8 +548,8 @@ func TestHintIsTheEndOfThePathNeverTheQuery(t *testing.T) {
 		"https://hooks.example.test/path/xyz/":                "xyz",
 		"https://hooks.example.test/?token=abcdef":            "def",
 	} {
-		if got := hintOf(url); got != want {
-			t.Errorf("hintOf(%q) = %q, want %q", url, got, want)
+		if got := platform.DestinationHint(url); got != want {
+			t.Errorf("platform.DestinationHint(%q) = %q, want %q", url, got, want)
 		}
 	}
 }
