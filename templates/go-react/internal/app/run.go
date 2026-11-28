@@ -41,6 +41,11 @@ type Deps struct {
 	Listen     func(addr string) (net.Listener, error)
 	LoadZone   func() (*time.Location, error) // the schedule zone; Run fails startup if it cannot load
 	Jobs       *Jobs                          // optional: a test passes one to inspect it; Run creates one when nil
+
+	// Notifs is the 4irl-notifs client behind the phone-notification routes. Optional: nil means every notify call
+	// answers notify_unavailable. ProductionDeps sets it only when app.yaml says `notifs: true`.
+	Notifs      platform.Notifier
+	NotifsAppID string
 }
 
 // ProductionDeps wires the real config, Postgres, Cloudflare Access, Redis and embedded files.
@@ -49,14 +54,17 @@ func ProductionDeps(version string, logger *slog.Logger) (Deps, error) {
 	if err != nil {
 		return Deps{}, fmt.Errorf("static files: %w", err)
 	}
+	notifs, notifsAppID := productionNotifs(tmplgoreact.AppYAML, logger)
 	return Deps{
-		Version:    version,
-		Logger:     logger,
-		AppYAML:    tmplgoreact.AppYAML,
-		Static:     static,
-		Addr:       ListenAddr,
-		LoadConfig: platform.LoadConfig,
-		Connect:    ConnectPostgres,
+		Version:     version,
+		Logger:      logger,
+		AppYAML:     tmplgoreact.AppYAML,
+		Static:      static,
+		Addr:        ListenAddr,
+		LoadConfig:  platform.LoadConfig,
+		Connect:     ConnectPostgres,
+		Notifs:      notifs,
+		NotifsAppID: notifsAppID,
 		NewAuth: func(ctx context.Context, cfg platform.Config) (Auth, error) {
 			v, err := platform.NewAccessVerifier(ctx, cfg.AccessTeamDomain, cfg.AccessAud)
 			if err != nil {
@@ -82,6 +90,28 @@ func ProductionDeps(version string, logger *slog.Logger) (Deps, error) {
 		Listen:   func(addr string) (net.Listener, error) { return net.Listen("tcp", addr) },
 		LoadZone: platform.ScheduleZone,
 	}, nil
+}
+
+// productionNotifs builds the notifs client when app.yaml opts in (`notifs: true`). Every failure fails closed: it is
+// logged (step and error text only) and leaves the client nil, so the app still starts and notify calls answer
+// notify_unavailable. The client reads its secret files lazily, so absent secrets are not a startup error.
+func productionNotifs(appYAML []byte, logger *slog.Logger) (platform.Notifier, string) {
+	app, err := platform.DeclaredApp(appYAML)
+	if err != nil {
+		logger.Error("notifs disabled", "step", "declared_app", "error", err)
+		return nil, ""
+	}
+	if !app.Notifs {
+		return nil, ""
+	}
+	appID, err := platform.NotifsAppID(app.Name)
+	if err != nil {
+		logger.Error("notifs disabled", "step", "notifs_app_id", "error", err)
+		return nil, ""
+	}
+	nc := platform.NewNotifsClient(platform.NotifsSecretsDir, appID)
+	nc.Logger = logger
+	return nc, appID
 }
 
 // Run is the whole server lifecycle. The startup sequence is: config, declared jobs, VerifyJobs, database, migrations,
@@ -152,7 +182,12 @@ func Run(ctx context.Context, d Deps) error {
 	jobs.Queue = queue
 
 	srv := &Server{Store: backend, Queue: queue, Jobs: jobsHandler, Static: d.Static, Logger: log,
-		Auth: auth.Middleware, EmailOf: auth.EmailOf}
+		Auth: auth.Middleware, EmailOf: auth.EmailOf, Tx: backend, Notifs: d.Notifs, NotifsAppID: d.NotifsAppID}
+	if app, err := platform.DeclaredApp(d.AppYAML); err != nil {
+		log.Error("notifs disabled", "step", "declared_app", "error", err) // fail closed: routes stay off
+	} else {
+		srv.NotifsEnabled, srv.NotifsName = app.Notifs, app.Name
+	}
 	httpSrv := &http.Server{
 		Handler:           srv.Handler(),
 		ReadHeaderTimeout: 5 * time.Second,

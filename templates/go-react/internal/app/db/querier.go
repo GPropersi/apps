@@ -9,9 +9,22 @@ import (
 )
 
 type Querier interface {
+	CountDestinations(ctx context.Context, email string) (int64, error)
 	CreateItem(ctx context.Context, arg CreateItemParams) (Item, error)
+	DeleteOwnDestination(ctx context.Context, arg DeleteOwnDestinationParams) (int64, error)
+	GetDestinationCounts(ctx context.Context, email string) (GetDestinationCountsRow, error)
+	GetNtfyUserID(ctx context.Context, email string) (string, error)
+	GetOwnDestination(ctx context.Context, arg GetOwnDestinationParams) (GetOwnDestinationRow, error)
+	InsertDestination(ctx context.Context, arg InsertDestinationParams) (InsertDestinationRow, error)
 	InsertJobRun(ctx context.Context, arg InsertJobRunParams) (int64, error)
+	ListDestinations(ctx context.Context, email string) ([]ListDestinationsRow, error)
 	ListItems(ctx context.Context) ([]Item, error)
+	// ---------------------------------------------------------------- phone notifications (per person, keyed by email)
+	// Per-person transaction-scoped advisory lock taken first in every read-then-write of a person's notify rows, so two
+	// concurrent first calls provision once and the destination cap holds.
+	LockNotifsEmail(ctx context.Context, email string) error
+	SetNtfyUserID(ctx context.Context, arg SetNtfyUserIDParams) error
+	SetOwnDestinationStale(ctx context.Context, arg SetOwnDestinationStaleParams) (int64, error)
 }
 
 var _ Querier = (*Queries)(nil)
