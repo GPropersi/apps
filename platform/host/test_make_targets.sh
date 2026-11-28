@@ -202,6 +202,7 @@ case " $* " in
     exit "${CF_MKTEMP_RC:-0}"
     ;;
   *" sudo "*)
+    if [ -n "${CF_STDIN_LOG-}" ]; then cat >> "$CF_STDIN_LOG"; fi
     if [ -n "${CF_BLOCK_FILE-}" ]; then
       : > "$CF_BLOCK_FILE.started"
       n=0
@@ -232,13 +233,13 @@ cf_scp_line="scp platform/host/install-cloudflared-host.sh alias:$cf_path"
 
 cf_make
 expect_rc "host-cloudflared: default run succeeds" 0
-expect_eq "host-cloudflared: ARGS unset defaults to status, scp to the mktemp path, then removes it" "$(cat "$cf_log")" "ssh alias mktemp
+expect_eq "host-cloudflared: ARGS unset defaults to status, scp to the mktemp path, then removes it" "$(cat "$cf_log")" "ssh -- alias mktemp
 $cf_scp_line
-ssh -t alias sudo bash $cf_path status
-ssh alias rm -f $cf_path"
+ssh -t -- alias sudo bash $cf_path status
+ssh -- alias rm -f $cf_path"
 cf_make ARGS='install --foo'
 expect_rc "host-cloudflared: ARGS run succeeds" 0
-expect_out_has_text "$(cat "$cf_log")" "ssh -t alias sudo bash $cf_path install --foo" "host-cloudflared forwards ARGS unchanged"
+expect_out_has_text "$(cat "$cf_log")" "ssh -t -- alias sudo bash $cf_path install --foo" "host-cloudflared forwards ARGS unchanged"
 expect_eq "host-cloudflared: remote copy removed after success" "$(cf_count "rm -f $cf_path")" "1"
 
 cf_make CF_INSTALL_RC=7
@@ -251,9 +252,22 @@ expect_out_has "host-cloudflared: ssh exit 255 is passed through" "host-cloudfla
 expect_eq "host-cloudflared: remote copy removed after rc 255" "$(cf_count "rm -f $cf_path")" "1"
 
 cf_make CF_SCP_RC=3
-if [ "$rc" -ne 0 ]; then _pass; else _fail "host-cloudflared: scp failure exits non-zero" "rc=0"; fi
+expect_out_has "host-cloudflared: the scp rc is passed through" "host-cloudflared] Error 3"
 expect_eq "host-cloudflared: scp failure runs no installer" "$(cf_count "sudo")" "0"
 expect_eq "host-cloudflared: scp failure still removes the remote path" "$(cf_count "rm -f $cf_path")" "1"
+
+# stdin typed at make reaches the interactive ssh -t leg (the sudo password prompt path)
+cf_stdin="$T_TMP/cf-stdin"
+rm -f "$cf_stdin"
+cf_make CF_STDIN_LOG="$cf_stdin" <<< "typed-through-stdin"
+expect_rc "host-cloudflared: a run with stdin succeeds" 0
+expect_eq "host-cloudflared: stdin reaches the ssh -t leg" "$(cat "$cf_stdin" 2> /dev/null)" "typed-through-stdin"
+
+# a HOST that starts with a dash is refused before any ssh or scp
+cf_run make -s -C "$stub_tree" host-cloudflared HOST=-oProxyCommand=x SSH="$cf_dir/ssh" SCP="$cf_dir/scp"
+expect_rc "host-cloudflared: a dash HOST is refused" 2
+expect_out_has "host-cloudflared: a dash HOST names the cause" "must not start with a dash"
+expect_eq "host-cloudflared: a dash HOST runs no ssh or scp" "$(cf_count "ssh\|scp")" "0"
 
 cf_make CF_MKTEMP_RC=9
 expect_out_has "host-cloudflared: ssh mktemp failure exits with ssh's rc" "host-cloudflared] Error 9"
@@ -263,20 +277,23 @@ expect_out_has "host-cloudflared: an empty mktemp path is refused" "ssh mktemp r
 expect_out_has "host-cloudflared: an empty mktemp path exits 1" "host-cloudflared] Error 1"
 expect_eq "host-cloudflared: an empty path runs no scp, sudo or rm" "$(cf_count "scp\|sudo\|rm ")" "0"
 
-# An interrupted run: the stub installer blocks on a sentinel; SIGTERM to make must still remove the remote copy once.
+# An interrupted run: the stub installer blocks on a sentinel; TERM, INT and HUP to make must each still remove the remote
+# copy once. A background job of a non-interactive shell starts with SIGINT ignored, so perl resets it to the default first.
 cf_block="$T_TMP/cf-block"
-rm -f "$cf_block" "$cf_block.started"
-: > "$cf_log"
-env -u ARGS CF_LOG="$cf_log" CF_BLOCK_FILE="$cf_block" make -s -C "$stub_tree" host-cloudflared HOST=alias SSH="$cf_dir/ssh" SCP="$cf_dir/scp" > /dev/null 2>&1 &
-cf_pid=$!
-cf_n=0
-while [ ! -e "$cf_block.started" ] && [ "$cf_n" -lt 100 ]; do sleep 0.1; cf_n=$((cf_n + 1)); done
-kill -TERM "$cf_pid" 2> /dev/null || true
-cf_rc=0
-wait "$cf_pid" || cf_rc=$?
-: > "$cf_block"
-if [ "$cf_rc" -ne 0 ]; then _pass; else _fail "host-cloudflared: an interrupted run exits non-zero" "rc=0"; fi
-expect_eq "host-cloudflared: an interrupted run removes the remote path exactly once" "$(cf_count "rm -f $cf_path")" "1"
+for cf_sig in TERM INT HUP; do
+  rm -f "$cf_block" "$cf_block.started"
+  : > "$cf_log"
+  env -u ARGS CF_LOG="$cf_log" CF_BLOCK_FILE="$cf_block" perl -e '$SIG{INT} = "DEFAULT"; exec @ARGV or die "exec: $!"' make -s -C "$stub_tree" host-cloudflared HOST=alias SSH="$cf_dir/ssh" SCP="$cf_dir/scp" > /dev/null 2>&1 &
+  cf_pid=$!
+  cf_n=0
+  while [ ! -e "$cf_block.started" ] && [ "$cf_n" -lt 100 ]; do sleep 0.1; cf_n=$((cf_n + 1)); done
+  kill -"$cf_sig" "$cf_pid" 2> /dev/null || true
+  cf_rc=0
+  { wait "$cf_pid" || cf_rc=$?; } 2> /dev/null
+  : > "$cf_block"
+  if [ "$cf_rc" -ne 0 ]; then _pass; else _fail "host-cloudflared: a $cf_sig-interrupted run exits non-zero" "rc=0"; fi
+  expect_eq "host-cloudflared: a $cf_sig-interrupted run removes the remote path exactly once" "$(cf_count "rm -f $cf_path")" "1"
+done
 
 # make test on scratch trees: a failing test fails the run, a passing tree passes, an empty tree is an error.
 scratch_make() {

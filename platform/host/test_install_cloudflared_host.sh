@@ -84,6 +84,8 @@ case "$1" in
       echo "cftoken:x:64321:$(cat "$STATE/group_members" 2>/dev/null)"
       exit 0
     fi
+    # a bare `getent group` lists every entry: $STATE/group_all (absent: nothing listed)
+    if [ -z "${2:-}" ]; then cat "$STATE/group_all" 2>/dev/null; exit 0; fi
     exit 2 ;;
   passwd) cat "$STATE/passwd" 2>/dev/null; exit 0 ;;
 esac
@@ -254,6 +256,33 @@ expect_eq "a second install prints only already: lines plus the closing line" "$
 expect_out_has "a second install still prints the closing line" "not started:"
 no_docker_calls "a second install makes no docker call"
 
+# install repairs drift: a changed compose, a wrong mode, a wrong owner, a wrong install-dir mode
+installed
+echo "# drift" >> "$R/opt/platform/cloudflared/compose.yaml"
+chmod 600 "$R/opt/platform/cloudflared/compose.yaml"
+ins install
+expect_rc "install repairs a drifted compose" 0
+expect_out_has "repair of the compose is reported" "changed: $R/opt/platform/cloudflared/compose.yaml"
+expect_eq "the repaired compose is byte-identical to the tracked source" "$(cmp -s "$R/opt/platform/cloudflared/compose.yaml" "$repo_compose" && echo same)" "same"
+expect_eq "the repaired compose mode is 644" "$(/usr/bin/stat -c %a "$R/opt/platform/cloudflared/compose.yaml")" "644"
+
+installed
+chmod 700 "$R/opt/platform/cloudflared"
+ins install
+expect_rc "install repairs the install directory mode" 0
+expect_out_has "repair of the install directory is reported" "changed: $R/opt/platform/cloudflared/"
+expect_eq "the repaired install directory mode is 755" "$(/usr/bin/stat -c %a "$R/opt/platform/cloudflared")" "755"
+
+installed
+echo "compose.yaml 1000:1000" > "$STATE/stat_override"
+ins install
+expect_rc "install repairs a wrong compose owner" 0
+expect_out_has "repair of the compose owner is reported" "changed: $R/opt/platform/cloudflared/compose.yaml"
+expect_calls_has "the repair chowns the compose to root" "chown root:root $R/opt/platform/cloudflared/compose.yaml.new"
+rm -f "$STATE/stat_override"
+ins install
+expect_out_lacks "a later install is a no-op once the owner is right" "changed:"
+
 # the default subcommand is status
 ins
 expect_rc "no argument runs status" 0
@@ -297,6 +326,9 @@ c_grp_absent() { touch "$STATE/group_absent"; }
 c_grp_member() { echo "claude" > "$STATE/group_members"; }
 c_grp_primary() { echo 'svc:x:1100:64321::/home/svc:/bin/false' >> "$STATE/passwd"; }
 c_grp_docker() { echo 64321 > "$STATE/docker_gid"; }
+c_grp_dup_member() { printf '%s\n' 'cftoken:x:64321:' 'other:x:64321:bob' > "$STATE/group_all"; }
+c_grp_dup() { printf '%s\n' 'cftoken:x:64321:' 'other:x:64321:' > "$STATE/group_all"; }
+c_acct_unlistable() { rm -f "$STATE/passwd"; }
 c_sock_absent() { rm "$T_TMP/dsock"; }
 c_opt_symlink() { mkdir -p "$R/real_opt" "$R/opt"; ln -s ../real_opt "$R/opt/platform"; }
 c_inst_symlink() { mkdir -p "$R/real_inst" "$R/opt/platform"; ln -s ../../real_inst "$R/opt/platform/cloudflared"; }
@@ -321,6 +353,9 @@ precond "token group missing" c_grp_absent "no group with gid 64321"
 precond "token group has members" c_grp_member "has members"
 precond "token group is a primary group" c_grp_primary "is an account's primary group"
 precond "token group is the Docker socket's group" c_grp_docker "Docker socket's group"
+precond "token group second entry has members" c_grp_dup_member "a group entry with gid 64321 has members"
+precond "token group gid duplicated" c_grp_dup "more than one group entry carries gid 64321"
+precond "accounts cannot be listed" c_acct_unlistable "cannot list accounts"
 precond "Docker socket absent" c_sock_absent "Docker must be installed first"
 precond "symlinked /opt/platform" c_opt_symlink "path is a symlink: /opt/platform"
 precond "symlinked install directory" c_inst_symlink "path is a symlink: /opt/platform/cloudflared"
@@ -522,6 +557,41 @@ listener_case "a grandchild of the container pid" no l_grandchild
 listener_case "a foreign chain" yes l_foreign
 listener_case "a listener with no container running" yes l_no_container
 listener_case "both colours running, either counts" no l_both
+l_wildcard() { printf 'LISTEN 0 4096 0.0.0.0:20251 0.0.0.0:* users:(("cloudflared",pid=900,fd=3))\n' > "$STATE/ss_out"; echo 1 > "$STATE/ppid_900"; }
+listener_case "a wildcard bind on a watched port (reported or ignored, never a failure)" no l_wildcard
+
+# ss itself failing is a note, never a failure
+installed
+touch "$STATE/ss_fail"
+ins status
+expect_rc "status passes when ss fails" 0
+expect_out_has "status notes the ss failure" "note: ss failed"
+ins verify
+expect_rc "verify passes when ss fails" 0
+expect_out_has "verify notes the ss failure" "note: ss failed"
+
+# ss missing from PATH is a note, never a failure
+installed
+noss="$T_TMP/noss"
+rm -rf "$noss"
+mkdir -p "$noss"
+saved_path="$PATH"
+IFS=: read -r -a path_dirs <<<"$PATH"
+for d in "${path_dirs[@]}"; do
+  [ -d "$d" ] || continue
+  for f in "$d"/*; do
+    b="${f##*/}"
+    [ "$b" != "ss" ] || continue
+    [ -e "$noss/$b" ] || ln -s "$f" "$noss/$b" 2>/dev/null || true
+  done
+done
+PATH="$noss"
+export PATH
+ins status
+PATH="$saved_path"
+export PATH
+expect_rc "status passes when ss is not installed" 0
+expect_out_has "status notes that ss is missing" "note: ss not found"
 
 installed
 l_unreachable

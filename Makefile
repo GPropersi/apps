@@ -98,15 +98,16 @@ host-cloudflared: ## LIVE: host-network cloudflared compose installer for non-Pi
 	@[ -n "$$HOST" ] || { echo 'usage: make host-cloudflared HOST=<ssh-alias> [ARGS=...]' >&2; exit 2; }
 	@# No passwordless sudo on these hosts: copy the installer to a private remote path, run it under an interactive sudo, always remove it.
 	@# ARGS words must be plain tokens (no spaces or shell metacharacters): the remote shell re-parses them as root.
-	@p=$$($(SSH) "$$HOST" mktemp); rc=$$?; \
+	@case "$$HOST" in -*) echo 'host-cloudflared: HOST must not start with a dash' >&2; exit 2 ;; esac; \
+	p=$$($(SSH) -- "$$HOST" mktemp); rc=$$?; \
 	[ "$$rc" -eq 0 ] || exit "$$rc"; \
 	[ -n "$$p" ] || { echo "host-cloudflared: ssh mktemp returned an empty path" >&2; exit 1; }; \
 	pid=; \
-	cleanup() { [ -z "$$pid" ] || kill "$$pid" 2>/dev/null; $(SSH) "$$HOST" rm -f "$$p"; }; \
+	cleanup() { [ -z "$$pid" ] || kill "$$pid" 2>/dev/null; $(SSH) -- "$$HOST" rm -f "$$p"; }; \
 	trap cleanup EXIT; trap 'exit 143' TERM INT HUP; \
 	$(SCP) platform/host/install-cloudflared-host.sh "$$HOST:$$p" || exit $$?; \
 	exec 3<&0; \
-	$(SSH) -t "$$HOST" sudo bash "$$p" $${ARGS:-status} <&3 & pid=$$!; \
+	$(SSH) -t -- "$$HOST" sudo bash "$$p" $${ARGS:-status} <&3 & pid=$$!; \
 	wait "$$pid"; rc=$$?; pid=; exit $$rc
 
 app-ls: ## List the registered apps (apps/*/app.yaml), registry only and offline; ignores HOST

@@ -23,6 +23,10 @@ img_re='^ghcr\.io/gpropersi/cloudflared-supervisor:[0-9]+@sha256:[0-9a-f]{64}$'
 # A different, valid digest, assembled at run time (a literal 64-hex run would trip the secrets scans).
 other_digest="sha256:$(printf '%064d' 0 | tr '0' 'a')"
 
+# The token group the installer checks and the compose group_add must name the same gid.
+token_gid="$(sed -n 's/^readonly TOKEN_GID=\([0-9][0-9]*\)$/\1/p' "$here/../host/install-cloudflared-host.sh")"
+[ -n "$token_gid" ] || { _fail "could not read TOKEN_GID from the installer"; exit 1; }
+
 REASONS=()
 r() { REASONS+=("$*"); }
 
@@ -61,6 +65,7 @@ run_checks() {
     ys_has "$hf" "services/$svc/labels" && r "$svc: labels are not allowed (no platform.app label)"
     grep -qF 'docker.sock' <<<"$(ys_list "$hf" "services/$svc/volumes")" && r "$svc: the Docker socket is mounted"
     ys_has "$hf" "services/$svc/environment/TUNNEL_TOKEN" && r "$svc: inline token is not allowed"
+    [ "$(ys_list "$hf" "services/$svc/group_add")" = "$token_gid" ] || r "$svc: group_add must be exactly the installer's TOKEN_GID ($token_gid)"
     [[ "$(ys_get "$hf" "services/$svc/image")" =~ $img_re ]] || r "$svc: image must be a pinned gpropersi supervisor image (floating or unpinned)"
     grep -qxF "/etc/platform/cloudflared.token:/run/cloudflared/token:ro" <<<"$(ys_list "$hf" "services/$svc/volumes")" || r "$svc: token mount must be read-only"
     grep -qxF "/etc/platform/cloudflared.webhook:/run/secrets/cloudflared-webhook:ro" <<<"$(ys_list "$hf" "services/$svc/volumes")" || r "$svc: webhook mount must be read-only and outside the state directory"
@@ -181,6 +186,7 @@ mutate "logging key added" "logging is not allowed" host cloudflared-green after
 mutate "project named like the app host" "name must be platform-cloudflared" host - replace '^name:' 'name: platform-ingress'
 mutate "healthcheck interval changed in the app host file" "parity: blue" pi cloudflared-blue replace '^      interval:' '      interval: 30s'
 mutate "user changed in the host file" "parity: green" host cloudflared-green replace '^    user:' '    user: "0:0"'
+mutate "group_add differs from the installer's TOKEN_GID" "group_add must be exactly the installer's TOKEN_GID" host cloudflared-green replace '^      - "64321"' '      - "64322"'
 mutate "Docker socket mounted" "the Docker socket is mounted" host cloudflared-blue after '^    volumes:' '      - /var/run/docker.sock:/var/run/docker.sock:ro'
 mutate "inline token" "inline token is not allowed" host cloudflared-blue after '^    environment:' '      TUNNEL_TOKEN: placeholder'
 mutate "floating tag" "floating or unpinned" host cloudflared-blue replace '^    image:' '    image: ghcr.io/gpropersi/cloudflared-supervisor:latest'

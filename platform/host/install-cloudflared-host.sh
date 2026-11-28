@@ -273,10 +273,14 @@ print_instructions() {
   err "Create the host-side inputs yourself (nothing here writes a secret or edits /etc/group):"
   err "  sudo groupadd --gid $TOKEN_GID cloudflared-token       # once; no members, no account may use it as primary group"
   err "  sudo install -d -m 0755 -o root -g root /etc/platform"
-  err "  sudo install -m 0640 -o root -g $TOKEN_GID /dev/null $TOKEN_FILE"
+  err "Create each secret file only if it does not exist yet (the [ -e ] guard never overwrites an existing secret):"
+  err "  [ -e $TOKEN_FILE ] || sudo install -m 0640 -o root -g $TOKEN_GID /dev/null $TOKEN_FILE"
   err "  sudo tee $TOKEN_FILE >/dev/null     # fill it from this host's existing connector token, Enter, Ctrl-D"
-  err "  sudo install -m 0600 -o 65532 -g 65532 /dev/null $WEBHOOK_FILE"
+  err "  [ -e $WEBHOOK_FILE ] || sudo install -m 0600 -o 65532 -g 65532 /dev/null $WEBHOOK_FILE"
   err "  sudo tee $WEBHOOK_FILE >/dev/null   # fill it, then Ctrl-D"
+  err "If a file already exists with the wrong mode or owner, fix it in place instead:"
+  err "  sudo chown root:$TOKEN_GID $TOKEN_FILE && sudo chmod 0640 $TOKEN_FILE"
+  err "  sudo chown 65532:65532 $WEBHOOK_FILE && sudo chmod 0600 $WEBHOOK_FILE"
   err "The webhook on every non-Pi host is a copy of the same webhook the Pi uses (the stronghold drift-check webhook):"
   err "copy it yourself over a trusted channel; never paste it into chat or git."
 }
@@ -424,7 +428,6 @@ check_listeners() {
 
 do_install() {
   local problems="" line sd tmpc
-  SKIP_SOCKET_GROUP=0
   problems="$(chk_token_file)"$'\n'"$(chk_token_group)"$'\n'"$(chk_webhook_file)"$'\n'"$(chk_symlinks)"
   if [ ! -e "$SOCKET" ]; then problems+=$'\n'"Docker must be installed first: the Docker socket $SOCKET does not exist"; fi
   problems="$(sed '/^$/d' <<<"$problems")"
