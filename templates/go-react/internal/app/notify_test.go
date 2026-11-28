@@ -23,9 +23,9 @@ var notifyRoutes = []struct {
 	wired        bool
 }{
 	{"GET", "/api/notify/destinations", false},
-	{"POST", "/api/notify/ntfy", false},
-	{"POST", "/api/notify/ntfy/reset", false},
-	{"POST", "/api/notify/ntfy/test", false},
+	{"POST", "/api/notify/ntfy", true},
+	{"POST", "/api/notify/ntfy/reset", true},
+	{"POST", "/api/notify/ntfy/test", true},
 	{"POST", "/api/notify/destinations", false},
 	{"POST", "/api/notify/destinations/1/check", false},
 	{"POST", "/api/notify/destinations/1/test", false},

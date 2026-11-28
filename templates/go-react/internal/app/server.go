@@ -91,6 +91,11 @@ func (s *Server) Handler() http.Handler {
 		api.MethodNotAllowed(func(w http.ResponseWriter, _ *http.Request) {
 			writeError(w, http.StatusMethodNotAllowed, "method_not_allowed")
 		})
+		if s.NotifsEnabled { // fail closed: without the flag these paths fall to the JSON 404
+			api.With(s.stateChanging).Post("/notify/ntfy", s.handleNtfy)
+			api.With(s.stateChanging).Post("/notify/ntfy/reset", s.handleNtfyReset)
+			api.With(s.stateChanging).Post("/notify/ntfy/test", s.handleNtfyTest)
+		}
 		api.Get("/me", s.handleMe)
 		api.Get("/items", s.handleListItems)
 		api.With(s.stateChanging).Post("/items", s.handleCreateItem)
