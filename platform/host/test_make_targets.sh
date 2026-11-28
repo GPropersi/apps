@@ -183,7 +183,7 @@ run_cmd env ARGS='myapp --confirm myapp --stop' make -s -C "$stub_tree" host-app
 expect_eq "host-app-rm argv" "$(t_calls)" "ssh -o BatchMode=yes -- alias sudo -n /opt/platform/data/rm-db.sh myapp --confirm myapp --stop"
 
 # host-cloudflared: the hosts have no passwordless sudo, so the target copies the installer to a private remote path
-# (ssh mktemp), runs it under `ssh -t ... sudo bash`, and always removes the copy. SSH= and SCP= point at stubs that
+# (ssh mktemp), runs it under `ssh -t ... sudo bash`, and always removes the copy. CF_SSH= and CF_SCP= point at stubs that
 # log their argv to CF_LOG and dispatch on it; the stub installer never runs, so nothing reaches a host.
 cf_dir="$T_TMP/cf-stubs"
 mkdir -p "$cf_dir" "$stub_tree/platform/host"
@@ -225,8 +225,8 @@ cf_run() { # [VAR=val ...] command...
   : > "$cf_log"
   run_cmd env -u ARGS CF_LOG="$cf_log" "$@"
 }
-cf_make() { # env assignments...; make runs with HOST=alias and SSH/SCP stubs
-  cf_run "$@" make -s -C "$stub_tree" host-cloudflared HOST=alias SSH="$cf_dir/ssh" SCP="$cf_dir/scp"
+cf_make() { # env assignments...; make runs with HOST=alias and CF_SSH/CF_SCP stubs
+  cf_run "$@" make -s -C "$stub_tree" host-cloudflared HOST=alias CF_SSH="$cf_dir/ssh" CF_SCP="$cf_dir/scp"
 }
 cf_count() { grep -c -- "$1" "$cf_log" || true; }
 cf_scp_line="scp platform/host/install-cloudflared-host.sh alias:$cf_path"
@@ -264,7 +264,7 @@ expect_rc "host-cloudflared: a run with stdin succeeds" 0
 expect_eq "host-cloudflared: stdin reaches the ssh -t leg" "$(cat "$cf_stdin" 2> /dev/null)" "typed-through-stdin"
 
 # a HOST that starts with a dash is refused before any ssh or scp
-cf_run make -s -C "$stub_tree" host-cloudflared HOST=-oProxyCommand=x SSH="$cf_dir/ssh" SCP="$cf_dir/scp"
+cf_run make -s -C "$stub_tree" host-cloudflared HOST=-oProxyCommand=x CF_SSH="$cf_dir/ssh" CF_SCP="$cf_dir/scp"
 expect_rc "host-cloudflared: a dash HOST is refused" 2
 expect_out_has "host-cloudflared: a dash HOST names the cause" "must not start with a dash"
 expect_eq "host-cloudflared: a dash HOST runs no ssh or scp" "$(cf_count "ssh\|scp")" "0"
@@ -283,7 +283,7 @@ cf_block="$T_TMP/cf-block"
 for cf_sig in TERM INT HUP; do
   rm -f "$cf_block" "$cf_block.started"
   : > "$cf_log"
-  env -u ARGS CF_LOG="$cf_log" CF_BLOCK_FILE="$cf_block" perl -e '$SIG{INT} = "DEFAULT"; exec @ARGV or die "exec: $!"' make -s -C "$stub_tree" host-cloudflared HOST=alias SSH="$cf_dir/ssh" SCP="$cf_dir/scp" > /dev/null 2>&1 &
+  env -u ARGS CF_LOG="$cf_log" CF_BLOCK_FILE="$cf_block" perl -e '$SIG{INT} = "DEFAULT"; exec @ARGV or die "exec: $!"' make -s -C "$stub_tree" host-cloudflared HOST=alias CF_SSH="$cf_dir/ssh" CF_SCP="$cf_dir/scp" > /dev/null 2>&1 &
   cf_pid=$!
   cf_n=0
   while [ ! -e "$cf_block.started" ] && [ "$cf_n" -lt 100 ]; do sleep 0.1; cf_n=$((cf_n + 1)); done

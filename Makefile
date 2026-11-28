@@ -1,7 +1,8 @@
 .DEFAULT_GOAL := help
-SSH ?= ssh
-SCP ?= scp
-.PHONY: host-cloudflared help lint test test-changed test-app embed app-ls app-sqlc app-new host-app-ls host-deploy-user host-claude-access host-verify-egress host-ingress host-access-env host-data host-jobs host-backup host-restore host-app-rm host-verify-ingress
+# CF_SSH / CF_SCP are test seams: host-cloudflared calls them, and its test points them at stubs.
+CF_SSH ?= ssh
+CF_SCP ?= scp
+.PHONY: help lint test test-changed test-app embed app-ls app-sqlc app-new host-app-ls host-deploy-user host-claude-access host-verify-egress host-ingress host-access-env host-data host-jobs host-backup host-restore host-app-rm host-verify-ingress host-cloudflared
 
 # Live-host targets (host-*) stream a script to the app host over SSH. HOST (an ssh alias) is required, with no
 # default alias; ARGS is passed to the script. They are for you to run, never inside a worktree.
@@ -68,6 +69,22 @@ host-ingress: ## LIVE: ingress stack installer (HOST=<alias> ARGS="install | ver
 	@[ -n "$$HOST" ] || { echo 'usage: make host-ingress HOST=<ssh-alias> [ARGS="install | status | verify | verify --live [--hold]"]' >&2; exit 2; }
 	@platform/host/install-ingress.sh $${ARGS:-status} --host "$$HOST"
 
+host-cloudflared: ## LIVE: host-network cloudflared compose installer for non-Pi tunnel hosts, prompts for sudo (HOST=<alias> ARGS="install | verify"; default status)
+	@[ -n "$$HOST" ] || { echo 'usage: make host-cloudflared HOST=<ssh-alias> [ARGS=...]' >&2; exit 2; }
+	@# No passwordless sudo on these hosts: copy the installer to a private remote path, run it under an interactive sudo, always remove it.
+	@# ARGS words must be plain tokens (no spaces or shell metacharacters): the remote shell re-parses them as root.
+	@case "$$HOST" in -*) echo 'host-cloudflared: HOST must not start with a dash' >&2; exit 2 ;; esac; \
+	remote_path=$$($(CF_SSH) -- "$$HOST" mktemp); exit_code=$$?; \
+	[ "$$exit_code" -eq 0 ] || exit "$$exit_code"; \
+	[ -n "$$remote_path" ] || { echo "host-cloudflared: ssh mktemp returned an empty path" >&2; exit 1; }; \
+	ssh_pid=; \
+	cleanup() { [ -z "$$ssh_pid" ] || kill "$$ssh_pid" 2>/dev/null; $(CF_SSH) -- "$$HOST" rm -f "$$remote_path"; }; \
+	trap cleanup EXIT; trap 'exit 143' TERM INT HUP; \
+	$(CF_SCP) platform/host/install-cloudflared-host.sh "$$HOST:$$remote_path" || exit $$?; \
+	exec 3<&0; \
+	$(CF_SSH) -t -- "$$HOST" sudo bash "$$remote_path" $${ARGS:-status} <&3 & ssh_pid=$$!; \
+	wait "$$ssh_pid"; exit_code=$$?; ssh_pid=; exit $$exit_code
+
 host-access-env: ## LIVE: write /etc/platform/access.env from ACCESS_* env or the GitHub environment variables (HOST=<alias> [ARGS="--force | --check | --env NAME"])
 	@[ -n "$$HOST" ] || { echo 'usage: make host-access-env HOST=<ssh-alias> [ARGS="--force | --check | --env NAME"]' >&2; exit 2; }
 	@platform/host/write-access-env.sh $$ARGS --host "$$HOST"
@@ -93,22 +110,6 @@ host-app-rm: ## LIVE, DESTRUCTIVE: remove a retired app completely over ssh as r
 	@[ -n "$$HOST" ] || { echo 'usage: make host-app-rm HOST=<ssh-alias> ARGS="APP --confirm APP [--stop]"' >&2; exit 2; }
 	@# ARGS words must be plain tokens (no spaces or shell metacharacters): the remote shell re-parses them as root.
 	@ssh -o BatchMode=yes -- "$$HOST" sudo -n /opt/platform/data/rm-db.sh $$ARGS
-
-host-cloudflared: ## LIVE: host-network cloudflared compose installer for non-Pi tunnel hosts, prompts for sudo (HOST=<alias> ARGS="install | verify"; default status)
-	@[ -n "$$HOST" ] || { echo 'usage: make host-cloudflared HOST=<ssh-alias> [ARGS=...]' >&2; exit 2; }
-	@# No passwordless sudo on these hosts: copy the installer to a private remote path, run it under an interactive sudo, always remove it.
-	@# ARGS words must be plain tokens (no spaces or shell metacharacters): the remote shell re-parses them as root.
-	@case "$$HOST" in -*) echo 'host-cloudflared: HOST must not start with a dash' >&2; exit 2 ;; esac; \
-	p=$$($(SSH) -- "$$HOST" mktemp); rc=$$?; \
-	[ "$$rc" -eq 0 ] || exit "$$rc"; \
-	[ -n "$$p" ] || { echo "host-cloudflared: ssh mktemp returned an empty path" >&2; exit 1; }; \
-	pid=; \
-	cleanup() { [ -z "$$pid" ] || kill "$$pid" 2>/dev/null; $(SSH) -- "$$HOST" rm -f "$$p"; }; \
-	trap cleanup EXIT; trap 'exit 143' TERM INT HUP; \
-	$(SCP) platform/host/install-cloudflared-host.sh "$$HOST:$$p" || exit $$?; \
-	exec 3<&0; \
-	$(SSH) -t -- "$$HOST" sudo bash "$$p" $${ARGS:-status} <&3 & pid=$$!; \
-	wait "$$pid"; rc=$$?; pid=; exit $$rc
 
 app-ls: ## List the registered apps (apps/*/app.yaml), registry only and offline; ignores HOST
 	@platform/registry/app-ls.sh

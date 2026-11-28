@@ -241,6 +241,9 @@ Change the idle colour's image pin in `platform/ingress/compose.yaml` in the rep
 installer with `make host-ingress HOST=<alias> ARGS="install"` (it starts no connector while one runs). Then start the
 idle colour, wait for the readiness gate on it, then stop the old one. The next bump targets the other colour.
 
+`platform/ingress/compose.host-network.yaml` (the non-Pi hosts) carries its own image pins, bumped separately; see
+"Non-Pi rollback and pin bumps" below. `test_cloudflared_host_stack.sh` prints a note when the two files' pins differ.
+
 ```
 sudo docker compose -p platform-ingress -f /opt/platform/ingress/compose.yaml --env-file /etc/platform/ingress.env up -d <idle>
 ```

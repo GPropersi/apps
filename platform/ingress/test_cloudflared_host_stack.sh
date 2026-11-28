@@ -87,6 +87,17 @@ run_checks() {
   done
 }
 
+# pin_note <host-compose> <pi-compose>: print a note for each colour whose image pin differs between the files.
+# Advisory only: the two files are bumped separately, so a difference is allowed, just worth seeing.
+pin_note() {
+  local hf="$T_TMP/note-host-flat" pf="$T_TMP/note-pi-flat" c
+  flat "$1" "$hf" && flat "$2" "$pf" || return 0
+  for c in $colours; do
+    [ "$(ys_get "$hf" "services/cloudflared-$c/image")" = "$(ys_get "$pf" "services/cloudflared-$c/image")" ] \
+      || echo "note: cloudflared-$c image pin differs between compose.host-network.yaml and compose.yaml (bump both, or accept the divergence)"
+  done
+}
+
 # ---- mutation helper (awk; pattern and text through the environment) ----
 # m_edit <file> <mode> <regex> [text]: mode replace|delete|after|dropkey, limited to service M_SVC when set.
 m_edit() {
@@ -163,6 +174,17 @@ keeps_parity() {
 # ---- the real files ----
 run_checks "$here/compose.host-network.yaml" "$here/compose.yaml"
 if [ "${#REASONS[@]}" = 0 ]; then _pass; else _fail "the real files must pass" "${REASONS[*]}"; fi
+
+# ---- image pin divergence note (non-failing) ----
+note_out="$(pin_note "$here/compose.host-network.yaml" "$here/compose.yaml")"
+[ -z "$note_out" ] || echo "$note_out"
+cp "$here/compose.host-network.yaml" "$T_TMP/same-host.yaml"
+cp "$here/compose.host-network.yaml" "$T_TMP/same-pi.yaml"
+if [ -z "$(pin_note "$T_TMP/same-host.yaml" "$T_TMP/same-pi.yaml")" ]; then _pass; else _fail "identical pins must print no note"; fi
+cp "$here/compose.host-network.yaml" "$T_TMP/div-host.yaml"
+M_SVC=cloudflared-blue m_edit "$T_TMP/div-host.yaml" replace '^    image:' "    image: ghcr.io/gpropersi/cloudflared-supervisor:1@${other_digest}"
+div_out="$(pin_note "$T_TMP/div-host.yaml" "$T_TMP/same-pi.yaml")"
+if [[ "$div_out" == *"cloudflared-blue image pin differs"* && "$div_out" != *"cloudflared-green"* ]]; then _pass; else _fail "a repinned colour must print exactly its note" "got: $div_out"; fi
 
 # ---- parity negative cases ----
 keeps_parity "repin blue in the host file" host cloudflared-blue replace '^    image:' "    image: ghcr.io/gpropersi/cloudflared-supervisor:1@${other_digest}"
